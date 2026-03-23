@@ -5,20 +5,30 @@
 #include "CoreMinimal.h"
 #include "WeatherTypes.generated.h"
 
-USTRUCT()
+UENUM(BlueprintType)
+enum class EStormType : uint8
+{
+	None			UMETA(DisplayName = "None"),
+	Thunderstorm	UMETA(DisplayName = "Thunderstorm"),
+	Supercell		UMETA(DisplayName = "Supercell"),
+	Tornado			UMETA(DisplayName = "Tornado"),
+	Hurricane		UMETA(DisplayName = "Hurricane")
+};
+
+USTRUCT(BlueprintType)
 struct FWeatherCell
 {
 	GENERATED_BODY()
 
-	UPROPERTY(meta = (Units = "Celsius"))					float Temperature;
-	UPROPERTY(meta = (ClampMin = "0.0", ClampMax = "1.0"))	float Humidity; // 0.0-1.0
-	UPROPERTY(meta = (ForceUnits = "hPa"))					float Pressure;
-	UPROPERTY()												FVector2D WindVector; // Speed and Direction
-	UPROPERTY(meta = (ForceUnits = "mm/h"))					float CAPE; // Convective Available Potential Energy
-	UPROPERTY()												float PrecipitationIntensity;
-	UPROPERTY(meta = (Units = "MetersPerSecond"))			float UpdraftVelocity;
-	UPROPERTY(meta = (Units = "Meters"))					float FreezingLevelAltitude;
-	UPROPERTY(meta = (Units = "Millimeters"))				float HailstoneDiameter; // 0 = no Hail
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Weather|Thermodynamics", meta = (Units = "Celsius"))					float Temperature;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Weather|Thermodynamics", meta = (ClampMin = "0.0", ClampMax = "1.0"))	float Humidity; // 0.0-1.0
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Weather|Thermodynamics", meta = (ForceUnits = "hPa"))					float Pressure;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Weather|Wind")															FVector2D WindVector; // Speed and Direction m/s
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Weather|Energy", meta = (ForceUnits = "mm/h"))							float CAPE; // Convective Available Potential Energy
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Weather|Vertical", meta = (Units = "MetersPerSecond"))					float UpdraftVelocity;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Weather|Precipitation")													float PrecipitationIntensity; // J/kg
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Weather|Precipitation", meta = (Units = "Meters"))						float FreezingLevelAltitude;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Weather|Precipitation", meta = (Units = "Millimeters"))					float HailstoneDiameter; // 0 = no Hail
 
 	FWeatherCell()
 	{
