@@ -1,4 +1,4 @@
-// Fill out your copyright notice in the Description page of Project Settings.
+ï»¿// Fill out your copyright notice in the Description page of Project Settings.
 
 
 #include "WeatherSimulationThread.h"
@@ -6,36 +6,47 @@
 #include "HAL/Event.h"
 #include "GenericPlatform/GenericPlatformProcess.h"
 
-FWeatherSimulationThread::FWeatherSimulationThread(int InGridSizeX, int InGridSizeY, float InCellSize) : GridSizeX(InGridSizeX), GridSizeY(InGridSizeY), CellSize(InCellSize)
+DEFINE_LOG_CATEGORY_STATIC(LogWeatherThread, Log, All);
+
+// ============================================================
+// Construction / Destruction
+// ============================================================
+
+FWeatherSimulationThread::FWeatherSimulationThread(int32 InGridSizeX, int32 InGridSizeY, float InCellSize)
+	: GridSizeX(InGridSizeX)
+	, GridSizeY(InGridSizeY)
+	, CellSize(InCellSize)
 {
-	// Création d'un événement de synchronisation (Sémaphore) avec Auto-Reset = true
-	WaitEvent = FGenericPlatformProcess::GetSynchEventFromPool(true);
+	// AutoReset = false : on appelle Reset() manuellement en fin de Run()
+	// pour un contrÃ´le explicite du cycle veille/rÃ©veil.
+	WaitEvent = FGenericPlatformProcess::GetSynchEventFromPool(false);
 
-	bStopThread = false;
-	bIsCalculating = false;
-	CurrentReadGrid = nullptr;
-	CurrentWriteGrid = nullptr;
-
-	// Création et lancement immédiat du thread OS
 	Thread = FRunnableThread::Create(this, TEXT("WeatherSimulationThread"), 0, TPri_BelowNormal);
+
+	UE_LOG(LogWeatherThread, Log,
+		   TEXT("[WeatherThread] DÃ©marrÃ©. Grille=%dx%d, Cellule=%.0fcm (%.1fm)"),
+		   GridSizeX, GridSizeY, CellSize, CellSize / 100.f);
 }
 
 FWeatherSimulationThread::~FWeatherSimulationThread()
 {
 	if (Thread)
 	{
-		// Demande l'arrêt et attend que le thread finisse son exécution (join)
+		// Kill(true) = attendre la fin du thread (join)
 		Thread->Kill(true);
 		delete Thread;
+		Thread = nullptr;
 	}
-
 	if (WaitEvent)
 	{
-		// Nettoyage de la mémoire
 		FGenericPlatformProcess::ReturnSynchEventToPool(WaitEvent);
 		WaitEvent = nullptr;
 	}
 }
+
+// ============================================================
+// FRunnable Interface
+// ============================================================
 
 bool FWeatherSimulationThread::Init()
 {
@@ -46,191 +57,324 @@ uint32 FWeatherSimulationThread::Run()
 {
 	while (!bStopThread)
 	{
-		// Le thread se met en sommeil ici. Il ne consomme pas de CPU.
-		// Il sera réveillé par WaitEvent->Trigger() appelé depuis TriggerCalculation() ou Stop().
+		// Le thread dort ici sans consommer de CPU.
+		// RÃ©veillÃ© par WaitEvent->Trigger() depuis TriggerCalculation() ou Stop().
 		WaitEvent->Wait();
 
-		// Si on a été réveillé pour détruire le thread, on sort de la boucle.
 		if (bStopThread) break;
 
-		// On verrouille l'état
 		bIsCalculating = true;
 
-		// Exécution de la simulation physique lourde
 		if (CurrentReadGrid && CurrentWriteGrid)
 		{
+			const double StartTime = FPlatformTime::Seconds();
+
 			PerformSimulationTick();
+
+			const double DurationMs = (FPlatformTime::Seconds() - StartTime) * 1000.0;
+
+			FScopeLock Lock(&MetricsLock);
+			Metrics.LastTickDurationMs = DurationMs;
+			++Metrics.TotalTicksComputed;
 		}
 
-		// Fin du calcul, on libère l'état et on se prépare à redormir
 		bIsCalculating = false;
+
+		// RÃ©initialise manuellement le sÃ©maphore : prÃªt pour le prochain signal.
 		WaitEvent->Reset();
 	}
+
+	UE_LOG(LogWeatherThread, Log, TEXT("[WeatherThread] ArrÃªt propre."));
 	return 0;
 }
 
 void FWeatherSimulationThread::Stop()
 {
 	bStopThread = true;
-
-	if (WaitEvent)
-	{
-		// On réveille le thread une dernière fois pour qu'il puisse évaluer (bStopThread == true) et quitter le Run()
-		WaitEvent->Trigger();
-	}
+	// On rÃ©veille le thread une derniÃ¨re fois pour qu'il Ã©value bStopThread et quitte Run().
+	if (WaitEvent) WaitEvent->Trigger();
 }
 
-void FWeatherSimulationThread::Exit()
-{
-	// Exécuté juste avant la mort du thread. Parfait pour libérer des ressources spécifiques au thread si besoin.
-}
+void FWeatherSimulationThread::Exit() {}
+
+// ============================================================
+// API GameThread
+// ============================================================
 
 void FWeatherSimulationThread::TriggerCalculation(TArray<FWeatherCell>* InReadGrid, TArray<FWeatherCell>* InWriteGrid)
 {
-	// Si le thread n'a pas fini le calcul précédent, on abandonne ce tick de simulation
-	if (bIsCalculating) return;
+	if (bIsCalculating)
+	{
+		FScopeLock Lock(&MetricsLock);
+		++Metrics.SkippedTicks;
+		return;
+	}
 
 	CurrentReadGrid = InReadGrid;
 	CurrentWriteGrid = InWriteGrid;
-
-	// Réveille le thread suspendu sur WaitEvent->Wait()
 	WaitEvent->Trigger();
 }
 
+void FWeatherSimulationThread::AddGridShift(int32 DeltaX, int32 DeltaY, int32 InGlobalOffsetX, int32 InGlobalOffsetY)
+{
+	// ProtÃ©gÃ© car Ã©crit par le GameThread et lu par le thread de simulation.
+	FScopeLock Lock(&ShiftLock);
+	PendingShiftX += DeltaX;
+	PendingShiftY += DeltaY;
+	GlobalOffsetX = InGlobalOffsetX;
+	GlobalOffsetY = InGlobalOffsetY;
+}
+
+FWeatherThreadMetrics FWeatherSimulationThread::GetMetrics()
+{
+	FScopeLock Lock(&MetricsLock);
+	return Metrics;
+}
+
+// ============================================================
+// Simulation (appelÃ©e depuis le thread)
+// ============================================================
+
 void FWeatherSimulationThread::PerformSimulationTick()
 {
+	// --- Ã‰tape 1 : DÃ©calage infini de la grille ---
+	// Modifie CurrentReadGrid en place. C'est sÃ»r : le GameThread ne touche
+	// plus Ã  ce buffer depuis l'appel Ã  TriggerCalculation().
+	ApplyGridShift();
+
+	// --- Ã‰tape 2 & 3 : Physique cellule par cellule ---
+	// On exclut la bordure (1 cellule de marge) gÃ©rÃ©e sÃ©parÃ©ment.
+	for (int32 y = 1; y < GridSizeY - 1; ++y)
+	{
+		for (int32 x = 1; x < GridSizeX - 1; ++x)
+		{
+			const int32 Index = y * GridSizeX + x;
+
+			// Copie de base depuis le buffer source
+			(*CurrentWriteGrid)[Index] = (*CurrentReadGrid)[Index];
+
+			// Advection (transport par le vent) â€” lit depuis Read, Ã©crit dans Write
+			ComputeAdvection(x, y, Index);
+
+			// Thermodynamique â€” lit et Ã©crit dans Write (post-advection)
+			ComputeThermodynamics(Index);
+		}
+	}
+
+	// --- Ã‰tape 4 : Bordure absorbante ---
+	// Amortit les valeurs sur le pourtour pour Ã©viter les artefacts de bord
+	// (rÃ©flexions, accumulations en coin, etc.).
+	for (int32 i = 0; i < GridSizeX * GridSizeY; ++i)
+	{
+		const int32 x = i % GridSizeX;
+		const int32 y = i / GridSizeX;
+
+		if (x == 0 || y == 0 || x == GridSizeX - 1 || y == GridSizeY - 1)
+		{
+			FWeatherCell& Cell = (*CurrentWriteGrid)[i];
+			Cell.Humidity *= 0.5f;
+			Cell.PrecipitationIntensity = 0.f;
+			Cell.CAPE = 0.f;
+			Cell.UpdraftVelocity = 0.f;
+			Cell.HailstoneDiameter = 0.f;
+		}
+	}
+}
+
+// ============================================================
+// Ã‰tape 1 â€” ApplyGridShift
+// DÃ©cale les donnÃ©es de CurrentReadGrid pour suivre le joueur.
+// Les nouvelles cellules dÃ©couvertes en bordure sont gÃ©nÃ©rÃ©es procÃ©duralement.
+// ============================================================
+void FWeatherSimulationThread::ApplyGridShift()
+{
+	// Capture atomique et remise Ã  zÃ©ro du dÃ©calage en attente
+	int32 ShiftX, ShiftY, OffX, OffY;
+	{
+		FScopeLock Lock(&ShiftLock);
+		ShiftX = PendingShiftX;
+		ShiftY = PendingShiftY;
+		OffX = GlobalOffsetX;
+		OffY = GlobalOffsetY;
+		PendingShiftX = 0;
+		PendingShiftY = 0;
+	}
+
+	if (ShiftX == 0 && ShiftY == 0) return;
+
+	// Copie temporaire pour lire les anciennes valeurs sans conflits
+	TArray<FWeatherCell> TempGrid = *CurrentReadGrid;
+
+	int32 NewCellsGenerated = 0;
+
 	for (int32 y = 0; y < GridSizeY; ++y)
 	{
 		for (int32 x = 0; x < GridSizeX; ++x)
 		{
-			int32 Index = y * GridSizeX + x;
+			const int32 Index = y * GridSizeX + x;
 
-			(*CurrentWriteGrid)[Index] = (*CurrentReadGrid)[Index];
-			ComputeAdvection(x, y, Index);
-			ComputeThermodynamics(Index);
+			// OÃ¹ lire dans l'ancienne grille ?
+			// Si le joueur avance de +1 cellule en X, ShiftX=+1 :
+			// la cellule (x) doit maintenant contenir ce qui Ã©tait en (x+1).
+			const int32 SrcX = x + ShiftX;
+			const int32 SrcY = y + ShiftY;
 
-			// --- NOUVEAU : BORDURE DE SÉCURITÉ ---
-			// Si on est sur les bords extrêmes de la carte, on détruit les nuages
-			if (x == 0 || y == 0 || x == GridSizeX - 1 || y == GridSizeY - 1)
+			if (SrcX >= 0 && SrcX < GridSizeX && SrcY >= 0 && SrcY < GridSizeY)
 			{
-				(*CurrentWriteGrid)[Index].Humidity = 0.0f;
-				// Optionnel : on remet à froid pour ne pas étirer la couleur rouge non plus
-				(*CurrentWriteGrid)[Index].Temperature = -5.0f;
+				// Zone connue : on dÃ©place les donnÃ©es existantes
+				(*CurrentReadGrid)[Index] = TempGrid[SrcY * GridSizeX + SrcX];
+			}
+			else
+			{
+				// Nouvelle zone dÃ©couverte : gÃ©nÃ©ration procÃ©durale
+				// On utilise les coordonnÃ©es GLOBALES pour un bruit continu et cohÃ©rent
+				const int32 WorldCellX = x + OffX;
+				const int32 WorldCellY = y + OffY;
+				(*CurrentReadGrid)[Index] = GenerateProceduralCell(WorldCellX, WorldCellY);
+				++NewCellsGenerated;
 			}
 		}
 	}
-}
 
-void FWeatherSimulationThread::ComputeThermodynamics(int Index)
-{
-	FWeatherCell& OutCell = (*CurrentWriteGrid)[Index];
-	FWeatherCell& InCell = (*CurrentReadGrid)[Index];
-
-	int32 x = Index % GridSizeX;
-	int32 y = Index / GridSizeX;
-
-	// 1. LE VOLCAN (Source de chaleur)
-	// 1. LE VOLCAN (Source de chaleur intermittente)
-	if (x >= 2 && x <= 5 && y >= 2 && y <= 5)
 	{
-		// On crée un "Timer" basé sur l'index temporel (ou un Random plus strict)
-		// 10% de chance d'émettre un gros nuage
-		if (FMath::FRand() > 0.7f)
-		{
-			OutCell.Temperature = 40.f;
-			OutCell.Humidity = 1.0f; // Plein de vapeur
-		}
-		else
-		{
-			// On force l'air à être sec le reste du temps pour bien séparer les nuages
-			OutCell.Temperature = -5.f;
-			OutCell.Humidity = 0.0f;
-		}
-	}
-
-	// 2. ÉVAPORATION (Génération d'humidité)
-	// Plus il fait chaud, plus l'eau s'évapore du sol.
-	// On ajoute un tout petit peu d'humidité à chaque frame, plafonné à 1.0 (100%)
-	float EvaporationRate = FMath::Max(0.0f, OutCell.Temperature * 0.0005f);
-	OutCell.Humidity = FMath::Clamp(InCell.Humidity + EvaporationRate, 0.0f, 1.0f);
-
-	// 3. CONVECTION ET CAPE (Instabilité)
-	// L'air chaud ET humide crée de l'instabilité (orage).
-	if (OutCell.Temperature > 20.f && OutCell.Humidity > 0.6f)
-	{
-		// Formule de gameplay : Température * Saturation en eau
-		OutCell.CAPE = (OutCell.Temperature - 20.f) * (OutCell.Humidity * 1000.f);
-	}
-	else
-	{
-		OutCell.CAPE = 0.f; // Pas assez chaud ou humide pour faire monter l'air
-	}
-
-	// 4. PRÉCIPITATIONS ET GRÊLE (La vapeur devient liquide)
-	if (OutCell.Humidity >= 0.99f) // Saturation maximale
-	{
-		OutCell.PrecipitationIntensity = 10.f; // Il pleut !
-		OutCell.Humidity -= 0.05f; // La pluie vide le nuage de son humidité
-	}
-	else
-	{
-		OutCell.PrecipitationIntensity = 0.f;
-	}
-
-	// Calcul des Updrafts (Courants ascendants liés au CAPE)
-	if (OutCell.CAPE > 1000.f)
-	{
-		OutCell.UpdraftVelocity = FMath::Sqrt(2.f * OutCell.CAPE) * 0.5f;
-	}
-	else
-	{
-		OutCell.UpdraftVelocity = 0.f;
+		FScopeLock Lock(&MetricsLock);
+		Metrics.LastNewCellsCount = NewCellsGenerated;
+		Metrics.LastShiftX = ShiftX;
+		Metrics.LastShiftY = ShiftY;
 	}
 }
 
-void FWeatherSimulationThread::ComputeAdvection(int x, int y, int Index)
+// ============================================================
+// GÃ©nÃ©ration procÃ©durale d'une cellule (coordonnÃ©es monde absolues)
+// Deux couches de Perlin pour une structure nuageuse naturelle.
+// ============================================================
+FWeatherCell FWeatherSimulationThread::GenerateProceduralCell(int32 WorldCellX, int32 WorldCellY) const
 {
-	FWeatherCell& Cell = (*CurrentReadGrid)[Index];
+	FWeatherCell Cell;
+
+	// Deux frÃ©quences : grandes masses + dÃ©tails fins
+	const float CoarseScale = 0.040f;
+	const float FineScale = 0.120f;
+	const float TempScale = 0.015f;
+	const float PressScale = 0.008f;
+
+	const float NoiseCoarse = FMath::PerlinNoise2D(FVector2D(WorldCellX * CoarseScale, WorldCellY * CoarseScale));
+	const float NoiseFine = FMath::PerlinNoise2D(FVector2D(WorldCellX * FineScale, WorldCellY * FineScale));
+	const float NoiseTemp = FMath::PerlinNoise2D(FVector2D(WorldCellX * TempScale, WorldCellY * TempScale));
+	const float NoisePress = FMath::PerlinNoise2D(FVector2D(WorldCellX * PressScale, WorldCellY * PressScale));
+
+	// HumiditÃ© : combinaison pondÃ©rÃ©e des deux couches [-1,1] â†’ [0,1]
+	const float RawHumidity = ((NoiseCoarse * 0.7f) + (NoiseFine * 0.3f) + 1.f) * 0.5f;
+
+	// Seuil de nuages : en dessous de 0.55, ciel dÃ©gagÃ©
+	Cell.Humidity = RawHumidity > 0.55f ? RawHumidity : 0.f;
+	Cell.Temperature = 20.f + NoiseTemp * 8.f;                 // Â±8Â°C autour de 20Â°C
+	Cell.Pressure = 1013.f + NoisePress * 12.f;             // Â±12 hPa
+
+	// Vent constant (calibrÃ© pour traverser 1 cellule par seconde)
+	const float WindSpeed = CellSize / 100.f;                  // cm â†’ m/s
+	Cell.WindVector = FVector2D(WindSpeed, WindSpeed * 0.4f); // LÃ©gÃ¨re composante Nord
+
+	return Cell;
+}
+
+// ============================================================
+// Ã‰tape 2 â€” ComputeAdvection (transport semi-lagrangien)
+// On remonte le vecteur vent pour trouver la cellule source.
+// Interpolation bilinÃ©aire pour un rÃ©sultat lisse.
+// ============================================================
+void FWeatherSimulationThread::ComputeAdvection(int32 x, int32 y, int32 Index)
+{
+	const FWeatherCell& InCell = (*CurrentReadGrid)[Index];
 	FWeatherCell& OutCell = (*CurrentWriteGrid)[Index];
 
-	float DeltaTime = 1.0f; // Notre tick est de 1 seconde
-	float TravelX_cm = Cell.WindVector.X * 100.f * DeltaTime;
-	float TravelY_cm = Cell.WindVector.Y * 100.f * DeltaTime;
+	// DeltaTime fixe = 1 seconde (frÃ©quence de tick du Subsystem)
+	constexpr float DeltaTime = 1.f;
 
-	float CurrentWorldX = x * CellSize;
-	float CurrentWorldY = y * CellSize;
+	// Position source : on "remonte" le vent (advection inverse)
+	// WindVector est en m/s ; on divise par CellSize (en cm) aprÃ¨s conversion pour avoir une position en cellules
+	const float SrcU = static_cast<float>(x) - (InCell.WindVector.X * 100.f * DeltaTime / CellSize);
+	const float SrcV = static_cast<float>(y) - (InCell.WindVector.Y * 100.f * DeltaTime / CellSize);
 
-	float SourceWorldX = CurrentWorldX - TravelX_cm;
-	float SourceWorldY = CurrentWorldY - TravelY_cm;
+	// Coins de l'interpolation bilinÃ©aire
+	const int32 x0 = FMath::Clamp(FMath::FloorToInt(SrcU), 0, GridSizeX - 1);
+	const int32 y0 = FMath::Clamp(FMath::FloorToInt(SrcV), 0, GridSizeY - 1);
+	const int32 x1 = FMath::Clamp(x0 + 1, 0, GridSizeX - 1);
+	const int32 y1 = FMath::Clamp(y0 + 1, 0, GridSizeY - 1);
 
-	float SourceU = SourceWorldX / CellSize;
-	float SourceV = SourceWorldY / CellSize;
-
-	int32 x0 = FMath::FloorToInt(SourceU);
-	int32 y0 = FMath::FloorToInt(SourceV);
-	int32 x1 = x0 + 1;
-	int32 y1 = y0 + 1;
-
-	x0 = FMath::Clamp(x0, 0, GridSizeX - 1);
-	y0 = FMath::Clamp(y0, 0, GridSizeY - 1);
-	x1 = FMath::Clamp(x1, 0, GridSizeX - 1);
-	y1 = FMath::Clamp(y1, 0, GridSizeY - 1);
-
-	float FractionX = SourceU - FMath::FloorToFloat(SourceU);
-	float FractionY = SourceV - FMath::FloorToFloat(SourceV);
+	const float Fx = SrcU - FMath::FloorToFloat(SrcU);
+	const float Fy = SrcV - FMath::FloorToFloat(SrcV);
 
 	const FWeatherCell& C00 = (*CurrentReadGrid)[y0 * GridSizeX + x0];
 	const FWeatherCell& C10 = (*CurrentReadGrid)[y0 * GridSizeX + x1];
 	const FWeatherCell& C01 = (*CurrentReadGrid)[y1 * GridSizeX + x0];
 	const FWeatherCell& C11 = (*CurrentReadGrid)[y1 * GridSizeX + x1];
 
-	// Interpolation Température
-	float TempTop = FMath::Lerp(C00.Temperature, C10.Temperature, FractionX);
-	float TempBot = FMath::Lerp(C01.Temperature, C11.Temperature, FractionX);
-	OutCell.Temperature = FMath::Lerp(TempTop, TempBot, FractionY);
+	// Lambda d'interpolation bilinÃ©aire pour Ã©viter la rÃ©pÃ©tition
+	auto Bilerp = [Fx, Fy](float v00, float v10, float v01, float v11) -> float
+	{
+		return FMath::Lerp(FMath::Lerp(v00, v10, Fx), FMath::Lerp(v01, v11, Fx), Fy);
+	};
 
-	// --- NOUVEAU : Interpolation Humidité ---
-	float HumTop = FMath::Lerp(C00.Humidity, C10.Humidity, FractionX);
-	float HumBot = FMath::Lerp(C01.Humidity, C11.Humidity, FractionX);
-	OutCell.Humidity = FMath::Lerp(HumTop, HumBot, FractionY);
+	// Les champs transportÃ©s par le vent
+	OutCell.Temperature = Bilerp(C00.Temperature, C10.Temperature, C01.Temperature, C11.Temperature);
+	OutCell.Humidity = Bilerp(C00.Humidity, C10.Humidity, C01.Humidity, C11.Humidity);
+	OutCell.PrecipitationIntensity = Bilerp(C00.PrecipitationIntensity, C10.PrecipitationIntensity, C01.PrecipitationIntensity, C11.PrecipitationIntensity);
+	// Note : on n'advecte pas CAPE ni UpdraftVelocity (dÃ©rivÃ©s, recalculÃ©s en thermodynamique)
+}
+
+// ============================================================
+// Ã‰tape 3 â€” ComputeThermodynamics
+// Ã‰vaporation, instabilitÃ© convective (CAPE), prÃ©cipitations, grÃªle.
+// Lit et Ã©crit dans CurrentWriteGrid (post-advection).
+// ============================================================
+void FWeatherSimulationThread::ComputeThermodynamics(int32 Index)
+{
+	FWeatherCell& Cell = (*CurrentWriteGrid)[Index];
+
+	// --- 1. Ã‰vaporation ---
+	// L'air chaud s'humidifie progressivement (source virtuelle du sol)
+	const float EvapRate = FMath::Max(0.f, Cell.Temperature * 0.0004f);
+	Cell.Humidity = FMath::Clamp(Cell.Humidity + EvapRate, 0.f, 1.f);
+
+	// --- 2. CAPE (Convective Available Potential Energy) ---
+	// L'instabilitÃ© se dÃ©veloppe si l'air est chaud ET humide
+	if (Cell.Temperature > 18.f && Cell.Humidity > 0.50f)
+	{
+		Cell.CAPE = (Cell.Temperature - 18.f) * (Cell.Humidity * 800.f);
+	}
+	else
+	{
+		Cell.CAPE = 0.f;
+	}
+
+	// --- 3. PrÃ©cipitations ---
+	// La saturation (â‰¥98%) dÃ©clenche la pluie et vide le nuage
+	if (Cell.Humidity >= 0.98f)
+	{
+		// IntensitÃ© proportionnelle au surplus d'humiditÃ©
+		Cell.PrecipitationIntensity = FMath::Clamp((Cell.Humidity - 0.98f) * 500.f, 0.f, 50.f);
+		Cell.Humidity -= 0.04f;  // La pluie dÃ©sature le nuage
+	}
+	else
+	{
+		Cell.PrecipitationIntensity = 0.f;
+	}
+
+	// --- 4. Updrafts et GrÃªle ---
+	if (Cell.CAPE > 1000.f)
+	{
+		// Vitesse du courant ascendant dÃ©rivÃ©e du CAPE (formule simplified)
+		Cell.UpdraftVelocity = FMath::Sqrt(2.f * Cell.CAPE) * 0.5f;
+
+		// La grÃªle se forme si l'updraft maintient les grÃªlons en suspension (>15 m/s)
+		Cell.HailstoneDiameter = Cell.UpdraftVelocity > 15.f
+			? (Cell.UpdraftVelocity - 15.f) * 2.5f
+			: 0.f;
+	}
+	else
+	{
+		Cell.UpdraftVelocity = 0.f;
+		Cell.HailstoneDiameter = 0.f;
+	}
 }
