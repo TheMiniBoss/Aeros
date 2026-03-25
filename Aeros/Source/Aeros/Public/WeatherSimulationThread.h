@@ -84,6 +84,9 @@ public:
     // Copie thread-safe des métriques courantes.
     FWeatherThreadMetrics GetMetrics();
 
+    // Génère une cellule météo procédurale à partir de coordonnées monde absolues.
+    FWeatherCell GenerateProceduralCell(int32 WorldCellX, int32 WorldCellY) const;
+
 private:
     // --- Étapes internes du tick (appelées depuis le thread) ---
 
@@ -96,9 +99,6 @@ private:
 
     // Étape 3 (par cellule) : Thermodynamique (évaporation, CAPE, précipitations, grêle).
     void ComputeThermodynamics(int32 x, int32 y, int32 Index, int32 OffX, int32 OffY);
-
-    // Génère une cellule météo procédurale à partir de coordonnées monde absolues.
-    FWeatherCell GenerateProceduralCell(int32 WorldCellX, int32 WorldCellY) const;
 
     void PerformSimulationTick();
 };

@@ -56,6 +56,18 @@ void UWeatherSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 		RadarTexture->UpdateResource();
 	}
 
+	UIRadarPixelCache.SetNumUninitialized(GridSizeX * GridSizeY);
+
+	// On crée la texture UI (PF_B8G8R8A8).
+	UIRadarTexture = UTexture2D::CreateTransient(GridSizeX, GridSizeY, PF_B8G8R8A8);
+	if (UIRadarTexture)
+	{
+		// Ici on met TF_Bilinear au lieu de TF_Nearest pour que les pixels soient lissés quand on zoome fort !
+		UIRadarTexture->Filter = TF_Bilinear;
+		UIRadarTexture->SRGB = false;
+		UIRadarTexture->UpdateResource();
+	}
+
 	// Thread de simulation
 	SimulationThread = new FWeatherSimulationThread(GridSizeX, GridSizeY, CellSize);
 
@@ -203,6 +215,9 @@ void UWeatherSubsystem::OnWeatherTick()
 
 	SimulationThread->AddGridShift(DeltaX, DeltaY, GlobalGridOffset.X, GlobalGridOffset.Y);
 	SimulationThread->TriggerCalculation(&ReadGrid, &WriteGrid);
+
+	// On met à jour l'image du joueur
+	UpdateUIRadarTexture();
 }
 
 // ============================================================
@@ -224,11 +239,6 @@ void UWeatherSubsystem::UpdateRadarTexture(const TArray<FWeatherCell>& DisplayGr
 		const float NCape = FMath::Clamp(Cell.CAPE / 3000.f, 0.f, 1.f);  // [0, 3000 J/kg]
 
 		// FColor::ToFColor(false) = pas de correction gamma (données brutes)
-		if (i == (DisplayGrid.Num() / 2 + GridSizeX / 2))
-		{
-			RadarPixelCache[i] = FLinearColor(1, 1, 1, 1).ToFColor(false);
-			continue;
-		}
 		RadarPixelCache[i] = FLinearColor(NTemp, NHumid, NRain, NCape).ToFColor(false);
 	}
 
@@ -447,6 +457,180 @@ void UWeatherSubsystem::DrawDebugInfo(const FWeatherCell& PlayerCell)
 			}
 		}
 	}
+}
+
+void UWeatherSubsystem::UpdateUIRadarTexture()
+{
+	if (!UIRadarTexture || UIRadarPixelCache.Num() != GridSizeX * GridSizeY) return;
+
+	const APlayerController* PC = GetWorld() ? GetWorld()->GetFirstPlayerController() : nullptr;
+	if (!PC || !PC->PlayerCameraManager) return;
+
+	FVector PlayerLoc = PC->PlayerCameraManager->GetCameraLocation();
+	int32 HalfRes = UIRadarResolution / 2;
+
+	for (int32 py = 0; py < UIRadarResolution; ++py)
+	{
+		for (int32 px = 0; px < UIRadarResolution; ++px)
+		{
+			// 1. Décalage spatial
+			float WorldOffsetX = (px - HalfRes) * CellSize * RadarZoom;
+			float WorldOffsetY = (py - HalfRes) * CellSize * RadarZoom;
+			FVector PixelWorldLoc = PlayerLoc + FVector(WorldOffsetX, WorldOffsetY, 0.f);
+
+			FWeatherCell Cell;
+
+			// 2. LECTURE STRICTE DE LA SIMULATION
+			bool bIsSimulated = GetWeatherAtLocation(PixelWorldLoc, Cell);
+
+			int32 Index = py * UIRadarResolution + px;
+
+			// 3. Dessin du Joueur (au centre)
+			if (FMath::Abs(px - HalfRes) <= 1 && FMath::Abs(py - HalfRes) <= 1)
+			{
+				if (px == HalfRes && py == HalfRes)
+					UIRadarPixelCache[Index] = FColor::White;
+				else
+					UIRadarPixelCache[Index] = FColor(0, 0, 0, 255);
+			}
+			else
+			{
+				if (bIsSimulated)
+				{
+					// 4. Coloration de la VRAIE météo
+					if (bIsSimulated)
+					{
+						// --- CHOIX DE LA COULEUR SELON LE MODE ---
+						switch (CurrentRadarMode)
+						{
+							case ERadarMode::Reflectivity:
+								UIRadarPixelCache[Index] = GetReflectivityColor(Cell.PrecipitationIntensity, Cell.HailstoneDiameter);
+								break;
+
+							case ERadarMode::Velocity:
+							{
+								// Pour le Doppler, il nous faut le vecteur entre le joueur (radar) et le nuage
+								FVector2D DirFromRadar = FVector2D(PixelWorldLoc.X - PlayerLoc.X, PixelWorldLoc.Y - PlayerLoc.Y);
+								DirFromRadar.Normalize(); // On le réduit à 1
+
+								// Et on ne dessine le vent QUE là où il y a un nuage pour renvoyer l'écho !
+								if (Cell.Humidity > 0.4f)
+									UIRadarPixelCache[Index] = GetVelocityColor(Cell.WindVector, DirFromRadar);
+								else
+									UIRadarPixelCache[Index] = FColor(0, 0, 0, 0); // Pas de nuage = pas d'écho radar
+								break;
+							}
+
+							case ERadarMode::Instability:
+								UIRadarPixelCache[Index] = GetInstabilityColor(Cell.CAPE);
+								break;
+						}
+					}
+				}
+				else
+				{
+					// 5. FINIE LA TRICHE : Si on regarde au-delà des 256x256 simulés (à cause d'un dézoom), on met du vide.
+					UIRadarPixelCache[Index] = FColor(0, 0, 0, 0);
+				}
+			}
+		}
+	}
+
+	// 6. Envoi à la carte graphique
+	if (FTexturePlatformData* PlatformData = UIRadarTexture->GetPlatformData())
+	{
+		void* TexData = PlatformData->Mips[0].BulkData.Lock(LOCK_READ_WRITE);
+		FMemory::Memcpy(TexData, UIRadarPixelCache.GetData(), UIRadarPixelCache.Num() * sizeof(FColor));
+		PlatformData->Mips[0].BulkData.Unlock();
+		UIRadarTexture->UpdateResource();
+	}
+}
+
+FColor UWeatherSubsystem::GetReflectivityColor(float RainIntensity, float Hail)
+{
+	if (RainIntensity < 0.1f && Hail == 0.f) return FColor(0, 0, 0, 0);
+
+	// 1. DÉFINITION DES COULEURS CLÉS (RGBA) pour les vrais radars météo
+	FLinearColor C_Bruine(0.f, 1.f, 1.f, 0.4f);  // Cyan Translucide
+	FLinearColor C_Verte(0.f, 1.f, 0.f, 0.6f);   // Verte
+	FLinearColor C_Jaune(1.f, 1.f, 0.f, 0.8f);   // Jaune
+	FLinearColor C_Orange(1.f, 0.5f, 0.f, 0.9f); // Orange
+	FLinearColor C_Rouge(1.f, 0.f, 0.f, 1.f);    // Rouge intense (Pluie torrentielle)
+	FLinearColor C_Magenta(1.f, 0.f, 1.f, 1.f);  // Magenta (Grêle massive/Tornade)
+
+	FLinearColor BaseColor;
+
+	// 2. INTERPOLATION DOUCE (Lerp) de la pluie (Réflectivité de 0 à 35 mm/h)
+	if (RainIntensity < 0.5f)
+	{
+		BaseColor = FLinearColor::LerpUsingHSV(FLinearColor::Transparent, C_Bruine, FMath::GetRangePct(0.1f, 0.5f, RainIntensity));
+	}
+	else if (RainIntensity < 1.0f)
+	{
+		BaseColor = FLinearColor::LerpUsingHSV(C_Bruine, C_Verte, FMath::GetRangePct(0.5f, 1.0f, RainIntensity));
+	}
+	else if (RainIntensity < 5.0f)
+	{
+		BaseColor = FLinearColor::LerpUsingHSV(C_Verte, C_Jaune, FMath::GetRangePct(1.0f, 5.0f, RainIntensity));
+	}
+	else if (RainIntensity < 15.0f)
+	{
+		BaseColor = FLinearColor::LerpUsingHSV(C_Jaune, C_Orange, FMath::GetRangePct(5.0f, 15.0f, RainIntensity));
+	}
+	else
+	{
+		// Au-delà de 30mm/h, on fonce vers le Rouge vif
+		BaseColor = FLinearColor::LerpUsingHSV(C_Orange, C_Rouge, FMath::Clamp(FMath::GetRangePct(15.0f, 35.0f, RainIntensity), 0.f, 1.f));
+	}
+
+	// 3. SUPERPOSITION DE LA GRÊLE (Le cœur de l'écho radar)
+	// S'il y a de la grêle, on fait un fondu de la couleur de pluie vers le Magenta !
+	FLinearColor FinalColor = BaseColor;
+	if (Hail > 0.f)
+	{
+		// La grêle écrase la couleur de pluie de 0 à 15mm de diamètre
+		float HailAlpha = FMath::Clamp(Hail / 15.f, 0.f, 1.f);
+		FinalColor = FLinearColor::LerpUsingHSV(BaseColor, C_Magenta, HailAlpha);
+	}
+
+	return FinalColor.ToFColor(true); // false pour sRGB pur
+}
+
+FColor UWeatherSubsystem::GetVelocityColor(FVector2D WindVector, FVector2D DirFromRadar)
+{
+	float V = FVector2D::DotProduct(WindVector, DirFromRadar);
+
+	FLinearColor C_Cyan(0.f, 1.f, 1.f, 1.f);
+	FLinearColor C_Green(0.f, 1.f, 0.f, 0.8f);
+	FLinearColor C_Neutral(0.5f, 0.5f, 0.5f, 0.1f); // Gris presque invisible
+	FLinearColor C_Red(1.f, 0.f, 0.f, 0.8f);
+	FLinearColor C_Orange(1.f, 0.5f, 0.f, 1.f);
+
+	if (V < 0.f) // S'approche (Gris -> Vert -> Cyan)
+	{
+		if (V > -5.f)  return FLinearColor::LerpUsingHSV(C_Neutral, C_Green, FMath::GetRangePct(0.f, -5.f, V)).ToFColor(true);
+		return FLinearColor::LerpUsingHSV(C_Green, C_Cyan, FMath::Clamp(FMath::GetRangePct(-5.f, -15.f, V), 0.f, 1.f)).ToFColor(true);
+	}
+	else // S'éloigne (Gris -> Rouge -> Orange)
+	{
+		if (V < 5.f)   return FLinearColor::LerpUsingHSV(C_Neutral, C_Red, FMath::GetRangePct(0.f, 5.f, V)).ToFColor(true);
+		return FLinearColor::LerpUsingHSV(C_Red, C_Orange, FMath::Clamp(FMath::GetRangePct(5.f, 15.f, V), 0.f, 1.f)).ToFColor(true);
+	}
+}
+
+FColor UWeatherSubsystem::GetInstabilityColor(float CAPE)
+{
+	if (CAPE < 500.f) return FColor(0, 0, 0, 0);
+
+	FLinearColor C_Clear(1.f, 1.f, 0.f, 0.f);     // Jaune totalement transparent
+	FLinearColor C_Yellow(1.f, 1.f, 0.f, 0.6f);   // Jaune
+	FLinearColor C_Red(1.f, 0.f, 0.f, 0.8f);      // Rouge
+	FLinearColor C_White(1.f, 1.f, 1.f, 1.f);     // Blanc (Danger extrême)
+
+	if (CAPE < 1000.f) return FLinearColor::LerpUsingHSV(C_Clear, C_Yellow, FMath::GetRangePct(500.f, 1000.f, CAPE)).ToFColor(true);
+	if (CAPE < 2000.f) return FLinearColor::LerpUsingHSV(C_Yellow, C_Red, FMath::GetRangePct(1000.f, 2000.f, CAPE)).ToFColor(true);
+
+	return FLinearColor::LerpUsingHSV(C_Red, C_White, FMath::Clamp(FMath::GetRangePct(2000.f, 3000.f, CAPE), 0.f, 1.f)).ToFColor(true);
 }
 
 // ============================================================

@@ -60,7 +60,20 @@ class AEROS_API UWeatherSubsystem : public UWorldSubsystem
 	// Cache pré-alloué pour la mise à jour de texture (évite le malloc chaque tick)
 	TArray<FColor> RadarPixelCache;
 
+	// Résolution fixe de l'écran radar UI (ex: 256x256 pixels)
+	int32 UIRadarResolution = 128;
+	TArray<FColor> UIRadarPixelCache;
+
 public:
+	// La texture HAUTE RÉSOLUTION dédiée à l'affichage UI
+	UPROPERTY(BlueprintReadOnly, Category = "Weather|RadarUI")
+	UTexture2D* UIRadarTexture = nullptr;
+
+	// Le niveau de zoom (1.0 = normal, < 1.0 = zoom in, > 1.0 = zoom out)
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Weather|RadarUI")
+	float RadarZoom = 1.0f;
+
+
 	// === Texture Radar (Blueprint accessible) ===
 	// Encodage : R=Température, G=Humidité, B=Précipitations, A=CAPE normalisé
 	UPROPERTY(BlueprintReadOnly, Category = "Weather|Radar")
@@ -83,6 +96,10 @@ public:
 	// Nombre de cellules de grille à visualiser autour du joueur (0 = désactivé)
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Weather|Debug")
 	int32 DebugGridRadius = 0;
+
+	// Mode d'affichage actuel du Radar
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Weather|RadarUI")
+	ERadarMode CurrentRadarMode = ERadarMode::Reflectivity;
 
 public:
 	virtual void Initialize(FSubsystemCollectionBase& Collection) override;
@@ -112,6 +129,10 @@ private:
 	void UpdateRadarTexture(const TArray<FWeatherCell>& DisplayGrid);
 	void InitializeGridWithProcedural();
 	void DrawDebugInfo(const FWeatherCell& PlayerCell);
+	void UpdateUIRadarTexture();
+	FColor GetReflectivityColor(float RainIntensity, float Hail);
+	FColor GetVelocityColor(FVector2D WindVector, FVector2D DirFromRadar);
+	FColor GetInstabilityColor(float CAPE);
 
 	// Vérifie qu'un couple (LocalX, LocalY) est dans les bornes de la grille
 	bool IsValidIndex(int32 LocalX, int32 LocalY) const;

@@ -261,24 +261,38 @@ FWeatherCell FWeatherSimulationThread::GenerateProceduralCell(int32 WorldCellX, 
 {
 	FWeatherCell Cell;
 
-	// Deux fréquences : grandes masses + détails fins
-	const float CoarseScale = 0.040f;
-	const float FineScale = 0.120f;
-	const float TempScale = 0.015f;
-	const float PressScale = 0.008f;
+	// --- ÉCHELLES DE BRUIT (Zoom du monde procédural) ---
+	// On AUGMENTE ces valeurs pour rétrécir la taille des motifs.
+	// Ainsi, au lieu d'avoir un seul continent météo sur tout l'écran, 
+	// on aura de multiples petites tempêtes et anticyclones sur nos 256 pixels !
+	const float CoarseScale = 0.200f; // (Avant: 0.04) Humidité globale
+	const float FineScale = 0.500f; // (Avant: 0.12) Détails des nuages
+	const float TempScale = 0.080f; // (Avant: 0.015) Taches de chaleur
+	const float PressScale = 0.050f; // (Avant: 0.008) Zones de pression
 
-	const float NoiseCoarse = FMath::PerlinNoise2D(FVector2D(WorldCellX * CoarseScale, WorldCellY * CoarseScale));
-	const float NoiseFine = FMath::PerlinNoise2D(FVector2D(WorldCellX * FineScale, WorldCellY * FineScale));
+	// 2. MÉTÉO MACRO (Température & Pression) -> TOTALEMENT ANCRÉE AU MONDE
+	// Ces valeurs définissent le climat permanent ou lent de la région.
 	const float NoiseTemp = FMath::PerlinNoise2D(FVector2D(WorldCellX * TempScale, WorldCellY * TempScale));
 	const float NoisePress = FMath::PerlinNoise2D(FVector2D(WorldCellX * PressScale, WorldCellY * PressScale));
 
-	// Humidité : combinaison pondérée des deux couches [-1,1] → [0,1]
+	// 3. MÉTÉO VISUELLE INFINIE (Nuages lointains) -> DÉRIVE DANS LE TEMPS
+	// On crée un faux décalage basé sur le temps *uniquement* pour le dessin des nuages infinis
+	// pour qu'ils n'aient pas l'air figés sur le radar.
+	float BaseWindU = CellSize / 100.f; // Le vent de base (ex: vers l'Est)
+	float BaseWindV = BaseWindU * 0.4f;
+
+	float CloudDriftX = WorldCellX - (SimulationTime * BaseWindU * 0.1f); // 0.1f pour que l'infini bouge doucement
+	float CloudDriftY = WorldCellY - (SimulationTime * BaseWindV * 0.1f);
+
+	const float NoiseCoarse = FMath::PerlinNoise2D(FVector2D(CloudDriftX * CoarseScale, CloudDriftY * CoarseScale));
+	const float NoiseFine = FMath::PerlinNoise2D(FVector2D(CloudDriftX * FineScale, CloudDriftY * FineScale));
+
+	// 4. CALCUL DE L'HUMIDITÉ
 	const float RawHumidity = ((NoiseCoarse * 0.7f) + (NoiseFine * 0.3f) + 1.f) * 0.5f;
 
-	// Seuil de nuages : en dessous de 0.55, ciel dégagé
 	Cell.Humidity = RawHumidity > 0.55f ? RawHumidity : 0.f;
-	Cell.Temperature = 20.f + NoiseTemp * 8.f;                 // ±8°C autour de 20°C
-	Cell.Pressure = 1013.f + NoisePress * 12.f;             // ±12 hPa
+	Cell.Temperature = 20.f + NoiseTemp * 8.f;
+	Cell.Pressure = 1013.f + NoisePress * 12.f;
 
 	// Vent constant (calibré pour traverser 1 cellule par seconde)
 	const float WindSpeed = CellSize / 100.f;                  // cm → m/s
@@ -342,9 +356,12 @@ void FWeatherSimulationThread::ComputeThermodynamics(int32 x, int32 y, int32 Ind
 	FWeatherCell& Cell = (*CurrentWriteGrid)[Index];
 
 	// --- 1. Évaporation ---
-	// L'air chaud s'humidifie progressivement (source virtuelle du sol)
-	const float EvapRate = FMath::Max(0.f, Cell.Temperature * 0.0004f);
-	Cell.Humidity = FMath::Clamp(Cell.Humidity + EvapRate, 0.f, 1.f);
+	// Ne s'applique que dans les zones DÉJÀ humides pour éviter de remplir le ciel clair
+	if (Cell.Humidity > 0.2f)
+	{
+		const float EvapRate = FMath::Max(0.f, Cell.Temperature * 0.0004f);
+		Cell.Humidity = FMath::Clamp(Cell.Humidity + EvapRate, 0.f, 1.f);
+	}
 
 	// --- 2. CAPE (Convective Available Potential Energy) ---
 	// L'instabilité se développe si l'air est chaud ET humide
@@ -359,13 +376,13 @@ void FWeatherSimulationThread::ComputeThermodynamics(int32 x, int32 y, int32 Ind
 		Cell.CAPE = 0.f;
 	}
 
-	// --- 3. Précipitations ---
-	// La saturation (≥98%) déclenche la pluie et vide le nuage
-	if (Cell.Humidity >= 0.98f)
+	// --- 3. Précipitations (Pluie classique) ---
+	// On commence à pleuvoir plus tôt (80%) et plus fort (x250)
+	if (Cell.Humidity >= 0.80f)
 	{
-		// Intensité proportionnelle au surplus d'humidité
-		Cell.PrecipitationIntensity = FMath::Clamp((Cell.Humidity - 0.98f) * 500.f, 0.f, 50.f);
-		Cell.Humidity -= 0.04f;  // La pluie désature le nuage
+		// Avec 100% d'humidité, on atteint (1.0 - 0.8) * 250 = 50 mm/h ! (Le rouge est enfin possible)
+		Cell.PrecipitationIntensity = FMath::Clamp((Cell.Humidity - 0.80f) * 250.f, 0.f, 50.f);
+		Cell.Humidity -= 0.02f;
 	}
 	else
 	{
@@ -375,13 +392,21 @@ void FWeatherSimulationThread::ComputeThermodynamics(int32 x, int32 y, int32 Ind
 	// --- 4. Updrafts et Grêle ---
 	if (Cell.CAPE > 800.f)
 	{
-		// On réduit le multiplicateur de l'updraft (0.35 au lieu de 0.5)
 		Cell.UpdraftVelocity = FMath::Sqrt(2.f * Cell.CAPE) * 0.35f;
 
-		// La grêle nécessite un updraft très violent (> 18 m/s au lieu de 15)
-		Cell.HailstoneDiameter = Cell.UpdraftVelocity > 18.f
-			? (Cell.UpdraftVelocity - 18.f) * 2.0f
-			: 0.f;
+		// On durcit sévèrement la grêle : il faut un updraft de 22 m/s minimum ! (Gros orage)
+		if (Cell.UpdraftVelocity > 22.f)
+		{
+			// La taille des grêlons monte moins vite (* 1.5 au lieu de 2.0)
+			Cell.HailstoneDiameter = (Cell.UpdraftVelocity - 22.f) * 1.5f;
+
+			float HailWaterEquivalent = Cell.HailstoneDiameter * 1.5f;
+			Cell.PrecipitationIntensity = FMath::Max(Cell.PrecipitationIntensity, HailWaterEquivalent);
+		}
+		else
+		{
+			Cell.HailstoneDiameter = 0.f;
+		}
 	}
 	else
 	{

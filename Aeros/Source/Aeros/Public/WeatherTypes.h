@@ -15,6 +15,14 @@ enum class EStormType : uint8
 	Hurricane		UMETA(DisplayName = "Hurricane")
 };
 
+UENUM(BlueprintType)
+enum class ERadarMode : uint8
+{
+	Reflectivity    UMETA(DisplayName = "Réflectivité (Pluie & Grêle)"),
+	Velocity        UMETA(DisplayName = "Vélocité Doppler (Vent)"),
+	Instability     UMETA(DisplayName = "Thermodynamique (CAPE)")
+};
+
 USTRUCT(BlueprintType)
 struct FWeatherCell
 {
