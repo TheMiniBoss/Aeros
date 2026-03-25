@@ -137,10 +137,21 @@ FWeatherThreadMetrics FWeatherSimulationThread::GetMetrics()
 
 void FWeatherSimulationThread::PerformSimulationTick()
 {
+	// On avance le temps d'une seconde
+	SimulationTime += 1.f;
+
 	// --- Étape 1 : Décalage infini de la grille ---
 	// Modifie CurrentReadGrid en place. C'est sûr : le GameThread ne touche
 	// plus à ce buffer depuis l'appel à TriggerCalculation().
 	ApplyGridShift();
+
+	// On récupère l'Offset Global (pour que le vent soit raccord avec le scroll infini)
+	int32 OffX, OffY;
+	{
+		FScopeLock Lock(&ShiftLock);
+		OffX = GlobalOffsetX;
+		OffY = GlobalOffsetY;
+	}
 
 	// --- Étape 2 & 3 : Physique cellule par cellule ---
 	// On exclut la bordure (1 cellule de marge) gérée séparément.
@@ -157,26 +168,24 @@ void FWeatherSimulationThread::PerformSimulationTick()
 			ComputeAdvection(x, y, Index);
 
 			// Thermodynamique — lit et écrit dans Write (post-advection)
-			ComputeThermodynamics(Index);
+			// On passe maintenant x, y, et l'Offset à la Thermodynamique !
+			ComputeThermodynamics(x, y, Index, OffX, OffY);
 		}
 	}
 
-	// --- Étape 4 : Bordure absorbante ---
-	// Amortit les valeurs sur le pourtour pour éviter les artefacts de bord
-	// (réflexions, accumulations en coin, etc.).
+	// --- Étape 4 : Bordure Génératrice (Inflow Boundary) ---
+	// Au lieu de détruire la météo, on force le bord extrême de la carte à lire 
+	// le générateur procédural en continu. Le vent aspirera ces données naturellement.
 	for (int32 i = 0; i < GridSizeX * GridSizeY; ++i)
 	{
 		const int32 x = i % GridSizeX;
 		const int32 y = i / GridSizeX;
 
+		// Si on est sur l'anneau extérieur de la grille...
 		if (x == 0 || y == 0 || x == GridSizeX - 1 || y == GridSizeY - 1)
 		{
-			FWeatherCell& Cell = (*CurrentWriteGrid)[i];
-			Cell.Humidity *= 0.5f;
-			Cell.PrecipitationIntensity = 0.f;
-			Cell.CAPE = 0.f;
-			Cell.UpdraftVelocity = 0.f;
-			Cell.HailstoneDiameter = 0.f;
+			// On génère la météo pure du monde à cet endroit précis
+			(*CurrentWriteGrid)[i] = GenerateProceduralCell(x + OffX, y + OffY);
 		}
 	}
 }
@@ -328,7 +337,7 @@ void FWeatherSimulationThread::ComputeAdvection(int32 x, int32 y, int32 Index)
 // Évaporation, instabilité convective (CAPE), précipitations, grêle.
 // Lit et écrit dans CurrentWriteGrid (post-advection).
 // ============================================================
-void FWeatherSimulationThread::ComputeThermodynamics(int32 Index)
+void FWeatherSimulationThread::ComputeThermodynamics(int32 x, int32 y, int32 Index, int32 OffX, int32 OffY)
 {
 	FWeatherCell& Cell = (*CurrentWriteGrid)[Index];
 
@@ -339,9 +348,11 @@ void FWeatherSimulationThread::ComputeThermodynamics(int32 Index)
 
 	// --- 2. CAPE (Convective Available Potential Energy) ---
 	// L'instabilité se développe si l'air est chaud ET humide
-	if (Cell.Temperature > 18.f && Cell.Humidity > 0.50f)
+	if (Cell.Temperature > 20.f && Cell.Humidity > 0.60f)
 	{
-		Cell.CAPE = (Cell.Temperature - 18.f) * (Cell.Humidity * 800.f);
+		// On utilise FMath::Pow() sur l'humidité pour que le CAPE n'explose 
+		// vraiment que quand on s'approche des 90% d'humidité !
+		Cell.CAPE = (Cell.Temperature - 20.f) * FMath::Pow(Cell.Humidity, 3.f) * 1500.f;
 	}
 	else
 	{
@@ -362,14 +373,14 @@ void FWeatherSimulationThread::ComputeThermodynamics(int32 Index)
 	}
 
 	// --- 4. Updrafts et Grêle ---
-	if (Cell.CAPE > 1000.f)
+	if (Cell.CAPE > 800.f)
 	{
-		// Vitesse du courant ascendant dérivée du CAPE (formule simplified)
-		Cell.UpdraftVelocity = FMath::Sqrt(2.f * Cell.CAPE) * 0.5f;
+		// On réduit le multiplicateur de l'updraft (0.35 au lieu de 0.5)
+		Cell.UpdraftVelocity = FMath::Sqrt(2.f * Cell.CAPE) * 0.35f;
 
-		// La grêle se forme si l'updraft maintient les grêlons en suspension (>15 m/s)
-		Cell.HailstoneDiameter = Cell.UpdraftVelocity > 15.f
-			? (Cell.UpdraftVelocity - 15.f) * 2.5f
+		// La grêle nécessite un updraft très violent (> 18 m/s au lieu de 15)
+		Cell.HailstoneDiameter = Cell.UpdraftVelocity > 18.f
+			? (Cell.UpdraftVelocity - 18.f) * 2.0f
 			: 0.f;
 	}
 	else
@@ -377,4 +388,40 @@ void FWeatherSimulationThread::ComputeThermodynamics(int32 Index)
 		Cell.UpdraftVelocity = 0.f;
 		Cell.HailstoneDiameter = 0.f;
 	}
+
+	// --- 5. Vent Local et Rafales ---
+
+	// Le vent directeur DYNAMIQUE (Change très lentement de direction au fil du temps)
+	// On utilise un bruit 1D très lent pour générer un angle entre -PI et +PI (-180° à 180°)
+	const float WindAngle = FMath::PerlinNoise1D(SimulationTime * 0.002f) * PI;
+
+	// La force de base du vent (ex: 10 m/s)
+	const float WindSpeed = CellSize / 100.f;
+
+	// On utilise la Trigonométrie (Cos/Sin) pour transformer cet angle en vecteur 2D
+	const float BaseWindU = FMath::Cos(WindAngle) * WindSpeed;
+	const float BaseWindV = FMath::Sin(WindAngle) * WindSpeed;
+
+	// Coordonnées absolues pour que les rafales soient fixes dans le monde infini
+	const float WorldX = x + OffX;
+	const float WorldY = y + OffY;
+
+	// On décale la lecture du bruit avec SimulationTime pour que les rafales voyagent
+	const float GustScale = 0.08f; // Taille géographique des bourrasques
+	const float TimeShift = SimulationTime * 0.8f; // Vitesse d'évolution du vent
+
+	// Bruit de Perlin (génère des valeurs entre -1.0 et 1.0)
+	const float GustU = FMath::PerlinNoise2D(FVector2D(WorldX * GustScale + TimeShift, WorldY * GustScale));
+	const float GustV = FMath::PerlinNoise2D(FVector2D(WorldX * GustScale, WorldY * GustScale + TimeShift));
+
+	// Turbulences liées aux Orages (Le vent s'affole sous la pluie et le CAPE)
+	// Si le ciel est bleu, Multiplier = 1. S'il y a un gros orage, ça peut monter à 4 ou 5 !
+	const float StormTurbulence = 1.0f + (Cell.PrecipitationIntensity * 0.15f) + (Cell.CAPE * 0.001f);
+
+	// Force de base des rafales (ex: +/- 2 m/s), multipliée par la tempête
+	const float GustStrength = 2.0f * StormTurbulence;
+
+	// On applique le nouveau vent à la cellule pour le prochain tick
+	Cell.WindVector.X = BaseWindU + (GustU * GustStrength);
+	Cell.WindVector.Y = BaseWindV + (GustV * GustStrength);
 }

@@ -62,6 +62,8 @@ class AEROS_API FWeatherSimulationThread : public FRunnable
     FCriticalSection MetricsLock;
     FWeatherThreadMetrics Metrics;
 
+    float SimulationTime = 0.f; // Chronomètre interne pour animer les rafales
+
 public:
     FWeatherSimulationThread(int32 InGridSizeX, int32 InGridSizeY, float InCellSize);
     virtual ~FWeatherSimulationThread();
@@ -93,7 +95,7 @@ private:
     void ComputeAdvection(int32 x, int32 y, int32 Index);
 
     // Étape 3 (par cellule) : Thermodynamique (évaporation, CAPE, précipitations, grêle).
-    void ComputeThermodynamics(int32 Index);
+    void ComputeThermodynamics(int32 x, int32 y, int32 Index, int32 OffX, int32 OffY);
 
     // Génère une cellule météo procédurale à partir de coordonnées monde absolues.
     FWeatherCell GenerateProceduralCell(int32 WorldCellX, int32 WorldCellY) const;

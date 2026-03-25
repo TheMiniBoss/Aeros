@@ -224,6 +224,11 @@ void UWeatherSubsystem::UpdateRadarTexture(const TArray<FWeatherCell>& DisplayGr
 		const float NCape = FMath::Clamp(Cell.CAPE / 3000.f, 0.f, 1.f);  // [0, 3000 J/kg]
 
 		// FColor::ToFColor(false) = pas de correction gamma (données brutes)
+		if (i == (DisplayGrid.Num() / 2 + GridSizeX / 2))
+		{
+			RadarPixelCache[i] = FLinearColor(1, 1, 1, 1).ToFColor(false);
+			continue;
+		}
 		RadarPixelCache[i] = FLinearColor(NTemp, NHumid, NRain, NCape).ToFColor(false);
 	}
 
