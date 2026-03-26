@@ -2,451 +2,1381 @@
 
 
 #include "WeatherSimulationThread.h"
-#include "HAL/RunnableThread.h"
-#include "HAL/Event.h"
-#include "GenericPlatform/GenericPlatformProcess.h"
-
-DEFINE_LOG_CATEGORY_STATIC(LogWeatherThread, Log, All);
+#include "Math/UnrealMathUtility.h"
+#include "Misc/ScopeLock.h"
 
 // ============================================================
-// Construction / Destruction
+//  CONSTRUCTION / DESTRUCTION
 // ============================================================
 
-FWeatherSimulationThread::FWeatherSimulationThread(int32 InGridSizeX, int32 InGridSizeY, float InCellSize)
-	: GridSizeX(InGridSizeX)
-	, GridSizeY(InGridSizeY)
-	, CellSize(InCellSize)
+FWeatherSimulationThread::FWeatherSimulationThread(const FWeatherSimConfig& InConfig)
+    : Config(InConfig)
 {
-	// AutoReset = false : on appelle Reset() manuellement en fin de Run()
-	// pour un contrôle explicite du cycle veille/réveil.
-	WaitEvent = FGenericPlatformProcess::GetSynchEventFromPool(false);
+    const float DX_m = Config.DX_km * 1000.f;
+    InvDX = 1.f / DX_m;
+    InvDY = 1.f / DX_m;
+    InvDZ = 1.f / Config.DZ_m;
 
-	Thread = FRunnableThread::Create(this, TEXT("WeatherSimulationThread"), 0, TPri_BelowNormal);
-
-	UE_LOG(LogWeatherThread, Log,
-		   TEXT("[WeatherThread] Démarré. Grille=%dx%d, Cellule=%.0fcm (%.1fm)"),
-		   GridSizeX, GridSizeY, CellSize, CellSize / 100.f);
+    Thread = FRunnableThread::Create(this, TEXT("WeatherSimThread"), 0,
+                                     TPri_BelowNormal);
 }
 
 FWeatherSimulationThread::~FWeatherSimulationThread()
 {
-	if (Thread)
-	{
-		// Kill(true) = attendre la fin du thread (join)
-		Thread->Kill(true);
-		delete Thread;
-		Thread = nullptr;
-	}
-	if (WaitEvent)
-	{
-		FGenericPlatformProcess::ReturnSynchEventToPool(WaitEvent);
-		WaitEvent = nullptr;
-	}
+    bShouldStop = true;
+    if (Thread) { Thread->WaitForCompletion(); delete Thread; Thread = nullptr; }
 }
 
 // ============================================================
-// FRunnable Interface
+//  FRunnable INTERFACE
 // ============================================================
 
 bool FWeatherSimulationThread::Init()
 {
-	return true;
+    InitialiseGrid();
+    ApplyRandomPerturbations();
+    bIsRunning = true;
+    return true;
 }
 
 uint32 FWeatherSimulationThread::Run()
 {
-	while (!bStopThread)
-	{
-		// Le thread dort ici sans consommer de CPU.
-		// Réveillé par WaitEvent->Trigger() depuis TriggerCalculation() ou Stop().
-		WaitEvent->Wait();
+    // Initialise double buffer
+    DoubleBuffer.Initialise(Config.GridNX, Config.GridNY, Config.GridNZ);
 
-		if (bStopThread) break;
+    while (!bShouldStop)
+    {
+        // --- Process any incoming commands ---
+        FSimCommand Cmd;
+        while (CommandQueue.Dequeue(Cmd))
+        {
+            if (Cmd.Type == FSimCommand::EType::SetConfig)
+            {
+                Config = Cmd.Config;
+                InitialiseGrid();
+                DoubleBuffer.Initialise(Config.GridNX, Config.GridNY, Config.GridNZ);
+            }
+            else if (Cmd.Type == FSimCommand::EType::InjectPerturbation)
+            {
+                int32 Cx, Cy, Cz;
+                if (WorldToCell(Cmd.WorldPos, Cx, Cy, Cz))
+                {
+                    // Warm bubble perturbation
+                    for (int32 dz = -3; dz <= 3; ++dz)
+                        for (int32 dy = -5; dy <= 5; ++dy)
+                            for (int32 dx = -5; dx <= 5; ++dx)
+                            {
+                                float r2 = dx * dx + dy * dy + dz * dz * 4.f;
+                                if (r2 < 30.f)
+                                {
+                                    auto& Cell = CurrentState.At(Cx + dx, Cy + dy, Cz + dz);
+                                    Cell.Theta += Cmd.Strength * FMath::Exp(-r2 / 15.f);
+                                    Cell.Qv += 0.002f * FMath::Exp(-r2 / 20.f);
+                                }
+                            }
+                }
+            }
+            else if (Cmd.Type == FSimCommand::EType::Reset)
+            {
+                InitialiseGrid();
+                ApplyRandomPerturbations();
+                SimTime = 0.f;
+            }
+        }
 
-		bIsCalculating = true;
+        // --- Physics time-split: small acoustic DT, large physics DT ---
+        const float AcousticDT = Config.DT_s;
+        const int32 NumAcoustic = FMath::Max(1, FMath::RoundToInt(Config.BigDT_s / AcousticDT));
 
-		if (CurrentReadGrid && CurrentWriteGrid)
-		{
-			const double StartTime = FPlatformTime::Seconds();
+        for (int32 i = 0; i < NumAcoustic && !bShouldStop; ++i)
+        {
+            if (Config.bUseRK4)
+                StepRK4(AcousticDT);
+            else
+            {
+                TArray<FAtmosphericCell> Tend;
+                Tend.SetNum(CurrentState.Cells.Num());
+                ComputeTendencies(CurrentState, Tend, AcousticDT);
+                for (int32 idx = 0; idx < CurrentState.Cells.Num(); ++idx)
+                {
+                    auto& C = CurrentState.Cells[idx];
+                    auto& T = Tend[idx];
+                    C.U += T.U * AcousticDT; C.V += T.V * AcousticDT; C.W += T.W * AcousticDT;
+                    C.Theta += T.Theta * AcousticDT; C.Qv += T.Qv * AcousticDT;
+                    C.Ql += T.Ql * AcousticDT; C.Qi += T.Qi * AcousticDT;
+                }
+            }
+            SimTime = SimTime.load() + AcousticDT;
+        }
 
-			PerformSimulationTick();
+        StepTurbulence(CurrentState, Config.BigDT_s);
+        StepMicrophysics(CurrentState, Config.BigDT_s);
+        StepSedimentation(CurrentState, Config.BigDT_s);
+        StepRadiation(CurrentState, Config.BigDT_s, SimTime.load());
+        SolvePressurePoisson(CurrentState);
 
-			const double DurationMs = (FPlatformTime::Seconds() - StartTime) * 1000.0;
+        for (auto& Cell : CurrentState.Cells) Cell.UpdateDerivedVars();
+        ComputeReflectivity(CurrentState);
 
-			FScopeLock Lock(&MetricsLock);
-			Metrics.LastTickDurationMs = DurationMs;
-			++Metrics.TotalTicksComputed;
-		}
+        // --- Publish SLIM render grid (fast, no big copy) ---
+        PublishRenderGrid();
 
-		bIsCalculating = false;
+        // --- Low-rate column update (every 2s) ---
+        if ((SimTime.load() - LastColumnUpdate) > 2.f)
+        {
+            ComputeAllColumns(CurrentState);
+            {
+                FScopeLock Lock(&ColumnMutex);
+                CachedColumns = CurrentState.Columns;
+                bColumnsReady = true;
+            }
+            LastColumnUpdate = SimTime.load();
+        }
 
-		// Réinitialise manuellement le sémaphore : prêt pour le prochain signal.
-		WaitEvent->Reset();
-	}
+        // --- Low-rate storm detection (every 5s) ---
+        if ((SimTime.load() - LastStormUpdate) > 5.f)
+        {
+            TArray<FStormCell> Storms = DetectStormsInternal(CurrentState);
+            {
+                FScopeLock Lock(&StormMutex);
+                CachedStorms = MoveTemp(Storms);
+                bStormsReady = true;
+            }
+            LastStormUpdate = SimTime.load();
+        }
 
-	UE_LOG(LogWeatherThread, Log, TEXT("[WeatherThread] Arrêt propre."));
-	return 0;
+        FPlatformProcess::Sleep(0.001f);
+    }
+
+    bIsRunning = false;
+    return 0;
 }
 
-void FWeatherSimulationThread::Stop()
-{
-	bStopThread = true;
-	// On réveille le thread une dernière fois pour qu'il évalue bStopThread et quitte Run().
-	if (WaitEvent) WaitEvent->Trigger();
-}
-
-void FWeatherSimulationThread::Exit() {}
+void FWeatherSimulationThread::Stop() { bShouldStop = true; }
+void FWeatherSimulationThread::Exit() { bIsRunning = false; }
 
 // ============================================================
-// API GameThread
+//  PUBLIC API
 // ============================================================
 
-void FWeatherSimulationThread::TriggerCalculation(TArray<FWeatherCell>* InReadGrid, TArray<FWeatherCell>* InWriteGrid)
+void FWeatherSimulationThread::SendCommand(const FSimCommand& Cmd)
 {
-	if (bIsCalculating)
-	{
-		FScopeLock Lock(&MetricsLock);
-		++Metrics.SkippedTicks;
-		return;
-	}
-
-	CurrentReadGrid = InReadGrid;
-	CurrentWriteGrid = InWriteGrid;
-	WaitEvent->Trigger();
-}
-
-void FWeatherSimulationThread::AddGridShift(int32 DeltaX, int32 DeltaY, int32 InGlobalOffsetX, int32 InGlobalOffsetY)
-{
-	// Protégé car écrit par le GameThread et lu par le thread de simulation.
-	FScopeLock Lock(&ShiftLock);
-	PendingShiftX += DeltaX;
-	PendingShiftY += DeltaY;
-	GlobalOffsetX = InGlobalOffsetX;
-	GlobalOffsetY = InGlobalOffsetY;
-}
-
-FWeatherThreadMetrics FWeatherSimulationThread::GetMetrics()
-{
-	FScopeLock Lock(&MetricsLock);
-	return Metrics;
-}
-
-// ============================================================
-// Simulation (appelée depuis le thread)
-// ============================================================
-
-void FWeatherSimulationThread::PerformSimulationTick()
-{
-	// On avance le temps d'une seconde
-	SimulationTime += 1.f;
-
-	// --- Étape 1 : Décalage infini de la grille ---
-	// Modifie CurrentReadGrid en place. C'est sûr : le GameThread ne touche
-	// plus à ce buffer depuis l'appel à TriggerCalculation().
-	ApplyGridShift();
-
-	// On récupère l'Offset Global (pour que le vent soit raccord avec le scroll infini)
-	int32 OffX, OffY;
-	{
-		FScopeLock Lock(&ShiftLock);
-		OffX = GlobalOffsetX;
-		OffY = GlobalOffsetY;
-	}
-
-	// --- Étape 2 & 3 : Physique cellule par cellule ---
-	// On exclut la bordure (1 cellule de marge) gérée séparément.
-	for (int32 y = 1; y < GridSizeY - 1; ++y)
-	{
-		for (int32 x = 1; x < GridSizeX - 1; ++x)
-		{
-			const int32 Index = y * GridSizeX + x;
-
-			// Copie de base depuis le buffer source
-			(*CurrentWriteGrid)[Index] = (*CurrentReadGrid)[Index];
-
-			// Advection (transport par le vent) — lit depuis Read, écrit dans Write
-			ComputeAdvection(x, y, Index);
-
-			// Thermodynamique — lit et écrit dans Write (post-advection)
-			// On passe maintenant x, y, et l'Offset à la Thermodynamique !
-			ComputeThermodynamics(x, y, Index, OffX, OffY);
-		}
-	}
-
-	// --- Étape 4 : Bordure Génératrice (Inflow Boundary) ---
-	// Au lieu de détruire la météo, on force le bord extrême de la carte à lire 
-	// le générateur procédural en continu. Le vent aspirera ces données naturellement.
-	for (int32 i = 0; i < GridSizeX * GridSizeY; ++i)
-	{
-		const int32 x = i % GridSizeX;
-		const int32 y = i / GridSizeX;
-
-		// Si on est sur l'anneau extérieur de la grille...
-		if (x == 0 || y == 0 || x == GridSizeX - 1 || y == GridSizeY - 1)
-		{
-			// On génère la météo pure du monde à cet endroit précis
-			(*CurrentWriteGrid)[i] = GenerateProceduralCell(x + OffX, y + OffY);
-		}
-	}
+    CommandQueue.Enqueue(Cmd);
 }
 
 // ============================================================
-// Étape 1 — ApplyGridShift
-// Décale les données de CurrentReadGrid pour suivre le joueur.
-// Les nouvelles cellules découvertes en bordure sont générées procéduralement.
+//  GRID INITIALISATION
 // ============================================================
-void FWeatherSimulationThread::ApplyGridShift()
+
+void FWeatherSimulationThread::InitialiseGrid()
 {
-	// Capture atomique et remise à zéro du décalage en attente
-	int32 ShiftX, ShiftY, OffX, OffY;
-	{
-		FScopeLock Lock(&ShiftLock);
-		ShiftX = PendingShiftX;
-		ShiftY = PendingShiftY;
-		OffX = GlobalOffsetX;
-		OffY = GlobalOffsetY;
-		PendingShiftX = 0;
-		PendingShiftY = 0;
-	}
+    const int32 N = Config.GridNX * Config.GridNY * Config.GridNZ;
+    CurrentState.NX = Config.GridNX;
+    CurrentState.NY = Config.GridNY;
+    CurrentState.NZ = Config.GridNZ;
+    CurrentState.Cells.SetNum(N);
+    CurrentState.Columns.SetNum(Config.GridNX * Config.GridNY);
 
-	if (ShiftX == 0 && ShiftY == 0) return;
+    for (int32 z = 0; z < Config.GridNZ; ++z)
+    {
+        const float Z_m = GetAltitude(z);
+        for (int32 y = 0; y < Config.GridNY; ++y)
+            for (int32 x = 0; x < Config.GridNX; ++x)
+            {
+                auto& Cell = CurrentState.At(x, y, z);
+                SetBaseStateProfile(Cell, Z_m);
+            }
+    }
 
-	// Copie temporaire pour lire les anciennes valeurs sans conflits
-	TArray<FWeatherCell> TempGrid = *CurrentReadGrid;
+    // Pre-allocate RK4 buffers
+    K1.SetNum(N); K2.SetNum(N); K3.SetNum(N); K4.SetNum(N);
+    TempStateA = CurrentState;
+    TempStateB = CurrentState;
+}
 
-	int32 NewCellsGenerated = 0;
+void FWeatherSimulationThread::SetBaseStateProfile(FAtmosphericCell& Cell,
+                                                   float Z_m) const
+{
+    const float LapseRate = 6.5e-3f; // K/m
+    float T = WeatherConst::T0 - LapseRate * Z_m;
+    float P = WeatherConst::P0 * FMath::Pow(T / WeatherConst::T0,
+                                            WeatherConst::g / (WeatherConst::Rd * LapseRate));
+    float Rho = P / (WeatherConst::Rd * T);
 
-	for (int32 y = 0; y < GridSizeY; ++y)
-	{
-		for (int32 x = 0; x < GridSizeX; ++x)
-		{
-			const int32 Index = y * GridSizeX + x;
+    Cell.Temperature = T;
+    Cell.Pres = P;
+    Cell.Rho = Rho;
+    Cell.Theta = T * FMath::Pow(WeatherConst::P0 / P, WeatherConst::Kappa);
+    Cell.U = Config.MeanWind.X;
+    Cell.V = Config.MeanWind.Y;
+    Cell.W = 0.f;
 
-			// Où lire dans l'ancienne grille ?
-			// Si le joueur avance de +1 cellule en X, ShiftX=+1 :
-			// la cellule (x) doit maintenant contenir ce qui était en (x+1).
-			const int32 SrcX = x + ShiftX;
-			const int32 SrcY = y + ShiftY;
+    float BL_depth = 2000.f;
+    float RH_BL = 0.80f, RH_FT = 0.30f;
+    float RH = FMath::Lerp(RH_BL, RH_FT, FMath::Clamp(Z_m / BL_depth, 0.f, 1.f));
 
-			if (SrcX >= 0 && SrcX < GridSizeX && SrcY >= 0 && SrcY < GridSizeY)
-			{
-				// Zone connue : on déplace les données existantes
-				(*CurrentReadGrid)[Index] = TempGrid[SrcY * GridSizeX + SrcX];
-			}
-			else
-			{
-				// Nouvelle zone découverte : génération procédurale
-				// On utilise les coordonnées GLOBALES pour un bruit continu et cohérent
-				const int32 WorldCellX = x + OffX;
-				const int32 WorldCellY = y + OffY;
-				(*CurrentReadGrid)[Index] = GenerateProceduralCell(WorldCellX, WorldCellY);
-				++NewCellsGenerated;
-			}
-		}
-	}
+    float Es = ClaudiusClapeyron_Es(T);
+    float Qs = 0.622f * Es / (P - Es);
+    Cell.Qv = FMath::Max(0.f, RH * Qs);
+    Cell.Ql = Cell.Qi = 0.f;
+}
 
-	{
-		FScopeLock Lock(&MetricsLock);
-		Metrics.LastNewCellsCount = NewCellsGenerated;
-		Metrics.LastShiftX = ShiftX;
-		Metrics.LastShiftY = ShiftY;
-	}
+void FWeatherSimulationThread::ApplyRandomPerturbations()
+{
+    FRandomStream Rand(42);
+    for (int32 z = 0; z < FMath::Min(5, Config.GridNZ); ++z)
+        for (int32 y = 0; y < Config.GridNY; ++y)
+            for (int32 x = 0; x < Config.GridNX; ++x)
+            {
+                CurrentState.At(x, y, z).Theta += Rand.FRandRange(-0.1f, 0.1f);
+            }
 }
 
 // ============================================================
-// Génération procédurale d'une cellule (coordonnées monde absolues)
-// Deux couches de Perlin pour une structure nuageuse naturelle.
+//  PUBLISH RENDER GRID (Lock-Free Optimization)
 // ============================================================
-FWeatherCell FWeatherSimulationThread::GenerateProceduralCell(int32 WorldCellX, int32 WorldCellY) const
+
+void FWeatherSimulationThread::PublishRenderGrid()
 {
-	FWeatherCell Cell;
+    auto& WriteGrid = DoubleBuffer.GetWriteBuffer();
+    const int32 RNX = DoubleBuffer.GetWriteRNX();
+    const int32 RNY = DoubleBuffer.GetWriteRNY();
+    const int32 RNZ = DoubleBuffer.GetWriteRNZ();
+    const int32 DS = FWeatherDoubleBuffer::RenderDownsample;
 
-	// --- ÉCHELLES DE BRUIT (Zoom du monde procédural) ---
-	// On AUGMENTE ces valeurs pour rétrécir la taille des motifs.
-	// Ainsi, au lieu d'avoir un seul continent météo sur tout l'écran, 
-	// on aura de multiples petites tempêtes et anticyclones sur nos 256 pixels !
-	const float CoarseScale = 0.200f; // (Avant: 0.04) Humidité globale
-	const float FineScale = 0.500f; // (Avant: 0.12) Détails des nuages
-	const float TempScale = 0.080f; // (Avant: 0.015) Taches de chaleur
-	const float PressScale = 0.050f; // (Avant: 0.008) Zones de pression
+    for (int32 rz = 0; rz < RNZ; ++rz)
+        for (int32 ry = 0; ry < RNY; ++ry)
+            for (int32 rx = 0; rx < RNX; ++rx)
+            {
+                // Average a DS×DS×DS block of sim cells into one render cell
+                float SU = 0, SV = 0, SW = 0, ST = 0, SRH = 0, SCloud = 0, SRain = 0, SdBZ = 0, STKE = 0, SVort = 0, SHail = 0;
+                int32 N = 0;
 
-	// 2. MÉTÉO MACRO (Température & Pression) -> TOTALEMENT ANCRÉE AU MONDE
-	// Ces valeurs définissent le climat permanent ou lent de la région.
-	const float NoiseTemp = FMath::PerlinNoise2D(FVector2D(WorldCellX * TempScale, WorldCellY * TempScale));
-	const float NoisePress = FMath::PerlinNoise2D(FVector2D(WorldCellX * PressScale, WorldCellY * PressScale));
+                for (int32 dz = 0; dz < DS; ++dz)
+                    for (int32 dy = 0; dy < DS; ++dy)
+                        for (int32 dx = 0; dx < DS; ++dx)
+                        {
+                            int32 simX = FMath::Clamp(rx * DS + dx, 0, CurrentState.NX - 1);
+                            int32 simY = FMath::Clamp(ry * DS + dy, 0, CurrentState.NY - 1);
+                            int32 simZ = FMath::Clamp(rz * DS + dz, 0, CurrentState.NZ - 1);
 
-	// 3. MÉTÉO VISUELLE INFINIE (Nuages lointains) -> DÉRIVE DANS LE TEMPS
-	// On crée un faux décalage basé sur le temps *uniquement* pour le dessin des nuages infinis
-	// pour qu'ils n'aient pas l'air figés sur le radar.
-	float BaseWindU = CellSize / 100.f; // Le vent de base (ex: vers l'Est)
-	float BaseWindV = BaseWindU * 0.4f;
+                            const auto& C = CurrentState.At(simX, simY, simZ);
+                            SU += C.U; SV += C.V; SW += C.W;
+                            ST += C.Temperature;
+                            SRH += C.RelativeHumidity;
+                            SCloud += C.Ql + C.Qi;
+                            SRain += C.Rain.MixingRatio * C.Rain.FallSpeed * 3600.f * 1000.f; // mm/hr
+                            SdBZ += C.Reflectivity_dBZ;
+                            STKE += C.TKE;
+                            SVort += C.VortZ;
+                            SHail += C.Hail.MixingRatio;
+                            ++N;
+                        }
 
-	float CloudDriftX = WorldCellX - (SimulationTime * BaseWindU * 0.1f); // 0.1f pour que l'infini bouge doucement
-	float CloudDriftY = WorldCellY - (SimulationTime * BaseWindV * 0.1f);
+                auto& R = WriteGrid[rx + ry * RNX + rz * RNX * RNY];
+                float Inv = 1.f / N;
+                R.U = SU * Inv;
+                R.V = SV * Inv;
+                R.W = SW * Inv;
+                R.Temperature = ST * Inv;
+                R.RelativeHumidity = SRH * Inv;
+                R.CloudFraction = FMath::Clamp(SCloud * Inv * 500.f, 0.f, 1.f);
+                R.RainRate = SRain * Inv;
+                R.Reflectivity_dBZ = SdBZ * Inv;
+                R.TKE = STKE * Inv;
+                R.VortZ = SVort * Inv;
+                R.HailMR = SHail * Inv;
+                R.PhenomenonByte = 0;
+            }
 
-	const float NoiseCoarse = FMath::PerlinNoise2D(FVector2D(CloudDriftX * CoarseScale, CloudDriftY * CoarseScale));
-	const float NoiseFine = FMath::PerlinNoise2D(FVector2D(CloudDriftX * FineScale, CloudDriftY * FineScale));
-
-	// 4. CALCUL DE L'HUMIDITÉ
-	const float RawHumidity = ((NoiseCoarse * 0.7f) + (NoiseFine * 0.3f) + 1.f) * 0.5f;
-
-	Cell.Humidity = RawHumidity > 0.55f ? RawHumidity : 0.f;
-	Cell.Temperature = 20.f + NoiseTemp * 8.f;
-	Cell.Pressure = 1013.f + NoisePress * 12.f;
-
-	// Vent constant (calibré pour traverser 1 cellule par seconde)
-	const float WindSpeed = CellSize / 100.f;                  // cm → m/s
-	Cell.WindVector = FVector2D(WindSpeed, WindSpeed * 0.4f); // Légère composante Nord
-
-	return Cell;
+    DoubleBuffer.CommitWrite(SimTime.load());
 }
 
 // ============================================================
-// Étape 2 — ComputeAdvection (transport semi-lagrangien)
-// On remonte le vecteur vent pour trouver la cellule source.
-// Interpolation bilinéaire pour un résultat lisse.
+//  STORM DETECTION (Internal)
 // ============================================================
-void FWeatherSimulationThread::ComputeAdvection(int32 x, int32 y, int32 Index)
+
+TArray<FStormCell> FWeatherSimulationThread::DetectStormsInternal(const FSimulationState& State)
 {
-	const FWeatherCell& InCell = (*CurrentReadGrid)[Index];
-	FWeatherCell& OutCell = (*CurrentWriteGrid)[Index];
+    TArray<FStormCell> NewCells;
 
-	// DeltaTime fixe = 1 seconde (fréquence de tick du Subsystem)
-	constexpr float DeltaTime = 1.f;
+    const float dBZ_threshold = 40.f;  // dBZ — severe storm threshold
+    const float W_threshold = 10.f;  // m/s updraft
+    const float VortZ_threshold = 0.01f; // 1/s vertical vorticity
 
-	// Position source : on "remonte" le vent (advection inverse)
-	// WindVector est en m/s ; on divise par CellSize (en cm) après conversion pour avoir une position en cellules
-	const float SrcU = static_cast<float>(x) - (InCell.WindVector.X * 100.f * DeltaTime / CellSize);
-	const float SrcV = static_cast<float>(y) - (InCell.WindVector.Y * 100.f * DeltaTime / CellSize);
+    const float DX_cm = Config.DX_km * 100000.f;
 
-	// Coins de l'interpolation bilinéaire
-	const int32 x0 = FMath::Clamp(FMath::FloorToInt(SrcU), 0, GridSizeX - 1);
-	const int32 y0 = FMath::Clamp(FMath::FloorToInt(SrcV), 0, GridSizeY - 1);
-	const int32 x1 = FMath::Clamp(x0 + 1, 0, GridSizeX - 1);
-	const int32 y1 = FMath::Clamp(y0 + 1, 0, GridSizeY - 1);
+    for (int32 y = 1; y < State.NY - 1; ++y)
+        for (int32 x = 1; x < State.NX - 1; ++x)
+        {
+            float MaxdBZ = -32.f, MaxW = 0.f, MaxVort = 0.f;
+            float EchoTop_m = 0.f;
+            int32 MaxW_z = 0;
 
-	const float Fx = SrcU - FMath::FloorToFloat(SrcU);
-	const float Fy = SrcV - FMath::FloorToFloat(SrcV);
+            for (int32 z = 0; z < State.NZ; ++z)
+            {
+                const auto& C = State.At(x, y, z);
+                if (C.Reflectivity_dBZ > MaxdBZ)
+                {
+                    MaxdBZ = C.Reflectivity_dBZ;
+                    if (C.Reflectivity_dBZ > dBZ_threshold)
+                        EchoTop_m = Config.DZ_m * z * (1.f + 0.05f * z);
+                }
+                if (C.W > MaxW) { MaxW = C.W; MaxW_z = z; }
+                if (FMath::Abs(C.VortZ) > MaxVort) MaxVort = FMath::Abs(C.VortZ);
+            }
 
-	const FWeatherCell& C00 = (*CurrentReadGrid)[y0 * GridSizeX + x0];
-	const FWeatherCell& C10 = (*CurrentReadGrid)[y0 * GridSizeX + x1];
-	const FWeatherCell& C01 = (*CurrentReadGrid)[y1 * GridSizeX + x0];
-	const FWeatherCell& C11 = (*CurrentReadGrid)[y1 * GridSizeX + x1];
+            if (MaxdBZ < dBZ_threshold && MaxW < W_threshold) continue;
 
-	// Lambda d'interpolation bilinéaire pour éviter la répétition
-	auto Bilerp = [Fx, Fy](float v00, float v10, float v01, float v11) -> float
-	{
-		return FMath::Lerp(FMath::Lerp(v00, v10, Fx), FMath::Lerp(v01, v11, Fx), Fy);
-	};
+            FVector CellPos = Config.WorldOrigin + FVector((float)x * DX_cm, (float)y * DX_cm, 0.f);
+            bool bDuplicate = false;
+            for (const auto& Existing : NewCells)
+            {
+                if (FVector::Dist2D(Existing.Position, CellPos) < DX_cm * 5.f)
+                {
+                    bDuplicate = true; break;
+                }
+            }
+            if (bDuplicate) continue;
 
-	// Les champs transportés par le vent
-	OutCell.Temperature = Bilerp(C00.Temperature, C10.Temperature, C01.Temperature, C11.Temperature);
-	OutCell.Humidity = Bilerp(C00.Humidity, C10.Humidity, C01.Humidity, C11.Humidity);
-	OutCell.PrecipitationIntensity = Bilerp(C00.PrecipitationIntensity, C10.PrecipitationIntensity, C01.PrecipitationIntensity, C11.PrecipitationIntensity);
-	// Note : on n'advecte pas CAPE ni UpdraftVelocity (dérivés, recalculés en thermodynamique)
+            FStormCell Cell;
+            Cell.Position = CellPos;
+            Cell.MaxRefl_dBZ = MaxdBZ;
+            Cell.EchoTop_km = EchoTop_m / 1000.f;
+            Cell.MaxW_ms = MaxW;
+            Cell.MaxVortZ = MaxVort;
+
+            float RotVel = MaxVort * 2000.f;
+            Cell.RotationalVelocity_ms = RotVel;
+            Cell.MesocycloneDiameter_km = 2.f;
+            Cell.bIsMesocyclone = (RotVel > 10.f && MaxW > 20.f);
+            Cell.bTVS = (RotVel > 20.f && MaxW > 30.f);
+
+            const auto& Col = State.Columns[x + y * State.NX];
+            Cell.Type = Col.ClassifyPhenomenon();
+
+            NewCells.Add(Cell);
+        }
+
+    TrackStormCellsInternal(NewCells);
+    return InternalTrackedStorms;
+}
+
+void FWeatherSimulationThread::TrackStormCellsInternal(TArray<FStormCell>& NewCells)
+{
+    const float MaxMatchDist_cm = Config.DX_km * 100000.f * 10.f;
+    TArray<bool> Matched;
+    Matched.SetNumZeroed(InternalTrackedStorms.Num());
+    if (Matched.IsEmpty() && NewCells.IsEmpty()) return;
+
+    for (auto& New : NewCells)
+    {
+        float BestDist = MaxMatchDist_cm;
+        int32 BestIdx = -1;
+
+        for (int32 i = 0; i < Matched.Num(); ++i)
+        {
+            if (Matched[i]) continue;
+
+            float D = FVector::Dist2D(New.Position, InternalTrackedStorms[i].Position);
+            if (D < BestDist) { BestDist = D; BestIdx = i; }
+        }
+
+        if (BestIdx >= 0)
+        {
+            float Dt = 5.f; // 5s update rate
+            InternalTrackedStorms[BestIdx].Motion_ms = (New.Position - InternalTrackedStorms[BestIdx].Position) / (Dt * 100.f);
+            InternalTrackedStorms[BestIdx].Position = New.Position;
+            InternalTrackedStorms[BestIdx].MaxRefl_dBZ = New.MaxRefl_dBZ;
+            InternalTrackedStorms[BestIdx].EchoTop_km = New.EchoTop_km;
+            InternalTrackedStorms[BestIdx].MaxW_ms = New.MaxW_ms;
+            InternalTrackedStorms[BestIdx].MaxVortZ = New.MaxVortZ;
+            InternalTrackedStorms[BestIdx].bIsMesocyclone = New.bIsMesocyclone;
+            InternalTrackedStorms[BestIdx].bTVS = New.bTVS;
+            InternalTrackedStorms[BestIdx].Age_s += Dt;
+            Matched[BestIdx] = true;
+        }
+        else
+        {
+            New.TrackID = NextTrackID++;
+            New.Age_s = 0.f;
+            InternalTrackedStorms.Add(New);
+        }
+    }
+
+    for (int32 i = Matched.Num() - 1; i >= 0; --i)
+    {
+        if (!Matched[i])
+        {
+            InternalTrackedStorms.RemoveAtSwap(i);
+        }
+    }
 }
 
 // ============================================================
-// Étape 3 — ComputeThermodynamics
-// Évaporation, instabilité convective (CAPE), précipitations, grêle.
-// Lit et écrit dans CurrentWriteGrid (post-advection).
+//  RK4 TIME INTEGRATION
 // ============================================================
-void FWeatherSimulationThread::ComputeThermodynamics(int32 x, int32 y, int32 Index, int32 OffX, int32 OffY)
+
+void FWeatherSimulationThread::StepRK4(float DT)
 {
-	FWeatherCell& Cell = (*CurrentWriteGrid)[Index];
+    const int32 N = CurrentState.Cells.Num();
 
-	// --- 1. Évaporation ---
-	// Ne s'applique que dans les zones DÉJÀ humides pour éviter de remplir le ciel clair
-	if (Cell.Humidity > 0.2f)
-	{
-		const float EvapRate = FMath::Max(0.f, Cell.Temperature * 0.0004f);
-		Cell.Humidity = FMath::Clamp(Cell.Humidity + EvapRate, 0.f, 1.f);
-	}
+    // k1 = f(y_n)
+    ComputeTendencies(CurrentState, K1, DT);
 
-	// --- 2. CAPE (Convective Available Potential Energy) ---
-	// L'instabilité se développe si l'air est chaud ET humide
-	if (Cell.Temperature > 20.f && Cell.Humidity > 0.60f)
-	{
-		// On utilise FMath::Pow() sur l'humidité pour que le CAPE n'explose 
-		// vraiment que quand on s'approche des 90% d'humidité !
-		Cell.CAPE = (Cell.Temperature - 20.f) * FMath::Pow(Cell.Humidity, 3.f) * 1500.f;
-	}
-	else
-	{
-		Cell.CAPE = 0.f;
-	}
+    // k2 = f(y_n + DT/2 * k1)
+    for (int32 i = 0; i < N; ++i)
+    {
+        TempStateA.Cells[i] = CurrentState.Cells[i];
+        TempStateA.Cells[i].U += 0.5f * DT * K1[i].U;
+        TempStateA.Cells[i].V += 0.5f * DT * K1[i].V;
+        TempStateA.Cells[i].W += 0.5f * DT * K1[i].W;
+        TempStateA.Cells[i].Theta += 0.5f * DT * K1[i].Theta;
+        TempStateA.Cells[i].Qv += 0.5f * DT * K1[i].Qv;
+    }
+    ComputeTendencies(TempStateA, K2, DT);
 
-	// --- 3. Précipitations (Pluie classique) ---
-	// On commence à pleuvoir plus tôt (80%) et plus fort (x250)
-	if (Cell.Humidity >= 0.80f)
-	{
-		// Avec 100% d'humidité, on atteint (1.0 - 0.8) * 250 = 50 mm/h ! (Le rouge est enfin possible)
-		Cell.PrecipitationIntensity = FMath::Clamp((Cell.Humidity - 0.80f) * 250.f, 0.f, 50.f);
-		Cell.Humidity -= 0.02f;
-	}
-	else
-	{
-		Cell.PrecipitationIntensity = 0.f;
-	}
+    // k3 = f(y_n + DT/2 * k2)
+    for (int32 i = 0; i < N; ++i)
+    {
+        TempStateB.Cells[i] = CurrentState.Cells[i];
+        TempStateB.Cells[i].U += 0.5f * DT * K2[i].U;
+        TempStateB.Cells[i].V += 0.5f * DT * K2[i].V;
+        TempStateB.Cells[i].W += 0.5f * DT * K2[i].W;
+        TempStateB.Cells[i].Theta += 0.5f * DT * K2[i].Theta;
+        TempStateB.Cells[i].Qv += 0.5f * DT * K2[i].Qv;
+    }
+    ComputeTendencies(TempStateB, K3, DT);
 
-	// --- 4. Updrafts et Grêle ---
-	if (Cell.CAPE > 800.f)
-	{
-		Cell.UpdraftVelocity = FMath::Sqrt(2.f * Cell.CAPE) * 0.35f;
+    // k4 = f(y_n + DT * k3)
+    for (int32 i = 0; i < N; ++i)
+    {
+        TempStateA.Cells[i] = CurrentState.Cells[i];
+        TempStateA.Cells[i].U += DT * K3[i].U;
+        TempStateA.Cells[i].V += DT * K3[i].V;
+        TempStateA.Cells[i].W += DT * K3[i].W;
+        TempStateA.Cells[i].Theta += DT * K3[i].Theta;
+        TempStateA.Cells[i].Qv += DT * K3[i].Qv;
+    }
+    ComputeTendencies(TempStateA, K4, DT);
 
-		// On durcit sévèrement la grêle : il faut un updraft de 22 m/s minimum ! (Gros orage)
-		if (Cell.UpdraftVelocity > 22.f)
-		{
-			// La taille des grêlons monte moins vite (* 1.5 au lieu de 2.0)
-			Cell.HailstoneDiameter = (Cell.UpdraftVelocity - 22.f) * 1.5f;
+    // y_{n+1} = y_n + DT/6 * (k1 + 2k2 + 2k3 + k4)
+    for (int32 i = 0; i < N; ++i)
+    {
+        auto& C = CurrentState.Cells[i];
+        C.U += DT / 6.f * (K1[i].U + 2.f * K2[i].U + 2.f * K3[i].U + K4[i].U);
+        C.V += DT / 6.f * (K1[i].V + 2.f * K2[i].V + 2.f * K3[i].V + K4[i].V);
+        C.W += DT / 6.f * (K1[i].W + 2.f * K2[i].W + 2.f * K3[i].W + K4[i].W);
+        C.Theta += DT / 6.f * (K1[i].Theta + 2.f * K2[i].Theta + 2.f * K3[i].Theta + K4[i].Theta);
+        C.Qv += DT / 6.f * (K1[i].Qv + 2.f * K2[i].Qv + 2.f * K3[i].Qv + K4[i].Qv);
 
-			float HailWaterEquivalent = Cell.HailstoneDiameter * 1.5f;
-			Cell.PrecipitationIntensity = FMath::Max(Cell.PrecipitationIntensity, HailWaterEquivalent);
-		}
-		else
-		{
-			Cell.HailstoneDiameter = 0.f;
-		}
-	}
-	else
-	{
-		Cell.UpdraftVelocity = 0.f;
-		Cell.HailstoneDiameter = 0.f;
-	}
+        // Clip to physical bounds
+        C.Qv = FMath::Max(C.Qv, 0.f);
+        C.Ql = FMath::Max(C.Ql, 0.f);
+        C.Qi = FMath::Max(C.Qi, 0.f);
+    }
+}
 
-	// --- 5. Vent Local et Rafales ---
+void FWeatherSimulationThread::ComputeTendencies(const FSimulationState& S,
+                                                 TArray<FAtmosphericCell>& Tend,
+                                                 float DT)
+{
+    for (auto& T : Tend) T = FAtmosphericCell{}; // zero-init
 
-	// Le vent directeur DYNAMIQUE (Change très lentement de direction au fil du temps)
-	// On utilise un bruit 1D très lent pour générer un angle entre -PI et +PI (-180° à 180°)
-	const float WindAngle = FMath::PerlinNoise1D(SimulationTime * 0.002f) * PI;
+    Tend_Momentum(S, Tend, DT);
+    Tend_Continuity(S, Tend);
+    Tend_Thermodynamic(S, Tend);
+    if (Config.bEnableCoriolis)
+        Tend_Coriolis(S, Tend);
+}
 
-	// La force de base du vent (ex: 10 m/s)
-	const float WindSpeed = CellSize / 100.f;
+// ============================================================
+//  MOMENTUM TENDENCY  (advection + pressure gradient + buoyancy)
+// ============================================================
 
-	// On utilise la Trigonométrie (Cos/Sin) pour transformer cet angle en vecteur 2D
-	const float BaseWindU = FMath::Cos(WindAngle) * WindSpeed;
-	const float BaseWindV = FMath::Sin(WindAngle) * WindSpeed;
+void FWeatherSimulationThread::Tend_Momentum(const FSimulationState& S,
+                                             TArray<FAtmosphericCell>& T,
+                                             float /*DT*/)
+{
+    const int32 NX = S.NX, NY = S.NY, NZ = S.NZ;
 
-	// Coordonnées absolues pour que les rafales soient fixes dans le monde infini
-	const float WorldX = x + OffX;
-	const float WorldY = y + OffY;
+    for (int32 z = 1; z < NZ - 1; ++z)
+        for (int32 y = 1; y < NY - 1; ++y)
+            for (int32 x = 1; x < NX - 1; ++x)
+            {
+                const auto& C = S.At(x, y, z);
+                auto& Tc = T[S.Idx(x, y, z)];
 
-	// On décale la lecture du bruit avec SimulationTime pour que les rafales voyagent
-	const float GustScale = 0.08f; // Taille géographique des bourrasques
-	const float TimeShift = SimulationTime * 0.8f; // Vitesse d'évolution du vent
+                float U = C.U, V = C.V, W = C.W;
 
-	// Bruit de Perlin (génère des valeurs entre -1.0 et 1.0)
-	const float GustU = FMath::PerlinNoise2D(FVector2D(WorldX * GustScale + TimeShift, WorldY * GustScale));
-	const float GustV = FMath::PerlinNoise2D(FVector2D(WorldX * GustScale, WorldY * GustScale + TimeShift));
+                // 5th-order upwind advection of U
+                auto GetU = [&](int32 xi, int32 yi, int32 zi) { return S.At(xi, yi, zi).U; };
+                auto GetV = [&](int32 xi, int32 yi, int32 zi) { return S.At(xi, yi, zi).V; };
+                auto GetW = [&](int32 xi, int32 yi, int32 zi) { return S.At(xi, yi, zi).W; };
 
-	// Turbulences liées aux Orages (Le vent s'affole sous la pluie et le CAPE)
-	// Si le ciel est bleu, Multiplier = 1. S'il y a un gros orage, ça peut monter à 4 ou 5 !
-	const float StormTurbulence = 1.0f + (Cell.PrecipitationIntensity * 0.15f) + (Cell.CAPE * 0.001f);
+                Tc.U -= Advect5thOrder(S, x, y, z, U, V, W, GetU, InvDX, InvDZ);
+                Tc.V -= Advect5thOrder(S, x, y, z, U, V, W, GetV, InvDX, InvDZ);
+                Tc.W -= Advect5thOrder(S, x, y, z, U, V, W, GetW, InvDX, InvDZ);
 
-	// Force de base des rafales (ex: +/- 2 m/s), multipliée par la tempête
-	const float GustStrength = 2.0f * StormTurbulence;
+                // Buoyancy on W:  B = g*(theta'/theta_ref + 0.61*qv - ql - qi - qr)
+                // Reference theta from base state
+                float Z_m = GetAltitude(z);
+                float T_ref = WeatherConst::T0 - 6.5e-3f * Z_m;
+                float P_ref = WeatherConst::P0 * FMath::Pow(T_ref / WeatherConst::T0,
+                                                            WeatherConst::g / (WeatherConst::Rd * 6.5e-3f));
+                float Theta_ref = T_ref * FMath::Pow(WeatherConst::P0 / P_ref, WeatherConst::Kappa);
 
-	// On applique le nouveau vent à la cellule pour le prochain tick
-	Cell.WindVector.X = BaseWindU + (GustU * GustStrength);
-	Cell.WindVector.Y = BaseWindV + (GustV * GustStrength);
+                float ThetaPrime = C.Theta - Theta_ref;
+                float Buoyancy = WeatherConst::g * (ThetaPrime / Theta_ref
+                                                    + 0.61f * C.Qv
+                                                    - C.Ql - C.Qi
+                                                    - C.Rain.MixingRatio);
+
+                Tc.W += Buoyancy;
+
+                // Pressure gradient (finite diff on Exner function)
+                float dPdx = (S.At(x + 1, y, z).Pres - S.At(x - 1, y, z).Pres) * 0.5f * InvDX;
+                float dPdy = (S.At(x, y + 1, z).Pres - S.At(x, y - 1, z).Pres) * 0.5f * InvDY;
+                float dPdz = (S.At(x, y, z + 1).Pres - S.At(x, y, z - 1).Pres) * 0.5f * InvDZ;
+
+                float RhoInv = 1.f / FMath::Max(C.Rho, 0.001f);
+                Tc.U -= dPdx * RhoInv;
+                Tc.V -= dPdy * RhoInv;
+                Tc.W -= dPdz * RhoInv;
+
+                // Vertical vorticity (diagnostic)
+                float dVdx = (S.At(x + 1, y, z).V - S.At(x - 1, y, z).V) * 0.5f * InvDX;
+                float dUdy = (S.At(x, y + 1, z).U - S.At(x, y - 1, z).U) * 0.5f * InvDY;
+                // Not a tendency; store in current state directly for diagnostics
+                const_cast<FAtmosphericCell&>(C).VortZ = dVdx - dUdy;
+
+                float dUdx = (S.At(x + 1, y, z).U - S.At(x - 1, y, z).U) * 0.5f * InvDX;
+                float dVdy = (S.At(x, y + 1, z).V - S.At(x, y - 1, z).V) * 0.5f * InvDY;
+                const_cast<FAtmosphericCell&>(C).Divergence = dUdx + dVdy;
+            }
+}
+
+// ============================================================
+//  THERMODYNAMIC TENDENCY
+// ============================================================
+
+void FWeatherSimulationThread::Tend_Thermodynamic(const FSimulationState& S,
+                                                  TArray<FAtmosphericCell>& T)
+{
+    for (int32 z = 1; z < S.NZ - 1; ++z)
+        for (int32 y = 1; y < S.NY - 1; ++y)
+            for (int32 x = 1; x < S.NX - 1; ++x)
+            {
+                const auto& C = S.At(x, y, z);
+                auto& Tc = T[S.Idx(x, y, z)];
+
+                float U = C.U, V = C.V, W = C.W;
+
+                auto GetTheta = [&](int32 xi, int32 yi, int32 zi) { return S.At(xi, yi, zi).Theta; };
+                auto GetQv = [&](int32 xi, int32 yi, int32 zi) { return S.At(xi, yi, zi).Qv;    };
+
+                Tc.Theta -= Advect5thOrder(S, x, y, z, U, V, W, GetTheta, InvDX, InvDZ);
+                Tc.Qv -= Advect5thOrder(S, x, y, z, U, V, W, GetQv, InvDX, InvDZ);
+            }
+}
+
+// ============================================================
+//  CORIOLIS
+// ============================================================
+
+void FWeatherSimulationThread::Tend_Coriolis(const FSimulationState& S,
+                                             TArray<FAtmosphericCell>& T)
+{
+    const float f = Config.CoriolisF();
+    for (int32 i = 0; i < S.Cells.Num(); ++i)
+    {
+        T[i].U += f * S.Cells[i].V;
+        T[i].V -= f * S.Cells[i].U;
+    }
+}
+
+// ============================================================
+//  CONTINUITY TENDENCY (anelastic divergence damping)
+// ============================================================
+
+void FWeatherSimulationThread::Tend_Continuity(const FSimulationState& S,
+                                               TArray<FAtmosphericCell>& T)
+{
+    // For anelastic: divergence damping to maintain ∇·(ρ₀v)=0
+    const float C_div = 0.1f;
+    for (int32 z = 1; z < S.NZ - 1; ++z)
+        for (int32 y = 1; y < S.NY - 1; ++y)
+            for (int32 x = 1; x < S.NX - 1; ++x)
+            {
+                const auto& C = S.At(x, y, z);
+                float Div = C.Divergence;
+                auto& Tc = T[S.Idx(x, y, z)];
+                Tc.U -= C_div * (S.At(x + 1, y, z).Divergence - S.At(x - 1, y, z).Divergence) * 0.5f * InvDX;
+                Tc.V -= C_div * (S.At(x, y + 1, z).Divergence - S.At(x, y - 1, z).Divergence) * 0.5f * InvDY;
+                Tc.W -= C_div * (S.At(x, y, z + 1).Divergence - S.At(x, y, z - 1).Divergence) * 0.5f * InvDZ;
+            }
+}
+
+// ============================================================
+//  PRESSURE POISSON (simplified SOR iteration)
+// ============================================================
+
+void FWeatherSimulationThread::SolvePressurePoisson(FSimulationState& S)
+{
+    // Iterative SOR solver for Poisson equation ∇²p = RHS
+    const int32 NX = S.NX, NY = S.NY, NZ = S.NZ;
+    const float DX = Config.DX_km * 1000.f;
+    const float DZ = Config.DZ_m;
+    const float Omega_SOR = 1.7f;
+    const int32 MaxIter = 10;
+
+    for (int32 iter = 0; iter < MaxIter; ++iter)
+        for (int32 z = 1; z < NZ - 1; ++z)
+            for (int32 y = 1; y < NY - 1; ++y)
+                for (int32 x = 1; x < NX - 1; ++x)
+                {
+                    auto& C = S.At(x, y, z);
+                    // RHS = -ρ₀ * ∇·v / Δt
+                    float RHS = -C.Rho * C.Divergence / Config.DT_s;
+
+                    float P_new = (
+                        (S.At(x + 1, y, z).Pres + S.At(x - 1, y, z).Pres) / (DX * DX) +
+                        (S.At(x, y + 1, z).Pres + S.At(x, y - 1, z).Pres) / (DX * DX) +
+                        (S.At(x, y, z + 1).Pres + S.At(x, y, z - 1).Pres) / (DZ * DZ) - RHS
+                        ) / (2.f / (DX * DX) + 2.f / (DX * DX) + 2.f / (DZ * DZ));
+
+                    C.Pres = C.Pres + Omega_SOR * (P_new - C.Pres);
+                }
+}
+
+// ============================================================
+//  TURBULENCE  — TKE 1.5-order closure (Deardorff/Smagorinsky)
+// ============================================================
+
+void FWeatherSimulationThread::StepTurbulence(FSimulationState& S, float DT)
+{
+    if (!Config.bEnableTurbulence) return;
+
+    const float Cs = 0.18f; // Smagorinsky constant
+    const float DX = Config.DX_km * 1000.f;
+    const float DZ = Config.DZ_m;
+    const float Ck = 0.1f;  // TKE production coefficient
+    const float Ce = 0.93f; // TKE dissipation coefficient
+
+    for (int32 z = 1; z < S.NZ - 1; ++z)
+        for (int32 y = 1; y < S.NY - 1; ++y)
+            for (int32 x = 1; x < S.NX - 1; ++x)
+            {
+                auto& C = S.At(x, y, z);
+                const float L = FMath::Pow(DX * DX * DZ, 1.f / 3.f); // mixing length
+
+                // Strain rate magnitude |S|
+                float dUdz = (S.At(x, y, z + 1).U - S.At(x, y, z - 1).U) * 0.5f * InvDZ;
+                float dVdz = (S.At(x, y, z + 1).V - S.At(x, y, z - 1).V) * 0.5f * InvDZ;
+                float dUdx = (S.At(x + 1, y, z).U - S.At(x - 1, y, z).U) * 0.5f * InvDX;
+                float dVdy = (S.At(x, y + 1, z).V - S.At(x, y - 1, z).V) * 0.5f * InvDY;
+                float dWdz = (S.At(x, y, z + 1).W - S.At(x, y, z - 1).W) * 0.5f * InvDZ;
+
+                float S2 = dUdz * dUdz + dVdz * dVdz + dUdx * dUdx + dVdy * dVdy + dWdz * dWdz;
+                float Km = Cs * Cs * L * L * FMath::Sqrt(2.f * S2); // eddy viscosity
+
+                // Brunt-Väisälä buoyancy term
+                float dTdz = (S.At(x, y, z + 1).Theta - S.At(x, y, z - 1).Theta) * 0.5f * InvDZ;
+                float N2 = FMath::Max(0.f, WeatherConst::g / C.Theta * dTdz);
+
+                // TKE equation: dE/dt = Km*S² - g/Tv * Kh*dTheta/dz - Ce*E^(3/2)/L
+                float Prod = Km * S2;
+                float Buoy = -Km * N2; // buoyancy production/destruction
+                float Diss = Ce * FMath::Pow(FMath::Max(C.TKE, 0.f), 1.5f) / FMath::Max(L, 1.f);
+
+                C.TKE = FMath::Max(0.f, C.TKE + DT * (Prod + Buoy - Diss));
+                C.Eps = Diss;
+
+                // Apply sub-grid diffusion to momentum
+                C.U += DT * Km * (
+                    (S.At(x + 1, y, z).U - 2.f * C.U + S.At(x - 1, y, z).U) * InvDX * InvDX +
+                    (S.At(x, y, z + 1).U - 2.f * C.U + S.At(x, y, z - 1).U) * InvDZ * InvDZ);
+                C.V += DT * Km * (
+                    (S.At(x, y + 1, z).V - 2.f * C.V + S.At(x, y - 1, z).V) * InvDY * InvDY +
+                    (S.At(x, y, z + 1).V - 2.f * C.V + S.At(x, y, z - 1).V) * InvDZ * InvDZ);
+                C.Theta += DT * Km * (
+                    (S.At(x + 1, y, z).Theta - 2.f * C.Theta + S.At(x - 1, y, z).Theta) * InvDX * InvDX +
+                    (S.At(x, y, z + 1).Theta - 2.f * C.Theta + S.At(x, y, z - 1).Theta) * InvDZ * InvDZ);
+            }
+}
+
+// ============================================================
+//  MICROPHYSICS  — dispatch to scheme
+// ============================================================
+
+void FWeatherSimulationThread::StepMicrophysics(FSimulationState& S, float DT)
+{
+    for (int32 z = 0; z < S.NZ; ++z)
+    {
+        const float Z_m = GetAltitude(z);
+        for (int32 y = 0; y < S.NY; ++y)
+            for (int32 x = 0; x < S.NX; ++x)
+            {
+                auto& C = S.At(x, y, z);
+                switch (Config.MicroScheme)
+                {
+                    case EMicrophysicsScheme::Kessler:  Micro_Kessler(C, DT, Z_m); break;
+                    case EMicrophysicsScheme::WSM6:     Micro_WSM6(C, DT, Z_m); break;
+                    case EMicrophysicsScheme::Morrison: Micro_Morrison(C, DT, Z_m); break;
+                    case EMicrophysicsScheme::Thompson: Micro_Thompson(C, DT, Z_m); break;
+                }
+            }
+    }
+}
+
+// ── Kessler warm-rain (simplest) ──────────────────────────
+
+void FWeatherSimulationThread::Micro_Kessler(FAtmosphericCell& C, float DT, float Z_m)
+{
+    ProcessCondensation(C, DT);
+    ProcessAutoconversion(C, DT);
+    ProcessAccretion(C, DT);
+    ProcessEvaporation(C, DT, Z_m);
+    UpdateTerminalFallSpeeds(C);
+}
+
+// ── WSM6 — 6-category bulk 1-moment ──────────────────────
+
+void FWeatherSimulationThread::Micro_WSM6(FAtmosphericCell& C, float DT, float Z_m)
+{
+    Micro_Kessler(C, DT, Z_m);
+    if (C.Temperature < 273.15f)
+    {
+        ProcessFreezingRiming(C, DT);
+        ProcessMelting(C, DT);
+        ProcessHailGrowth(C, DT);
+        ProcessHailFragmentation(C, DT);
+    }
+    UpdateTerminalFallSpeeds(C);
+}
+
+// ── Morrison 2-moment (full ice) ──────────────────────────
+
+void FWeatherSimulationThread::Micro_Morrison(FAtmosphericCell& C, float DT, float Z_m)
+{
+    Micro_WSM6(C, DT, Z_m);
+    // Number concentration tendencies (2-moment extension)
+    // Rain number concentration
+    float Qr = C.Rain.MixingRatio;
+    if (Qr > 1e-7f)
+    {
+        const float N0r = 8e6f; // m⁻⁴ Marshall-Palmer
+        C.Rain.Lambda = FMath::Pow(N0r * PI * 1000.f / (C.Rho * Qr), 0.25f);
+        C.Rain.NumberConc = N0r / C.Rain.Lambda;
+        C.Rain.MeanDiameter = 1.f / FMath::Max(C.Rain.Lambda, 1e-3f);
+    }
+    // Ice/snow number concentrations (simplified Fletcher nucleation)
+    if (C.Temperature < 273.15f)
+    {
+        float Tc = C.Temperature - 273.15f;
+        float Ni = 1e3f * FMath::Exp(-0.6f * Tc); // m⁻³ (Cooper)
+        C.Snow.NumberConc = Ni;
+    }
+}
+
+// ── Thompson aerosol-aware 2-moment ──────────────────────
+
+void FWeatherSimulationThread::Micro_Thompson(FAtmosphericCell& C, float DT, float Z_m)
+{
+    Micro_Morrison(C, DT, Z_m);
+    // Thompson extension: modified gamma for rain (mu_r dependent on Nt)
+    if (C.Rain.NumberConc > 1.f)
+    {
+        // mu–lambda relation (empirical)
+        float mu_r = FMath::Clamp(0.0005f * FMath::Pow(C.Rain.NumberConc, 0.466f), 0.f, 8.f);
+        C.Rain.Lambda = FMath::Pow(
+            (mu_r + 3.f) * (mu_r + 2.f) * (mu_r + 1.f) *
+            PI * 1000.f * C.Rain.NumberConc / (6.f * C.Rho * C.Rain.MixingRatio),
+            0.25f);
+    }
+}
+
+// ============================================================
+//  MICROPHYSICS SUB-PROCESSES
+// ============================================================
+
+float FWeatherSimulationThread::ClaudiusClapeyron_Es(float T_K) const
+{
+    float Tc = T_K - 273.15f;
+    return WeatherConst::EsConst_A *
+        FMath::Exp(WeatherConst::EsConst_B * Tc / (Tc + WeatherConst::EsConst_C));
+}
+
+float FWeatherSimulationThread::SaturationMixingRatio(float T_K, float P_Pa) const
+{
+    float Es = ClaudiusClapeyron_Es(T_K);
+    return 0.622f * Es / FMath::Max(P_Pa - Es, 1.f);
+}
+
+void FWeatherSimulationThread::ProcessCondensation(FAtmosphericCell& C, float DT) const
+{
+    // Saturation adjustment — relax toward Qs
+    float Qs = SaturationMixingRatio(C.Temperature, C.Pres);
+    float dQv = C.Qv - Qs;
+
+    if (dQv > 0.f)
+    {
+        // Supersaturation → condense
+        float dq = dQv / (1.f + WeatherConst::Lv * WeatherConst::Lv * Qs /
+                          (WeatherConst::Rv * WeatherConst::Cp * C.Temperature * C.Temperature));
+        dq = FMath::Min(dq, dQv); // can't condense more than available vapour
+        dq = FMath::Min(dq * DT * 0.5f, dQv); // relaxation timescale
+
+        C.Qv -= dq;
+        C.Ql += dq;
+        C.Theta += WeatherConst::Lv / (WeatherConst::Cp *
+                                       FMath::Pow(WeatherConst::P0 / C.Pres, WeatherConst::Kappa)) * dq;
+    }
+    else if (dQv < 0.f && C.Ql > 0.f)
+    {
+        // Sub-saturation → evaporate cloud water
+        float evap = FMath::Min(-dQv, C.Ql) * DT;
+        C.Ql -= evap;
+        C.Qv += evap;
+        C.Theta -= WeatherConst::Lv / (WeatherConst::Cp *
+                                       FMath::Pow(WeatherConst::P0 / C.Pres, WeatherConst::Kappa)) * evap;
+    }
+}
+
+void FWeatherSimulationThread::ProcessAutoconversion(FAtmosphericCell& C, float DT) const
+{
+    // Berry (1968) autoconversion: cloud water → rain
+    const float Ql_thresh = 5e-4f;
+    if (C.Ql > Ql_thresh)
+    {
+        float dQr = 1.67e-5f * (C.Ql - Ql_thresh) * DT;
+        dQr = FMath::Min(dQr, C.Ql);
+        C.Ql -= dQr;
+        C.Rain.MixingRatio += dQr;
+    }
+}
+
+void FWeatherSimulationThread::ProcessAccretion(FAtmosphericCell& C, float DT) const
+{
+    // Collection of cloud water by rain (Kessler 1969)
+    if (C.Rain.MixingRatio > 1e-7f && C.Ql > 1e-7f)
+    {
+        float dQr = 2.2f * C.Ql * FMath::Pow(C.Rain.MixingRatio * C.Rho, 0.875f) * DT;
+        dQr = FMath::Min(dQr, C.Ql);
+        C.Ql -= dQr;
+        C.Rain.MixingRatio += dQr;
+    }
+}
+
+void FWeatherSimulationThread::ProcessEvaporation(FAtmosphericCell& C, float DT, float Z_m) const
+{
+    // Evaporation of rain below cloud base (sub-saturated air)
+    float Qs = SaturationMixingRatio(C.Temperature, C.Pres);
+    float dS = C.Qv / Qs - 1.f; // saturation deficit (negative)
+
+    if (dS < 0.f && C.Rain.MixingRatio > 1e-7f)
+    {
+        // Parameterised evaporation rate (simplified Ogura-Takahashi)
+        float evap = -dS * 5.4e-3f * FMath::Pow(C.Rain.MixingRatio * C.Rho, 0.65f) * DT;
+        evap = FMath::Min(evap, C.Rain.MixingRatio);
+
+        C.Rain.MixingRatio -= evap;
+        C.Qv += evap;
+        // Evaporative cooling
+        C.Theta -= WeatherConst::Lv / (WeatherConst::Cp *
+                                       FMath::Pow(WeatherConst::P0 / C.Pres, WeatherConst::Kappa)) * evap;
+    }
+}
+
+void FWeatherSimulationThread::ProcessFreezingRiming(FAtmosphericCell& C, float DT) const
+{
+    if (C.Temperature >= 273.15f) return;
+    float Tc = C.Temperature - 273.15f; // negative
+
+    // Riming: cloud water freezes on snow/graupel
+    if (C.Ql > 1e-7f && C.Snow.MixingRatio > 1e-8f)
+    {
+        float rim = 0.3f * C.Snow.MixingRatio * C.Ql * DT;
+        rim = FMath::Min(rim, C.Ql);
+        C.Ql -= rim;
+        C.Graupel.MixingRatio += rim;
+        C.Theta += WeatherConst::Lf / (WeatherConst::Cp *
+                                       FMath::Pow(WeatherConst::P0 / C.Pres, WeatherConst::Kappa)) * rim;
+    }
+
+    // Rain freezing into graupel (Bigg 1953)
+    if (C.Rain.MixingRatio > 1e-7f && C.Temperature < 268.f)
+    {
+        float freeze = 20.f * FMath::Exp(-0.66f * Tc) * C.Rain.MixingRatio * DT;
+        freeze = FMath::Min(freeze, C.Rain.MixingRatio);
+        C.Rain.MixingRatio -= freeze;
+        C.Graupel.MixingRatio += freeze;
+        C.Theta += WeatherConst::Lf / (WeatherConst::Cp *
+                                       FMath::Pow(WeatherConst::P0 / C.Pres, WeatherConst::Kappa)) * freeze;
+    }
+}
+
+void FWeatherSimulationThread::ProcessMelting(FAtmosphericCell& C, float DT) const
+{
+    if (C.Temperature <= 273.15f) return;
+    float excess = C.Temperature - 273.15f;
+
+    auto Melt = [&](float& Solid, bool bHail)
+    {
+        if (Solid < 1e-8f) return;
+        float melt_rate = bHail ? 0.005f : 0.01f;
+        float dm = melt_rate * excess * Solid * DT;
+        dm = FMath::Min(dm, Solid);
+        Solid -= dm;
+        C.Rain.MixingRatio += dm;
+        C.Theta -= WeatherConst::Lf / (WeatherConst::Cp *
+                                       FMath::Pow(WeatherConst::P0 / C.Pres, WeatherConst::Kappa)) * dm;
+    };
+
+    Melt(C.Snow.MixingRatio, false);
+    Melt(C.Graupel.MixingRatio, false);
+    Melt(C.Hail.MixingRatio, true);
+}
+
+void FWeatherSimulationThread::ProcessHailGrowth(FAtmosphericCell& C, float DT) const
+{
+    // Hail growth by wet riming: dm/dt = π r² E ρ_l Δu
+    // Simplified: accretion rate proportional to liquid water content
+    if (C.Hail.MixingRatio < 1e-8f && C.Graupel.MixingRatio < 1e-6f) return;
+    if (C.Temperature > 273.f) return;
+
+    // Convert large graupel to hail under intense updraft (W > 15 m/s)
+    if (C.Graupel.MixingRatio > 1e-4f && C.W > 15.f)
+    {
+        float conv = 0.1f * C.Graupel.MixingRatio * DT;
+        C.Graupel.MixingRatio -= conv;
+        C.Hail.MixingRatio += conv;
+    }
+
+    // Wet growth: hail sweeps up cloud water and rain
+    if (C.Hail.MixingRatio > 1e-8f)
+    {
+        float E_coll = 0.9f; // collection efficiency
+        float A_h = PI * FMath::Pow(C.Hail.MeanDiameter * 0.5f, 2.f);
+        float dV = C.Hail.FallSpeed; // relative speed
+
+        float accrete = E_coll * A_h * dV * (C.Ql + C.Rain.MixingRatio) * DT;
+        float available = C.Ql + C.Rain.MixingRatio;
+        accrete = FMath::Min(accrete, available);
+
+        float fLiq = C.Ql / FMath::Max(available, 1e-10f);
+        C.Ql -= accrete * fLiq;
+        C.Rain.MixingRatio -= accrete * (1.f - fLiq);
+        C.Hail.MixingRatio += accrete;
+    }
+}
+
+void FWeatherSimulationThread::ProcessHailFragmentation(FAtmosphericCell& C, float DT) const
+{
+    // Large hailstones (D > ~5cm) break up due to aerodynamic instability
+    const float D_max = 0.05f; // m
+    if (C.Hail.MeanDiameter > D_max && C.Hail.MixingRatio > 1e-8f)
+    {
+        float frag = 0.05f * C.Hail.MixingRatio * DT; // fragmentation rate
+        C.Hail.MixingRatio -= frag;
+        C.Graupel.MixingRatio += frag * 0.5f;
+        C.Rain.MixingRatio += frag * 0.5f;
+    }
+}
+
+void FWeatherSimulationThread::UpdateTerminalFallSpeeds(FAtmosphericCell& C) const
+{
+    // Terminal velocity: balance gravity vs aerodynamic drag
+    // V_t = sqrt(2mg / (Cd * rho_air * A))
+    auto FallSpeedLiquid = [&](float D_m) -> float
+    {
+        // Atlas & Ulbrich (1977) empirical
+        return D_m < 1e-3f ? 3.78e3f * D_m :
+            (9.65f - 10.3f * FMath::Exp(-600.f * D_m));
+    };
+
+    if (C.Rain.MixingRatio > 1e-7f)
+    {
+        const float N0r = 8e6f;
+        float Qr = C.Rain.MixingRatio * C.Rho;
+        C.Rain.Lambda = FMath::Pow(N0r * PI * 1000.f / Qr, 0.25f);
+        C.Rain.MeanDiameter = 1.f / FMath::Max(C.Rain.Lambda, 1e-4f);
+        C.Rain.FallSpeed = FallSpeedLiquid(C.Rain.MeanDiameter) *
+            FMath::Pow(WeatherConst::RhoAir0 / C.Rho, 0.5f);
+    }
+
+    if (C.Snow.MixingRatio > 1e-8f)
+        C.Snow.FallSpeed = FMath::Min(2.5f, 0.2f * FMath::Pow(C.Snow.MixingRatio * 1000.f, 0.3f));
+
+    if (C.Graupel.MixingRatio > 1e-8f)
+        C.Graupel.FallSpeed = FMath::Min(7.f, 1.0f * FMath::Pow(C.Graupel.MixingRatio * 1000.f, 0.3f));
+
+    if (C.Hail.MixingRatio > 1e-8f)
+    {
+        // Large hail: Vt = 9.32 * D^0.55 (Matson & Huggins)
+        float D = C.Hail.MeanDiameter > 0.f ? C.Hail.MeanDiameter : 0.01f;
+        C.Hail.FallSpeed = FMath::Clamp(9.32f * FMath::Pow(D, 0.55f), 5.f, 50.f);
+    }
+}
+
+// ============================================================
+//  SEDIMENTATION  — precipitation falls through grid
+// ============================================================
+
+void FWeatherSimulationThread::StepSedimentation(FSimulationState& S, float DT)
+{
+    const float DZ = Config.DZ_m;
+
+    for (int32 z = S.NZ - 1; z >= 1; --z)
+        for (int32 y = 0; y < S.NY; ++y)
+            for (int32 x = 0; x < S.NX; ++x)
+            {
+                auto& C = S.At(x, y, z);
+                auto& Below = S.At(x, y, z - 1);
+
+                auto Sediment = [&](FHydrometeorState& H, FHydrometeorState& HBelow)
+                {
+                    if (H.MixingRatio < 1e-9f) return;
+                    float flux = H.FallSpeed * H.MixingRatio * C.Rho / DZ * DT;
+                    flux = FMath::Min(flux, H.MixingRatio);
+                    H.MixingRatio -= flux;
+                    HBelow.MixingRatio += flux;
+                };
+
+                Sediment(C.Rain, Below.Rain);
+                Sediment(C.Snow, Below.Snow);
+                Sediment(C.Graupel, Below.Graupel);
+                Sediment(C.Hail, Below.Hail);
+            }
+}
+
+// ============================================================
+//  RADIATION  — simplified broadband SW/LW
+// ============================================================
+
+void FWeatherSimulationThread::StepRadiation(FSimulationState& S, float DT, float SimTime_s)
+{
+    if (!Config.bEnableRadiation) return;
+
+    const float S0 = 1361.f;  // W/m² solar constant
+    const float AlbEarth = 0.30f;
+    // Solar zenith angle (simplified diurnal cycle)
+    float LocalTime = FMath::Fmod(SimTime_s / 3600.f, 24.f);
+    float ZenithAngle = FMath::DegreesToRadians(90.f - 90.f *
+                                                FMath::Cos(PI * (LocalTime - 6.f) / 12.f));
+    float CosSZA = FMath::Max(0.f, FMath::Cos(ZenithAngle));
+    float SW_TOA = S0 * CosSZA * (1.f - AlbEarth);
+
+    // Simple k-distribution: optical depth proportional to cloud content
+    for (int32 x = 0; x < S.NX; ++x)
+        for (int32 y = 0; y < S.NY; ++y)
+        {
+            float SW = SW_TOA;
+            // Top-down sweep
+            for (int32 z = S.NZ - 1; z >= 0; --z)
+            {
+                auto& C = S.At(x, y, z);
+                float WaterPath = (C.Ql + C.Qi) * C.Rho * Config.DZ_m;
+                float tau = 0.15f * WaterPath * 1000.f; // optical depth
+                float Trans = FMath::Exp(-tau);
+                float Heat = SW * (1.f - Trans) / (C.Rho * WeatherConst::Cp * Config.DZ_m);
+                C.Theta += Heat * DT / FMath::Pow(WeatherConst::P0 / C.Pres, WeatherConst::Kappa);
+                SW *= Trans;
+            }
+
+            // LW cooling: empirical ~2 K/day in clear sky
+            for (int32 z = 0; z < S.NZ; ++z)
+            {
+                auto& C = S.At(x, y, z);
+                float LW = 2.f / 86400.f; // K/s clear sky cooling
+                C.Theta -= LW * DT * FMath::Pow(WeatherConst::P0 / C.Pres, WeatherConst::Kappa);
+            }
+        }
+}
+
+// ============================================================
+//  COLUMN DIAGNOSTICS
+// ============================================================
+
+void FWeatherSimulationThread::ComputeAllColumns(FSimulationState& S)
+{
+    for (int32 y = 0; y < S.NY; ++y)
+        for (int32 x = 0; x < S.NX; ++x)
+        {
+            auto& Col = S.Columns[x + y * S.NX];
+            ComputeColumnCAPE_CIN(S, x, y, Col);
+            ComputeColumnSRH(S, x, y, Col);
+            ComputeShearParams(S, x, y, Col);
+
+            // Composite parameters
+            float CAPE = FMath::Max(Col.CAPE, 1.f);
+            float Shear6 = FMath::Max(Col.BulkShear_0_6km, 1.f);
+            float SRH3 = FMath::Max(Col.SRH_0_3km, 1.f);
+
+            // SCP = (CAPE/1000) * (SRH_03/100) * (shear6/20)
+            Col.SCP = (CAPE / 1000.f) * (SRH3 / 100.f) * (Shear6 / 20.f);
+
+            // STP (Thompson et al. 2003)
+            float LCL_term = (Col.LCL_m < 1000.f) ? 1.f : (2000.f - Col.LCL_m) / 1000.f;
+            LCL_term = FMath::Clamp(LCL_term, 0.f, 1.f);
+            Col.STP = (CAPE / 1500.f) * LCL_term * (SRH3 / 150.f) * (Shear6 / 20.f);
+
+            // SHIP (≈significant hail parameter)
+            float T_500 = S.At(x, y, FMath::Min(25, S.NZ - 1)).Temperature;
+            float ThetaE_diff = 10.f; // simplified
+            Col.SHIP = (CAPE / 2000.f) * (T_500 / 253.f) * (ThetaE_diff / 30.f) * (Shear6 / 25.f);
+
+            // Precipitation rate from lowest-level rain content
+            auto& SfcCell = S.At(x, y, 0);
+            Col.PrecipRate = SfcCell.Rain.MixingRatio * SfcCell.Rain.FallSpeed * 3600.f * 1000.f;
+        }
+}
+
+void FWeatherSimulationThread::ComputeColumnCAPE_CIN(const FSimulationState& S,
+                                                     int32 Cx, int32 Cy,
+                                                     FAtmosphericColumn& Col) const
+{
+    // Parcel method: lift surface parcel, compute buoyancy integral
+    const auto& SfcCell = S.At(Cx, Cy, 0);
+    float T_parcel = SfcCell.Temperature;
+    float Qv_parcel = SfcCell.Qv;
+    float Theta_parcel = SfcCell.Theta;
+
+    Col.CAPE = 0.f; Col.CIN = 0.f;
+    Col.LCL_m = 0.f; Col.LFC_m = 0.f; Col.EL_m = 0.f;
+
+    bool bAboveLCL = false, bAboveLFC = false;
+
+    for (int32 z = 1; z < S.NZ; ++z)
+    {
+        const float Z_m = GetAltitude(z);
+        const auto& Env = S.At(Cx, Cy, z);
+
+        // Dry adiabatic lapse rate below LCL
+        float DZ = Config.DZ_m;
+        if (!bAboveLCL)
+        {
+            T_parcel -= WeatherConst::g / WeatherConst::Cp * DZ;
+            float Qs = SaturationMixingRatio(T_parcel, Env.Pres);
+            if (Qv_parcel >= Qs)
+            {
+                bAboveLCL = true;
+                Col.LCL_m = Z_m;
+            }
+        }
+        else
+        {
+            // Moist adiabatic lapse rate
+            float Es = ClaudiusClapeyron_Es(T_parcel);
+            float Qs = 0.622f * Es / (Env.Pres - Es);
+            float Gamma_m = WeatherConst::g * (1.f + WeatherConst::Lv * Qs /
+                                               (WeatherConst::Rd * T_parcel)) /
+                (WeatherConst::Cp + WeatherConst::Lv * WeatherConst::Lv * Qs /
+                 (WeatherConst::Rv * T_parcel * T_parcel));
+            T_parcel -= Gamma_m * DZ;
+        }
+
+        float Tv_parcel = T_parcel * (1.f + 0.61f * Qv_parcel);
+        float Tv_env = Env.VirtualTemp > 0.f ? Env.VirtualTemp : Env.Temperature;
+        float Buoy = WeatherConst::g * (Tv_parcel - Tv_env) / Tv_env;
+
+        if (bAboveLCL)
+        {
+            if (Buoy > 0.f)
+            {
+                if (!bAboveLFC) { bAboveLFC = true; Col.LFC_m = Z_m; }
+                Col.CAPE += Buoy * DZ;
+                Col.EL_m = Z_m;
+            }
+            else if (!bAboveLFC)
+            {
+                Col.CIN += Buoy * DZ;
+            }
+        }
+    }
+}
+
+void FWeatherSimulationThread::ComputeColumnSRH(const FSimulationState& S,
+                                                int32 Cx, int32 Cy,
+                                                FAtmosphericColumn& Col) const
+{
+    FVector StormC = BunkerStormMotion(S, Cx, Cy);
+    Col.StormMotion = StormC;
+
+    Col.SRH_0_3km = 0.f; Col.SRH_0_1km = 0.f;
+    const float h_3km = 3000.f, h_1km = 1000.f;
+
+    for (int32 z = 1; z < S.NZ - 1; ++z)
+    {
+        float Z_m = GetAltitude(z);
+        if (Z_m > h_3km) break;
+
+        const auto& Below = S.At(Cx, Cy, z - 1);
+        const auto& Above = S.At(Cx, Cy, z + 1);
+
+        // SRH = -(V - C) · (∇ × V) dz  (Storm-Relative Helicity)
+        FVector V_sr = FVector(S.At(Cx, Cy, z).U, S.At(Cx, Cy, z).V, 0.f) - StormC;
+        float dVdz = (Above.V - Below.V) * 0.5f * InvDZ;
+        float dUdz = (Above.U - Below.U) * 0.5f * InvDZ;
+        // Horizontal vorticity components
+        float omegaX = dVdz;  // simplified (ignores d/dx terms)
+        float omegaY = -dUdz;
+
+        float SRH_layer = -(V_sr.X * omegaX + V_sr.Y * omegaY) * Config.DZ_m;
+        Col.SRH_0_3km += SRH_layer;
+        if (Z_m <= h_1km) Col.SRH_0_1km += SRH_layer;
+    }
+}
+
+void FWeatherSimulationThread::ComputeShearParams(const FSimulationState& S,
+                                                  int32 Cx, int32 Cy,
+                                                  FAtmosphericColumn& Col) const
+{
+    const auto& Sfc = S.At(Cx, Cy, 0);
+    FVector V_sfc(Sfc.U, Sfc.V, 0.f);
+
+    auto FindWindAtHeight = [&](float TargetZ) -> FVector
+    {
+        for (int32 z = 0; z < S.NZ; ++z)
+        {
+            if (GetAltitude(z) >= TargetZ)
+            {
+                const auto& C = S.At(Cx, Cy, z);
+                return FVector(C.U, C.V, 0.f);
+            }
+        }
+        return V_sfc;
+    };
+
+    FVector V_1km = FindWindAtHeight(1000.f);
+    FVector V_6km = FindWindAtHeight(6000.f);
+
+    Col.BulkShear_0_6km = (V_6km - V_sfc).Size();
+    Col.BulkShear_0_1km = (V_1km - V_sfc).Size();
+}
+
+FVector FWeatherSimulationThread::BunkerStormMotion(const FSimulationState& S,
+                                                    int32 Cx, int32 Cy) const
+{
+    // Bunker et al. (2000) method: deviation from mean wind
+    FVector MeanWind(0.f);
+    int32 Count = 0;
+    for (int32 z = 0; z < S.NZ && GetAltitude(z) < 6000.f; ++z)
+    {
+        const auto& C = S.At(Cx, Cy, z);
+        MeanWind += FVector(C.U, C.V, 0.f);
+        ++Count;
+    }
+    if (Count > 0) MeanWind /= (float)Count;
+
+    // Deviate 7.5 m/s to the right (Northern Hemisphere supercell)
+    FVector Shear(S.At(Cx, Cy, 6).U - S.At(Cx, Cy, 0).U,
+                  S.At(Cx, Cy, 6).V - S.At(Cx, Cy, 0).V, 0.f);
+    float ShearMag = FMath::Max(Shear.Size(), 1.f);
+    FVector ShearN(-Shear.Y / ShearMag, Shear.X / ShearMag, 0.f); // normal to shear
+
+    return MeanWind + ShearN * 7.5f; // right-mover
+}
+
+// ============================================================
+//  REFLECTIVITY  — Z-R relationships
+// ============================================================
+
+float FWeatherSimulationThread::Z_from_RainMR(float Qr, float Rho) const
+{
+    // Z = 200 R^1.6  (Marshall-Palmer) → rearranged
+    float Rainrate = Qr * Rho * 3600.f; // mm/hr approx
+    return Rainrate > 1e-3f ? 200.f * FMath::Pow(Rainrate, 1.6f) : 0.f; // mm^6/m^3
+}
+
+float FWeatherSimulationThread::Z_from_SnowMR(float Qs, float Rho) const
+{
+    float IWC = Qs * Rho * 1000.f; // g/m³
+    return IWC > 1e-3f ? 670.f * FMath::Pow(IWC, 1.47f) : 0.f;
+}
+
+float FWeatherSimulationThread::Z_from_HailMR(float Qg, float Rho) const
+{
+    float HWC = Qg * Rho * 1000.f;
+    return HWC > 1e-3f ? 4000.f * FMath::Pow(HWC, 1.5f) : 0.f;
+}
+
+void FWeatherSimulationThread::ComputeReflectivity(FSimulationState& S)
+{
+    for (int32 z = 0; z < S.NZ; ++z)
+        for (int32 y = 0; y < S.NY; ++y)
+            for (int32 x = 0; x < S.NX; ++x)
+            {
+                auto& C = S.At(x, y, z);
+                float Z_total = Z_from_RainMR(C.Rain.MixingRatio, C.Rho)
+                    + Z_from_SnowMR(C.Snow.MixingRatio, C.Rho)
+                    + Z_from_HailMR(C.Graupel.MixingRatio + C.Hail.MixingRatio, C.Rho);
+
+                C.Reflectivity_dBZ = Z_total > 0.f ?
+                    10.f * FMath::LogX(10.f, Z_total) : -32.f;
+            }
+}
+
+// ============================================================
+//  5TH-ORDER ADVECTION (WENO-like upwind)
+// ============================================================
+
+float FWeatherSimulationThread::Advect5thOrder(
+    const FSimulationState& S, int32 x, int32 y, int32 z,
+    float U, float V, float W,
+    const TFunctionRef<float(int32, int32, int32)>& GetVal,
+    float InvDXArg, float InvDZArg) const
+{
+    // Simplified 3rd-order upwind for stability
+    auto Upwind3 = [](float vm2, float vm1, float v0, float vp1, float vp2, float vel, float invH)
+    {
+        if (vel > 0.f)
+            return vel * invH * (2.f * v0 + 3.f * vp1 - 6.f * vm1 + vm2) / 6.f;
+        else
+            return vel * invH * (-vp2 + 6.f * vp1 - 3.f * v0 - 2.f * vm1) / 6.f;
+    };
+
+    float adv_x = Upwind3(
+        GetVal(x - 2, y, z), GetVal(x - 1, y, z), GetVal(x, y, z),
+        GetVal(x + 1, y, z), GetVal(x + 2, y, z), U, InvDXArg);
+
+    float adv_y = Upwind3(
+        GetVal(x, y - 2, z), GetVal(x, y - 1, z), GetVal(x, y, z),
+        GetVal(x, y + 1, z), GetVal(x, y + 2, z), V, InvDXArg);
+
+    float adv_z = Upwind3(
+        GetVal(x, y, z - 2), GetVal(x, y, z - 1), GetVal(x, y, z),
+        GetVal(x, y, z + 1), GetVal(x, y, z + 2), W, InvDZArg);
+
+    return adv_x + adv_y + adv_z;
+}
+
+// ============================================================
+//  HELPERS
+// ============================================================
+
+FVector FWeatherSimulationThread::CellToWorld(int32 x, int32 y, int32 z) const
+{
+    float DX_cm = Config.DX_km * 100000.f;
+    return Config.WorldOrigin + FVector(x * DX_cm, y * DX_cm, GetAltitude(z) * 100.f);
+}
+
+bool FWeatherSimulationThread::WorldToCell(const FVector& Pos,
+                                           int32& Cx, int32& Cy, int32& Cz) const
+{
+    FVector Local = Pos - Config.WorldOrigin;
+    float DX_cm = Config.DX_km * 100000.f;
+    float DZ_cm = Config.DZ_m * 100.f;
+    Cx = FMath::RoundToInt(Local.X / DX_cm);
+    Cy = FMath::RoundToInt(Local.Y / DX_cm);
+    Cz = FMath::RoundToInt(Local.Z / DZ_cm);
+    Cx = (Cx % Config.GridNX + Config.GridNX) % Config.GridNX;
+    Cy = (Cy % Config.GridNY + Config.GridNY) % Config.GridNY;
+    Cz = FMath::Clamp(Cz, 0, Config.GridNZ - 1);
+    return true;
+}
+
+float FWeatherSimulationThread::GetAltitude(int32 z) const
+{
+    return Config.DZ_m * z * (1.f + 0.05f * z);
 }
