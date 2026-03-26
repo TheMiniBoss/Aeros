@@ -83,7 +83,7 @@ void UWeatherRadar::Tick(float DeltaTime)
         Elevations[CurrentElevIdx] : 0.5f;
 
     // Compute one azimuth ray per tick at current elevation
-    if (CurrentVolumeScan.Sweeps.Num() <= CurrentElevIdx)
+    while (CurrentVolumeScan.Sweeps.Num() <= CurrentElevIdx)
     {
         FRadarSweep NewSweep;
         NewSweep.Elevation_deg = CurrentElevation_deg;

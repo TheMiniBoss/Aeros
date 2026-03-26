@@ -182,6 +182,9 @@ public:
     UFUNCTION(BlueprintCallable, Category = "Radar|UI")
     UTexture2D* GenerateRadarTexture(const TArray<float>& ReflectivityData, int32 GridX, int32 GridY);
 
+    UFUNCTION(BlueprintCallable, Category = "Radar|Control")
+    void SetAntennaSpeed(float DegreesPerSecond) { AntennaSweepRate = DegreesPerSecond; }
+
 private:
     // Beam propagation
     void  ComputeBeam(float Elevation_deg, float Azimuth_deg, FRadarSweep& Sweep);
