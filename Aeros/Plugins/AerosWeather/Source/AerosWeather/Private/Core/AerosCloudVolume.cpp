@@ -172,16 +172,26 @@ void FAerosCloudVolume::Build(const FAerosSnapshot& Snap, const FAerosCloudVolum
 			float GX = 0.f, GY = 0.f;
 			if (Snap.WorldToGrid(World, GX, GY))
 			{
-				const int32 I = FMath::FloorToInt(GX), J = FMath::FloorToInt(GY);
-				const FAerosSnapCell& C = Snap.At(I, J);
-				Conv = FMath::Clamp(C.Conv, 0.f, 1.f);
-				if (C.CloudCover > 0.6f && C.Conv < 0.2f)
+				// Bilinear between the 4 nearest cell centres: nearest-cell reads drew 2 km square blocks
+				const float FX = GX - 0.5f, FY = GY - 0.5f;
+				const int32 I = FMath::FloorToInt(FX), J = FMath::FloorToInt(FY);
+				const float TX = FX - I, TY = FY - J;
+				const float W00 = (1.f - TX) * (1.f - TY), W10 = TX * (1.f - TY), W01 = (1.f - TX) * TY, W11 = TX * TY;
+				const FAerosSnapCell& C00 = Snap.At(I, J);
+				const FAerosSnapCell& C10 = Snap.At(I + 1, J);
+				const FAerosSnapCell& C01 = Snap.At(I, J + 1);
+				const FAerosSnapCell& C11 = Snap.At(I + 1, J + 1);
+				auto Mix = [&](float A00, float A10, float A01, float A11) { return A00 * W00 + A10 * W10 + A01 * W01 + A11 * W11; };
+				Conv = FMath::Clamp(Mix(C00.Conv, C10.Conv, C01.Conv, C11.Conv), 0.f, 1.f);
+				const float Cover = Mix(C00.CloudCover, C10.CloudCover, C01.CloudCover, C11.CloudCover);
+				// Stratiform deck only for a really overcast, non-convective sky (nimbostratus / stratus)
+				StratDensity = 0.5f * Smooth(0.7f, 0.95f, Cover) * (1.f - Smooth(0.1f, 0.25f, Conv));
+				if (StratDensity > 0.f)
 				{
-					StratDensity = 0.6f * (C.CloudCover - 0.6f) / 0.4f;
-					StratBase = C.CloudBase * 0.001f;
-					StratTop = FMath::Max(C.CloudTop * 0.001f, StratBase + 0.3f);
+					StratBase = Mix(C00.CloudBase, C10.CloudBase, C01.CloudBase, C11.CloudBase) * 0.001f;
+					StratTop = FMath::Max(Mix(C00.CloudTop, C10.CloudTop, C01.CloudTop, C11.CloudTop) * 0.001f, StratBase + 0.3f);
 				}
-				Gust = GustFront(Snap, I, J);
+				Gust = Mix(GustFront(Snap, I, J), GustFront(Snap, I + 1, J), GustFront(Snap, I, J + 1), GustFront(Snap, I + 1, J + 1));
 			}
 
 			Near.Reset();

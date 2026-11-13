@@ -145,6 +145,7 @@ def create_default_texture():
 # Density is computed in HLSL (Custom node) from:
 #   Wx  weather map  (R cover, G base 0-5 km, B top 0-16 km, A precipitation)
 #   Sx  shape map    (R anvil cover, G updraft, B gust front / shelf cloud, A convective activity)
+#   VP/VC voxel grids (previous / current) around the viewer, built from the simulation (FAerosCloudVolume)
 #   N   3D Perlin-Worley shape noise (engine volume texture, 6 km tiles: ~1 km cumulus cells)
 #   E   3D Worley erosion noise (0.8 km tiles)
 # Placement: a cellular cumulus field (1.6 km cells, one dome-shaped puff per cell with probability =
@@ -207,8 +208,20 @@ float shelfBand = saturate((AltKm - 0.45) / 0.08) * saturate((1.9 - AltKm) / 0.6
 float layers    = 0.6 + 0.4 * sin(AltKm * 38.0 + N.g * 5.0);
 float shelf     = gust * shelfBand * layers * saturate(lowFbm * 1.5 - 0.2);
 
-float density = max(cloud, max(anvil * 0.4, shelf * 0.9));
-float dark = saturate(Wx.a * 1.2 + conv * h * 0.3);
+// --- Voxel grid (storm anatomy synthesised from the simulation), eroded by the same noises.
+// Inside the grid storms / anvils / shelves come from the voxels; the 2D path only keeps the
+// fair-weather cumulus there, and takes over beyond the grid (35-40 km fade).
+float2 edgeUV = abs(VU.xy - 0.5) * 2.0;
+float voxIn   = Weight * (1.0 - smoothstep(0.875, 1.0, max(edgeUV.x, edgeUV.y)));
+float voxRaw  = lerp(VP.r, VC.r, Blend);
+float voxDark = lerp(VP.g, VC.g, Blend);
+float vox     = saturate((voxRaw - (1.0 - lowFbm) * 0.5) / 0.5);   // billows at the km scale
+vox = saturate((vox - highMod * 0.45) / 0.55);                        // cauliflower / wisps
+
+float full2D      = max(cloud, max(anvil * 0.4, shelf * 0.9));
+float cumulusOnly = cloud * (1.0 - smoothstep(0.2, 0.4, conv));
+float density = lerp(full2D, max(cumulusOnly, vox), voxIn);
+float dark    = lerp(saturate(Wx.a * 1.2 + conv * h * 0.3), max(saturate(Wx.a * 0.5), voxDark), voxIn);
 return float4(density, dark, anvil, shelf);
 """
 
@@ -258,11 +271,44 @@ def create_cloud_material(default_tex):
                          texture=unreal.load_asset("/Engine/EngineSky/VolumetricClouds/T_VolumeNoiseErosion32"))
     link(uvw_erosion, "", noise_erosion, "UVs")
 
+    # Voxel grids: UVW = ((WorldXY - Rect.xy) / Rect.z + 0.5, AltKm / Rect.w), one rect per buffer
+    default_volume = unreal.load_asset("/Engine/EngineSky/VolumetricClouds/T_VolumeNoiseShape64")
+    vox_samples = {}
+    vox_uvw = {}
+    for k, (tex_name, rect_name) in enumerate([("AerosCloudVolumePrev", "AerosCloudVolumeRectPrev"),
+                                               ("AerosCloudVolumeCur", "AerosCloudVolumeRectCur")]):
+        y = 1400 + 350 * k
+        rect = node(mat, unreal.MaterialExpressionVectorParameter, -2200, y, parameter_name=rect_name,
+                    default_value=unreal.LinearColor(0, 0, 8000000, 16))
+        r_xy = mask(mat, rect, -2000, y, r=True, g=True, src_out="RGBA")
+        r_z = mask(mat, rect, -2000, y + 80, b=True, src_out="RGBA")
+        r_w = mask(mat, rect, -2000, y + 160, a=True, src_out="RGBA")
+        rel_v = binop(mat, unreal.MaterialExpressionSubtract, wp_xy, r_xy, -1850, y)
+        uv_v = binop(mat, unreal.MaterialExpressionDivide, rel_v, r_z, -1700, y)
+        uv_v = binop(mat, unreal.MaterialExpressionAdd, uv_v, const(mat, 0.5, -1700, y + 80), -1550, y)
+        # Domain warp by the shape noise (+-1.2 km): breaks the voxel cylinders into bulging turrets
+        warp = mask(mat, noise_shape, -1700, y + 200, g=True, b=True, src_out="RGBA")
+        warp = binop(mat, unreal.MaterialExpressionSubtract, warp, const(mat, 0.5, -1700, y + 260), -1600, y + 200)
+        warp = binop(mat, unreal.MaterialExpressionMultiply, warp, const(mat, 240000.0, -1700, y + 300), -1500, y + 200)
+        warp = binop(mat, unreal.MaterialExpressionDivide, warp, r_z, -1400, y + 200)
+        uv_v = binop(mat, unreal.MaterialExpressionAdd, uv_v, warp, -1450, y + 40)
+        w_v = binop(mat, unreal.MaterialExpressionDivide, alt, r_w, -1550, y + 120)
+        uvw_v = node(mat, unreal.MaterialExpressionAppendVector, -1400, y)
+        link(uv_v, "", uvw_v, "A")
+        link(w_v, "", uvw_v, "B")
+        sample = node(mat, unreal.MaterialExpressionTextureSampleParameterVolume, -1250, y,
+                      parameter_name=tex_name, texture=default_volume)
+        link(uvw_v, "", sample, "UVs")
+        vox_samples[k] = sample
+        vox_uvw[k] = uvw_v
+    blend = node(mat, unreal.MaterialExpressionScalarParameter, -1250, 2150, parameter_name="AerosCloudVolumeBlend", default_value=1.0)
+    weight = node(mat, unreal.MaterialExpressionScalarParameter, -1250, 2250, parameter_name="AerosCloudVolumeWeight", default_value=0.0)
+
     custom = node(mat, unreal.MaterialExpressionCustom, -700, 400)
     custom.set_editor_property("description", "AerosCloudDensity")
     custom.set_editor_property("output_type", unreal.CustomMaterialOutputType.CMOT_FLOAT4)
     inputs = []
-    for name in ["AltKm", "P", "Wx", "Sx", "N", "E"]:
+    for name in ["AltKm", "P", "Wx", "Sx", "N", "E", "VP", "VC", "VU", "Blend", "Weight"]:
         ci = unreal.CustomInput()
         ci.set_editor_property("input_name", name)
         inputs.append(ci)
@@ -274,6 +320,11 @@ def create_cloud_material(default_tex):
     link(shape_map, "RGBA", custom, "Sx")
     link(noise_shape, "RGBA", custom, "N")
     link(noise_erosion, "RGBA", custom, "E")
+    link(vox_samples[0], "RGBA", custom, "VP")
+    link(vox_samples[1], "RGBA", custom, "VC")
+    link(vox_uvw[1], "", custom, "VU")
+    link(blend, "", custom, "Blend")
+    link(weight, "", custom, "Weight")
 
     density = mask(mat, custom, -450, 300, r=True)
     dark = mask(mat, custom, -450, 450, g=True)
@@ -309,6 +360,15 @@ def create_cloud_material(default_tex):
     glow = binop(mat, unreal.MaterialExpressionMultiply, glow, falloff, 300, 950)
     glow = binop(mat, unreal.MaterialExpressionMultiply, glow, const(mat, 6.0, 300, 1100), 450, 950)
     mel.connect_material_property(glow, "", unreal.MaterialProperty.MP_EMISSIVE_COLOR)
+
+    advanced = node(mat, unreal.MaterialExpressionVolumetricAdvancedMaterialOutput, 700, 1200)
+    for key, value in [("const_phase_g", 0.6), ("const_phase_g2", -0.25), ("const_phase_blend", 0.3),
+                       ("multi_scattering_approximation_octave_count", 2), ("const_multi_scattering_contribution", 0.5),
+                       ("const_multi_scattering_occlusion", 0.4), ("const_multi_scattering_eccentricity", 0.5)]:
+        try:
+            advanced.set_editor_property(key, value)
+        except Exception as e:
+            unreal.log_warning("[Aeros] cloud advanced output: could not set {}: {}".format(key, e))
 
     mel.recompile_material(mat)
     eal.save_loaded_asset(mat)
