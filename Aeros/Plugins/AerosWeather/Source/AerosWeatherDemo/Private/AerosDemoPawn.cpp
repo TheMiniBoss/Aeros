@@ -466,7 +466,7 @@ void AAerosDemoPawn::BuildTour()
 	Tour.Reset();
 	UAerosWeatherSubsystem* Sub = UAerosWeatherSubsystem::Get(this);
 	if (!Sub) return;
-	const int32 NumSteps = 11;
+	const int32 NumSteps = 12;
 	auto Title = [NumSteps](int32 K, const TCHAR* Name) { return FString::Printf(TEXT("Visite %d/%d : %s"), K, NumSteps, Name); };
 	auto Forward = [this]() { return GetControlRotation().Vector().GetSafeNormal2D(); };
 
@@ -501,9 +501,28 @@ void AAerosDemoPawn::BuildTour()
 	};
 	Tour.Add(S);
 
-	S.Title = Title(3, TEXT("les \u00E9clairs"));
+	S.Title = Title(3, TEXT("une supercellule"));
+	S.Caption = TEXT("Vue de c\u00F4t\u00E9, \u00E0 40 km. La tour monte jusqu'au sommet de la troposph\u00E8re et penche avec le vent d'altitude ; l\u00E0-haut elle s'\u00E9tale en enclume. Sous la base : le c\u0153ur de pluie sombre, le nuage-mur d'o\u00F9 naissent les tornades, et sur le flanc une ligne de tours plus petites.");
+	S.Shot = TEXT("03_supercellule");
+	S.Duration = 9.f;
+	S.Enter = [this, Sub]()
+	{
+		Sub->SetTimeScale(60.f);
+		FAerosStormData Storm;
+		if (!Sub->GetNearestStorm(GetActorLocation(), Storm, 1000.f)) return;
+		// Side view: perpendicular to the upper wind so the anvil spreads across the picture
+		const FAerosSynopticState Syn = Sub->GetSynopticState();
+		FVector Wind(Syn.Wind500.X, -Syn.Wind500.Y, 0.0);
+		Wind = Wind.GetSafeNormal2D();
+		if (Wind.IsNearlyZero()) Wind = FVector(1, 0, 0);
+		const FVector Side(-Wind.Y, Wind.X, 0.0);
+		TeleportLookAt(Storm.UpdraftLocation + Side * 4000000.0 + FVector(0, 0, 30000.0), Storm.UpdraftLocation + FVector(0, 0, 450000.0)); // below the cumulus bases, like a storm chaser
+	};
+	Tour.Add(S);
+
+	S.Title = Title(4, TEXT("les \u00E9clairs"));
 	S.Caption = TEXT("La nuit, on voit les \u00E9clairs. Le plus courant part du nuage vers le sol (n\u00E9gatif) : un traceur descend en se ramifiant, puis 3 \u00E0 5 arcs repassent dans le m\u00EAme canal, d'o\u00F9 le scintillement. Plus rare, l'\u00E9clair positif tombe de l'enclume, loin de l'orage, avec un seul arc tr\u00E8s puissant. Beaucoup restent dans le nuage et l'illuminent seulement.");
-	S.Shot = TEXT("03_eclairs");
+	S.Shot = TEXT("04_eclairs");
 	S.Duration = 14.f;
 	S.bShotOnLightning = true;
 	S.Enter = [this, Sub]()
@@ -520,9 +539,9 @@ void AAerosDemoPawn::BuildTour()
 	Tour.Add(S);
 	S.bShotOnLightning = false;
 
-	S.Title = Title(4, TEXT("vue d'ensemble"));
+	S.Title = Title(5, TEXT("vue d'ensemble"));
 	S.Caption = TEXT("Vu de haut. Le radar (en haut \u00E0 droite) montre la pluie : vert = faible, rouge = forte, violet = gr\u00EAle. Les X jaunes marquent les orages qui tournent sur eux-m\u00EAmes (m\u00E9socyclones) : ce sont eux qui font les tornades.");
-	S.Shot = TEXT("04_vue_ensemble");
+	S.Shot = TEXT("05_vue_ensemble");
 	S.Duration = 7.f;
 	S.Enter = [this, Sub, Forward]()
 	{
@@ -532,9 +551,9 @@ void AAerosDemoPawn::BuildTour()
 	};
 	Tour.Add(S);
 
-	S.Title = Title(5, TEXT("une tornade"));
+	S.Title = Title(6, TEXT("une tornade"));
 	S.Caption = TEXT("Quand l'orage tourne et que la base du nuage est basse, la rotation peut descendre jusqu'au sol : c'est la tornade. Le vent y d\u00E9passe 200 km/h et aspire les caisses. Sa force est not\u00E9e de EF0 \u00E0 EF5.");
-	S.Shot = TEXT("05_tornade");
+	S.Shot = TEXT("06_tornade");
 	S.Duration = 10.f;
 	S.Enter = [this, Sub]()
 	{
@@ -547,9 +566,9 @@ void AAerosDemoPawn::BuildTour()
 	};
 	Tour.Add(S);
 
-	S.Title = Title(6, TEXT("un volcan"));
+	S.Title = Title(7, TEXT("un volcan"));
 	S.Caption = TEXT("Le volcan se r\u00E9veille (petits s\u00E9ismes), puis entre en \u00E9ruption. La colonne de cendres monte jusqu'\u00E0 20-30 km, le vent d'altitude l'emporte et la cendre retombe loin. Coul\u00E9es de lave et bombes volcaniques autour du crat\u00E8re.");
-	S.Shot = TEXT("06_volcan");
+	S.Shot = TEXT("07_volcan");
 	S.Duration = 22.f;
 	S.Enter = [this, Sub]()
 	{
@@ -564,9 +583,9 @@ void AAerosDemoPawn::BuildTour()
 	};
 	Tour.Add(S);
 
-	S.Title = Title(7, TEXT("un s\u00E9isme"));
+	S.Title = Title(8, TEXT("un s\u00E9isme"));
 	S.Caption = TEXT("Une faille casse \u00E0 10 km sous terre. Les ondes P (6 km/s) arrivent d'abord, puis les ondes S, plus fortes : la cam\u00E9ra tremble et les caisses tombent. La jauge Secousse donne l'intensit\u00E9 ressentie ici.");
-	S.Shot = TEXT("07_seisme");
+	S.Shot = TEXT("08_seisme");
 	S.Duration = 7.f;
 	S.Enter = [this, Sub, Forward]()
 	{
@@ -576,9 +595,9 @@ void AAerosDemoPawn::BuildTour()
 	};
 	Tour.Add(S);
 
-	S.Title = Title(8, TEXT("un tsunami"));
+	S.Title = Title(9, TEXT("un tsunami"));
 	S.Caption = TEXT("Un s\u00E9isme M9 soul\u00E8ve le fond de la mer au large. La vague file \u00E0 700 km/h en eau profonde, puis ralentit et grandit en arrivant sur la c\u00F4te. Souvent la mer se retire d'abord : c'est le signal pour fuir.");
-	S.Shot = TEXT("08_tsunami");
+	S.Shot = TEXT("09_tsunami");
 	S.Duration = 18.f;
 	S.Enter = [this, Sub]()
 	{
@@ -590,9 +609,9 @@ void AAerosDemoPawn::BuildTour()
 	};
 	Tour.Add(S);
 
-	S.Title = Title(9, TEXT("une crue \u00E9clair"));
+	S.Title = Title(10, TEXT("une crue \u00E9clair"));
 	S.Caption = TEXT("300 mm de pluie tombent d'un coup. Le sol ne peut pas tout absorber : l'eau ruisselle, suit la pente et s'accumule dans les creux. Le courant pousse les objets.");
-	S.Shot = TEXT("09_crue");
+	S.Shot = TEXT("10_crue");
 	S.Duration = 14.f;
 	S.Enter = [this, Sub, Forward]()
 	{
@@ -602,9 +621,9 @@ void AAerosDemoPawn::BuildTour()
 	};
 	Tour.Add(S);
 
-	S.Title = Title(10, TEXT("une temp\u00EAte de sable"));
+	S.Title = Title(11, TEXT("une temp\u00EAte de sable"));
 	S.Caption = TEXT("Au-dessus du d\u00E9sert, la rafale froide qui sort d'un orage frappe le sol sec et soul\u00E8ve le sable : un mur de poussi\u00E8re (haboob) avance et la visibilit\u00E9 tombe \u00E0 quelques centaines de m\u00E8tres.");
-	S.Shot = TEXT("10_haboob");
+	S.Shot = TEXT("11_haboob");
 	S.Duration = 14.f;
 	S.Enter = [this, Sub, Forward]()
 	{
@@ -615,9 +634,9 @@ void AAerosDemoPawn::BuildTour()
 	};
 	Tour.Add(S);
 
-	S.Title = Title(11, TEXT("un blizzard"));
+	S.Title = Title(12, TEXT("un blizzard"));
 	S.Caption = TEXT("Air glac\u00E9 et vent fort : la neige tombe, puis le vent la soul\u00E8ve \u00E0 nouveau. Tout devient blanc, on ne voit plus l'horizon. Le froid ressenti est bien plus bas que la temp\u00E9rature.");
-	S.Shot = TEXT("11_blizzard");
+	S.Shot = TEXT("12_blizzard");
 	S.Duration = 16.f;
 	S.Enter = [this, Sub]()
 	{
