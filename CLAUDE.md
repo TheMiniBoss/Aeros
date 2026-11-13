@@ -32,7 +32,8 @@ Aeros/Plugins/AerosWeather/
 
 ## État actuel (à vérifier / à faire en priorité)
 
-1. **Le plugin n'a jamais été compilé entièrement dans Unreal 5.8.** Une seule erreur a été remontée et corrigée (C4459). Sur le PC de l'utilisateur : compiler en premier, corriger les erreurs, recommencer.
+1. **Le plugin n'a jamais été compilé entièrement dans Unreal 5.8.** Erreurs déjà remontées et corrigées : C4459 (x2), C3495, C2397. Sur le PC de l'utilisateur : compiler en premier, corriger les erreurs, recommencer.
+   - Compiler **éditeur fermé** (sinon Live Coding / Hot Reload bloque les fichiers : erreur LNK1104 sur un `.rsp`). Si LNK1104 revient : supprimer `Aeros/Plugins/AerosWeather/Intermediate` et `Binaries`.
    - Commande type : `"<UE_5.8>\Engine\Build\BatchFiles\Build.bat" AerosEditor Win64 Development -Project="<chemin>\Aeros\Aeros.uproject" -WaitMutex`
 2. Le cœur de simulation est compilé et testé hors moteur : 21 tests passent (`Tests/Standalone/build.sh`). Les relancer après toute modification de `Private/Core` ou `Public/Core`.
 3. Le script Python (`aeros_setup.py`) n'a pas été vérifié de bout en bout dans l'éditeur : regarder le bloc `[Aeros] SUMMARY` dans l'Output Log.
@@ -43,6 +44,9 @@ Aeros/Plugins/AerosWeather/
 
 - **Sources 100 % ASCII** (MSVC) : pas d'accent dans les `.h/.cpp`. Dans les chaînes, utiliser `é` etc. dans `TEXT("...")`.
 - Pas de variable locale qui porte le nom d'une constante de `Aeros::Phys` (`Cp`, `G`, `Lv`, `Rd`, `K0`...) : `AerosSimulation.cpp` fait `using namespace Aeros::Phys` et UE traite le masquage (C4459/C4456/C4458) comme une **erreur**.
+- **Unity build** : UE colle plusieurs `.cpp` ensemble. Un nom dans un namespace anonyme ou un `using namespace` au niveau fichier « fuit » dans les autres fichiers et masque leurs variables locales (erreur C4459). Mettre les helpers dans un namespace au nom unique (`AerosXxxInternal`) et les `using namespace` **dans les fonctions**.
+- Une lambda ne capture pas une variable `static` (ex. `ConstructorHelpers::FObjectFinder`) : erreur C3495. L'utiliser sans capture.
+- `FRandomStream::FRandRange` renvoie un `double` : dans une init avec accolades `{ ... }` vers un `float`, caster avec `float(...)` (erreur C2397).
 - Un `UFUNCTION` ne renvoie pas de `const&` : renvoyer par valeur.
 - Le destructeur de `UAerosWeatherSubsystem` est défini dans le `.cpp` (TUniquePtr d'un type incomplet).
 - Assets optionnels : charger avec `Aeros::LoadOptional` (`AerosAssetUtils.h`) pour éviter les warnings « failed to find ».

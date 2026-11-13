@@ -23,13 +23,14 @@
 #include "Sound/SoundBase.h"
 #include "UObject/ConstructorHelpers.h"
 
-namespace
+namespace AerosVolcanoInternal
 {
 	float MassEruptionRate(int32 VEI) { return FMath::Pow(10.f, VEI + 2.5f); } // kg/s
 	constexpr int32 MaxBombs = 64;
 	constexpr int32 MaxPuffs = 140;
 	constexpr int32 MaxLavaInstances = 1500;
 }
+using namespace AerosVolcanoInternal;
 
 AAerosVolcano::AAerosVolcano()
 {
@@ -68,7 +69,7 @@ AAerosVolcano::AAerosVolcano()
 	FieldSystem = CreateDefaultSubobject<UFieldSystemComponent>(TEXT("FieldSystem"));
 	FieldSystem->SetupAttachment(RootComponent);
 
-	auto MakeISM = [this, &SphereMesh](const TCHAR* Name)
+	auto MakeISM = [this](const TCHAR* Name) // SphereMesh is static: no capture needed
 	{
 		UInstancedStaticMeshComponent* C = CreateDefaultSubobject<UInstancedStaticMeshComponent>(Name);
 		C->SetupAttachment(RootComponent);
@@ -459,7 +460,7 @@ void AAerosVolcano::UpdatePyroclastic(float DeltaSeconds)
 		const float A = Rand.FRandRange(0.f, 2.f * PI);
 		FVector Ground;
 		const FVector P = GetActorLocation() + FVector(FMath::Cos(A), FMath::Sin(A), 0.f) * PyroRadius;
-		if (GroundBelow(P, Ground)) Puffs.Add({ Ground + FVector(0, 0, 3000), Rand.FRandRange(25.f, 45.f), 0.f });
+		if (GroundBelow(P, Ground)) Puffs.Add({ Ground + FVector(0, 0, 3000), float(Rand.FRandRange(25.f, 45.f)), 0.f });
 	}
 }
 
@@ -474,7 +475,7 @@ void AAerosVolcano::UpdatePlumeVisual(float DeltaSeconds)
 	const FVector Vent = GetVentLocation();
 	if (bErupting && Puffs.Num() < MaxPuffs && Rand.FRand() < 0.6f)
 	{
-		Puffs.Add({ Vent + FVector(Rand.FRandRange(-2000.f, 2000.f), Rand.FRandRange(-2000.f, 2000.f), 0.f), Rand.FRandRange(10.f, 20.f), 0.f });
+		Puffs.Add({ Vent + FVector(Rand.FRandRange(-2000.f, 2000.f), Rand.FRandRange(-2000.f, 2000.f), 0.f), float(Rand.FRandRange(10.f, 20.f)), 0.f });
 	}
 
 	FVector Wind = FVector::ZeroVector;

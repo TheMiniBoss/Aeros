@@ -7,9 +7,8 @@
 #include "HAL/PlatformTime.h"
 #include "ProfilingDebugging/CpuProfilerTrace.h"
 
-using namespace Aeros::Phys;
 
-namespace
+namespace AerosSimInternal
 {
 	// Tunables (kept here so the physics reads like the roadmap).
 	constexpr float GravityWaveSpeed = 50.f;    // m/s, shallow-water equivalent depth ~250 m
@@ -39,6 +38,8 @@ namespace
 
 float FAerosVortex::MaxWind() const
 {
+	using namespace Aeros::Phys;
+	using namespace AerosSimInternal;
 	// Holland (1980) gradient max wind, reduced to surface (0.8).
 	return 0.85f * FMath::Sqrt(HollandB * DeltaP * 100.f / (RhoAir * 2.71828f));
 }
@@ -52,6 +53,8 @@ FAerosSimulation::~FAerosSimulation() = default;
 
 FAerosSynopticState FAerosSimulation::MakeScenario(EAerosScenario Scenario, float LatitudeDeg, int32 DayOfYear)
 {
+	using namespace Aeros::Phys;
+	using namespace AerosSimInternal;
 	FAerosSynopticState S;
 	auto Set = [&S](float T, float Td, float T850, float Td850, float T500, FVector2D Ws, FVector2D W850, FVector2D W500, float SST)
 	{
@@ -146,6 +149,8 @@ FAerosSynopticState FAerosSimulation::MakeScenario(EAerosScenario Scenario, floa
 
 void FAerosSimulation::Initialize(const FAerosSimulationSettings& InSettings)
 {
+	using namespace Aeros::Phys;
+	using namespace AerosSimInternal;
 	Settings = InSettings;
 	NX = FMath::Clamp(Settings.GridSizeX, 16, 1024);
 	NY = FMath::Clamp(Settings.GridSizeY, 16, 1024);
@@ -194,6 +199,8 @@ void FAerosSimulation::Initialize(const FAerosSimulationSettings& InSettings)
 
 void FAerosSimulation::BackgroundAt(float Xm, float Ym, float& OutT, float& OutQ, float& OutT850, float& OutQ850, float& OutT500) const
 {
+	using namespace Aeros::Phys;
+	using namespace AerosSimInternal;
 	// Offset from the gradient origin, km, clamped so far travel does not explode values.
 	const FVector World = DomainToWorld(Xm, Ym);
 	const float Ekm = FMath::Clamp(float(World.X - GradientOrigin.X) * 1e-5f, -400.f, 400.f);
@@ -211,6 +218,8 @@ void FAerosSimulation::BackgroundAt(float Xm, float Ym, float& OutT, float& OutQ
 
 FAerosCell FAerosSimulation::MakeBackgroundCell(float Xm, float Ym) const
 {
+	using namespace Aeros::Phys;
+	using namespace AerosSimInternal;
 	FAerosCell C;
 	BackgroundAt(Xm, Ym, C.T, C.Q, C.T850, C.Q850, C.T500);
 	C.Us = Synoptic.WindSurface.X;  C.Vs = Synoptic.WindSurface.Y;
@@ -224,6 +233,8 @@ FAerosCell FAerosSimulation::MakeBackgroundCell(float Xm, float Ym) const
 
 void FAerosSimulation::ApplyStaticSurface(int32 I, int32 J, FAerosCell& C) const
 {
+	using namespace Aeros::Phys;
+	using namespace AerosSimInternal;
 	const FVector World = DomainToWorld((I + 0.5f) * DX, (J + 0.5f) * DX);
 	C.Water = 0.f;
 	C.Bathy = 0.f;
@@ -258,6 +269,8 @@ void FAerosSimulation::ApplyStaticSurface(int32 I, int32 J, FAerosCell& C) const
 
 float FAerosSimulation::ShoreDistanceKm(const FVector& World) const
 {
+	using namespace Aeros::Phys;
+	using namespace AerosSimInternal;
 	float Best = -1e6f;
 	for (const FAerosWaterRegion& R : Settings.WaterRegions)
 	{
@@ -268,6 +281,8 @@ float FAerosSimulation::ShoreDistanceKm(const FVector& World) const
 
 void FAerosSimulation::RecomputeSlopes()
 {
+	using namespace Aeros::Phys;
+	using namespace AerosSimInternal;
 	const float Inv = 1.f / (2.f * DX);
 	for (int32 J = 0; J < NY; ++J)
 	{
@@ -283,6 +298,8 @@ void FAerosSimulation::RecomputeSlopes()
 
 void FAerosSimulation::SetElevation(const TArray<float>& HeightsM, const FVector& SampledCenter)
 {
+	using namespace Aeros::Phys;
+	using namespace AerosSimInternal;
 	if (HeightsM.Num() != NX * NY) return;
 	if (FVector::Dist2D(SampledCenter, Settings.DomainCenter) > DX * 50.0) return; // domain moved meanwhile
 	for (int32 J = 0; J < NY; ++J)
@@ -299,6 +316,8 @@ void FAerosSimulation::SetElevation(const TArray<float>& HeightsM, const FVector
 
 void FAerosSimulation::SetDesertRegions(const TArray<FAerosDesertRegion>& Regions)
 {
+	using namespace Aeros::Phys;
+	using namespace AerosSimInternal;
 	Settings.DesertRegions = Regions;
 	for (int32 J = 0; J < NY; ++J)
 		for (int32 I = 0; I < NX; ++I)
@@ -307,6 +326,8 @@ void FAerosSimulation::SetDesertRegions(const TArray<FAerosDesertRegion>& Region
 
 void FAerosSimulation::SetLatitude(float LatitudeDeg)
 {
+	using namespace Aeros::Phys;
+	using namespace AerosSimInternal;
 	Settings.LatitudeDeg = FMath::Clamp(LatitudeDeg, -89.f, 89.f);
 	Coriolis = CoriolisF(Settings.LatitudeDeg);
 	if (FMath::Abs(Coriolis) < 1e-5f) Coriolis = (Settings.LatitudeDeg < 0.f ? -1.f : 1.f) * 1e-5f;
@@ -316,6 +337,8 @@ void FAerosSimulation::SetLatitude(float LatitudeDeg)
 
 void FAerosSimulation::SetWaterRegions(const TArray<FAerosWaterRegion>& Regions)
 {
+	using namespace Aeros::Phys;
+	using namespace AerosSimInternal;
 	Settings.WaterRegions = Regions;
 	for (int32 J = 0; J < NY; ++J)
 		for (int32 I = 0; I < NX; ++I)
@@ -328,6 +351,8 @@ void FAerosSimulation::SetWaterRegions(const TArray<FAerosWaterRegion>& Regions)
 
 FAerosDateTime FAerosSimulation::GetDateTime() const
 {
+	using namespace Aeros::Phys;
+	using namespace AerosSimInternal;
 	FAerosDateTime D;
 	const double TotalHours = (Settings.StartDayOfYear - 1) * 24.0 + Settings.StartHour + ClockOffsetHours + SimTime / 3600.0;
 	const int64 Days = FMath::FloorToInt64(TotalHours / 24.0);
@@ -353,6 +378,8 @@ FAerosDateTime FAerosSimulation::GetDateTime() const
 
 void FAerosSimulation::SetClock(int32 DayOfYear, float Hour)
 {
+	using namespace Aeros::Phys;
+	using namespace AerosSimInternal;
 	const double Current = (Settings.StartDayOfYear - 1) * 24.0 + Settings.StartHour + ClockOffsetHours + SimTime / 3600.0;
 	const double Desired = (FMath::Clamp(DayOfYear, 1, 365) - 1) * 24.0 + FMath::Clamp(Hour, 0.f, 24.f);
 	const double CurrentInYear = FMath::Fmod(Current, 365.0 * 24.0);
@@ -363,6 +390,8 @@ void FAerosSimulation::SetClock(int32 DayOfYear, float Hour)
 
 void FAerosSimulation::UpdateSun()
 {
+	using namespace Aeros::Phys;
+	using namespace AerosSimInternal;
 	const FAerosDateTime D = [this]()
 	{
 		FAerosDateTime T;
@@ -391,6 +420,8 @@ void FAerosSimulation::UpdateSun()
 
 void FAerosSimulation::UpdateSynoptic()
 {
+	using namespace Aeros::Phys;
+	using namespace AerosSimInternal;
 	const FAerosDateTime D = GetDateTime();
 	if (Settings.Scenario == EAerosScenario::Custom)
 		Synoptic = Settings.CustomSynoptic;
@@ -400,6 +431,8 @@ void FAerosSimulation::UpdateSynoptic()
 
 void FAerosSimulation::SetScenario(EAerosScenario Scenario, const FAerosSynopticState* Custom)
 {
+	using namespace Aeros::Phys;
+	using namespace AerosSimInternal;
 	Settings.Scenario = Scenario;
 	if (Custom) Settings.CustomSynoptic = *Custom;
 	UpdateSynoptic();
@@ -411,12 +444,16 @@ void FAerosSimulation::SetScenario(EAerosScenario Scenario, const FAerosSynoptic
 
 FVector FAerosSimulation::DomainToWorld(float Xm, float Ym) const
 {
+	using namespace Aeros::Phys;
+	using namespace AerosSimInternal;
 	return FVector(Settings.DomainCenter.X + (Xm - NX * DX * 0.5f) * 100.0,
 	               Settings.DomainCenter.Y - (Ym - NY * DX * 0.5f) * 100.0, 0.0);
 }
 
 void FAerosSimulation::WorldToDomain(const FVector& World, float& OutXm, float& OutYm) const
 {
+	using namespace Aeros::Phys;
+	using namespace AerosSimInternal;
 	OutXm = float(World.X - Settings.DomainCenter.X) * 0.01f + NX * DX * 0.5f;
 	OutYm = -float(World.Y - Settings.DomainCenter.Y) * 0.01f + NY * DX * 0.5f;
 }
@@ -427,6 +464,8 @@ void FAerosSimulation::WorldToDomain(const FVector& World, float& OutXm, float& 
 
 void FAerosSimulation::Step(float Dt)
 {
+	using namespace Aeros::Phys;
+	using namespace AerosSimInternal;
 	if (!IsInitialized() || Dt <= 0.f) return;
 	TRACE_CPUPROFILER_EVENT_SCOPE(Aeros_Step);
 	const double T0 = FPlatformTime::Seconds();
@@ -466,6 +505,8 @@ void FAerosSimulation::Step(float Dt)
 
 void FAerosSimulation::StepDynamics(float Dt)
 {
+	using namespace Aeros::Phys;
+	using namespace AerosSimInternal;
 	TRACE_CPUPROFILER_EVENT_SCOPE(Aeros_Dynamics);
 	const float MaxSub = 0.5f * DX / GravityWaveSpeed;
 	const int32 NumSub = FMath::Max(1, FMath::CeilToInt(Dt / MaxSub));
@@ -693,6 +734,8 @@ void FAerosSimulation::StepDynamics(float Dt)
 
 void FAerosSimulation::StepColumnPhysics(float Dt)
 {
+	using namespace Aeros::Phys;
+	using namespace AerosSimInternal;
 	TRACE_CPUPROFILER_EVENT_SCOPE(Aeros_ColumnPhysics);
 	ParallelFor(NY, [&](int32 J)
 	{
@@ -709,6 +752,8 @@ void FAerosSimulation::StepColumnPhysics(float Dt)
 
 void FAerosSimulation::ColumnDiagnostics(FAerosCell& C) const
 {
+	using namespace Aeros::Phys;
+	using namespace AerosSimInternal;
 	C.Psfc = StdPressure + C.P + C.PForced - FMath::Max(C.Elev, 0.f) * ElevPressure;
 	C.Td = FMath::Min(DewPoint(C.Q, C.Psfc), C.T);
 	C.RH = RelativeHumidity(C.T, C.Q, C.Psfc);
@@ -881,6 +926,8 @@ void FAerosSimulation::ColumnDiagnostics(FAerosCell& C) const
 
 float FAerosSimulation::MesoscaleLift(uint32 GI, uint32 GJ) const
 {
+	using namespace Aeros::Phys;
+	using namespace AerosSimInternal;
 	// Unresolved mesoscale ascent (boundaries, terrain, gravity waves): smooth value noise,
 	// ~25 cells wide, evolving over ~90 minutes. Deterministic -> identical on every client.
 	constexpr float Scale = 1.f / 24.f;
@@ -898,6 +945,8 @@ float FAerosSimulation::MesoscaleLift(uint32 GI, uint32 GJ) const
 
 void FAerosSimulation::ColumnPhysics(int32 I, int32 J, FAerosCell& C, float Dt) const
 {
+	using namespace Aeros::Phys;
+	using namespace AerosSimInternal;
 	const float Xm = (I + 0.5f) * DX, Ym = (J + 0.5f) * DX;
 	float BgT, BgQ, BgT850, BgQ850, BgT500;
 	BackgroundAt(Xm, Ym, BgT, BgQ, BgT850, BgQ850, BgT500);
@@ -1319,6 +1368,8 @@ void FAerosSimulation::ColumnPhysics(int32 I, int32 J, FAerosCell& C, float Dt) 
 
 void FAerosSimulation::ApplyCycloneForcing(int32 I, int32 J, FAerosCell& C, float Dt) const
 {
+	using namespace Aeros::Phys;
+	using namespace AerosSimInternal;
 	const float Xm = (I + 0.5f) * DX, Ym = (J + 0.5f) * DX;
 	const float Hemi = Coriolis < 0.f ? -1.f : 1.f;
 	for (const FAerosVortex& V : Vortices)
@@ -1373,6 +1424,8 @@ void FAerosSimulation::ApplyCycloneForcing(int32 I, int32 J, FAerosCell& C, floa
 
 void FAerosSimulation::StepCyclones(float Dt)
 {
+	using namespace Aeros::Phys;
+	using namespace AerosSimInternal;
 	const float Hemi = Coriolis < 0.f ? -1.f : 1.f;
 	for (int32 K = Vortices.Num() - 1; K >= 0; --K)
 	{
@@ -1408,6 +1461,8 @@ void FAerosSimulation::StepCyclones(float Dt)
 
 int32 FAerosSimulation::SpawnCyclone(const FVector& World, float CentralPressure, float RmaxKm)
 {
+	using namespace Aeros::Phys;
+	using namespace AerosSimInternal;
 	FAerosVortex V;
 	V.Id = NextVortexId++;
 	WorldToDomain(World, V.X, V.Y);
@@ -1419,6 +1474,8 @@ int32 FAerosSimulation::SpawnCyclone(const FVector& World, float CentralPressure
 
 void FAerosSimulation::TryCycloneGenesis()
 {
+	using namespace Aeros::Phys;
+	using namespace AerosSimInternal;
 	if (FMath::Abs(Settings.LatitudeDeg) < 5.f || Vortices.Num() >= 3) return;
 	if (Synoptic.SeaSurfaceTemperature < 26.5f) return;
 
@@ -1451,6 +1508,8 @@ void FAerosSimulation::TryCycloneGenesis()
 
 void FAerosSimulation::DetectAndTrackStorms(float Interval)
 {
+	using namespace Aeros::Phys;
+	using namespace AerosSimInternal;
 	TRACE_CPUPROFILER_EVENT_SCOPE(Aeros_StormTracking);
 	const int32 N = NX * NY;
 	Labels.SetNumUninitialized(N);
@@ -1585,6 +1644,8 @@ void FAerosSimulation::DetectAndTrackStorms(float Interval)
 
 void FAerosSimulation::GenerateLightning(float Interval)
 {
+	using namespace Aeros::Phys;
+	using namespace AerosSimInternal;
 	// Drop strikes older than 2 minutes
 	Lightning.RemoveAll([this](const FAerosLightningStrike& S) { return SimTime - S.SimTime > 120.0; });
 
@@ -1653,6 +1714,8 @@ void FAerosSimulation::GenerateLightning(float Interval)
 
 int32 FAerosSimulation::AddVolcanicEmitter(const FVector& World, float MassRate, float DurationSeconds)
 {
+	using namespace Aeros::Phys;
+	using namespace AerosSimInternal;
 	FAerosEmitter E;
 	E.Id = NextEmitterId++;
 	WorldToDomain(World, E.X, E.Y);
@@ -1665,11 +1728,15 @@ int32 FAerosSimulation::AddVolcanicEmitter(const FVector& World, float MassRate,
 
 void FAerosSimulation::StopEmitter(int32 Id)
 {
+	using namespace Aeros::Phys;
+	using namespace AerosSimInternal;
 	Emitters.RemoveAll([Id](const FAerosEmitter& E) { return E.Id == Id; });
 }
 
 void FAerosSimulation::StepEmitters(float Dt)
 {
+	using namespace Aeros::Phys;
+	using namespace AerosSimInternal;
 	for (int32 K = Emitters.Num() - 1; K >= 0; --K)
 	{
 		FAerosEmitter& E = Emitters[K];
@@ -1705,6 +1772,8 @@ void FAerosSimulation::StepEmitters(float Dt)
 
 void FAerosSimulation::StepHydrology(float Dt)
 {
+	using namespace Aeros::Phys;
+	using namespace AerosSimInternal;
 	TRACE_CPUPROFILER_EVENT_SCOPE(Aeros_Hydrology);
 	MaxFlood = 0.f;
 	for (const FAerosCell& C : Cells) MaxFlood = FMath::Max(MaxFlood, C.Flood);
@@ -1798,6 +1867,8 @@ void FAerosSimulation::StepHydrology(float Dt)
 
 bool FAerosSimulation::TriggerTsunami(const FVector& World, float Magnitude)
 {
+	using namespace Aeros::Phys;
+	using namespace AerosSimInternal;
 	float Xm, Ym;
 	WorldToDomain(World, Xm, Ym);
 	// Sea-floor uplift and rupture size from moment magnitude (Wells & Coppersmith-like scaling)
@@ -1828,6 +1899,8 @@ bool FAerosSimulation::TriggerTsunami(const FVector& World, float Magnitude)
 
 void FAerosSimulation::StepOcean(float Dt)
 {
+	using namespace Aeros::Phys;
+	using namespace AerosSimInternal;
 	TRACE_CPUPROFILER_EVENT_SCOPE(Aeros_Ocean);
 	float HMax = 10.f;
 	int32 NumWater = 0;
@@ -1949,6 +2022,8 @@ void FAerosSimulation::StepOcean(float Dt)
 
 void FAerosSimulation::InjectThermal(const FVector& World, float RadiusKm, float DeltaT, float DeltaQ)
 {
+	using namespace Aeros::Phys;
+	using namespace AerosSimInternal;
 	float Xm, Ym;
 	WorldToDomain(World, Xm, Ym);
 	const float R = FMath::Max(RadiusKm * 1000.f, DX);
@@ -1972,6 +2047,8 @@ void FAerosSimulation::InjectThermal(const FVector& World, float RadiusKm, float
 
 void FAerosSimulation::InjectRain(const FVector& World, float RadiusKm, float Millimetres)
 {
+	using namespace Aeros::Phys;
+	using namespace AerosSimInternal;
 	float Xm, Ym;
 	WorldToDomain(World, Xm, Ym);
 	const float R = FMath::Max(RadiusKm * 1000.f, DX);
@@ -1991,6 +2068,8 @@ void FAerosSimulation::InjectRain(const FVector& World, float RadiusKm, float Mi
 
 void FAerosSimulation::InjectOutflow(const FVector& World, float RadiusKm, float DeltaT)
 {
+	using namespace Aeros::Phys;
+	using namespace AerosSimInternal;
 	float Xm, Ym;
 	WorldToDomain(World, Xm, Ym);
 	const float R = FMath::Max(RadiusKm * 1000.f, DX);
@@ -2010,6 +2089,8 @@ void FAerosSimulation::InjectOutflow(const FVector& World, float RadiusKm, float
 
 void FAerosSimulation::Recenter(const FVector& World)
 {
+	using namespace Aeros::Phys;
+	using namespace AerosSimInternal;
 	float Xm, Ym;
 	WorldToDomain(World, Xm, Ym);
 	const int32 SX = FMath::RoundToInt((Xm - NX * DX * 0.5f) / DX);
@@ -2055,6 +2136,8 @@ void FAerosSimulation::Recenter(const FVector& World)
 
 void FAerosSimulation::FillSnapshot(FAerosSnapshot& Out) const
 {
+	using namespace Aeros::Phys;
+	using namespace AerosSimInternal;
 	Out.Settings = Settings;
 	Out.SimTime = SimTime;
 	Out.Generation = uint64(StepCount);

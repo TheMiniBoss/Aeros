@@ -18,11 +18,13 @@
 #include "Net/UnrealNetwork.h"
 #include "Sound/SoundBase.h"
 
-namespace
+namespace AerosEarthquakeInternal
 {
-	constexpr float VP = 6.f;    // km/s P waves
-	constexpr float VS = 3.5f;   // km/s S waves
+	constexpr float PWaveKmS = 6.f;    // km/s P waves
+	constexpr float SWaveKmS = 3.5f;   // km/s S waves
 }
+using AerosEarthquakeInternal::PWaveKmS;
+using AerosEarthquakeInternal::SWaveKmS;
 
 AAerosEarthquake::AAerosEarthquake()
 {
@@ -102,7 +104,7 @@ void AAerosEarthquake::BeginPlay()
 		RumbleAudio->SetSound(Snd);
 	}
 	// Lives until the slowest waves have crossed the simulated region
-	SetLifeSpan(Duration * 2.f + 300.f / VS + 30.f + (AftershockTimes.Num() > 0 ? AftershockTimes.Last() : 0.f));
+	SetLifeSpan(Duration * 2.f + 300.f / SWaveKmS + 30.f + (AftershockTimes.Num() > 0 ? AftershockTimes.Last() : 0.f));
 }
 
 void AAerosEarthquake::EndPlay(const EEndPlayReason::Type Reason)
@@ -136,7 +138,7 @@ float AAerosEarthquake::GetPeakAccelerationAt(const FVector& Location) const
 float AAerosEarthquake::Envelope(float DistanceKm) const
 {
 	const float T = float(Now() - StartServerTime);
-	const float TP = DistanceKm / VP, TS = DistanceKm / VS;
+	const float TP = DistanceKm / PWaveKmS, TS = DistanceKm / SWaveKmS;
 	if (T < TP) return 0.f;
 	if (T < TS) return 0.25f * Aeros::Phys::SmoothStep01((T - TP) / FMath::Max(TS - TP, 0.1f)); // P waves: lighter, vertical
 	const float After = T - TS;
