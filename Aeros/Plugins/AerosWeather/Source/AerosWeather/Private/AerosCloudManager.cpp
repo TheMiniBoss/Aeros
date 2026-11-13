@@ -91,7 +91,7 @@ void UAerosCloudManager::Tick(float DeltaTime)
 	if (FAerosSnapshotPtr Snap = Owner->GetSnapshot())
 	{
 		const FVector2D W = (Snap->Synoptic.Wind850 + Snap->Synoptic.Wind500) * 0.5f;      // m/s, sim frame
-		const float SimSeconds = Owner->IsPaused() ? 0.f : DeltaTime * Owner->GetTimeScale();
+		const float SimSeconds = Owner->IsPaused() ? 0.f : DeltaTime * FMath::Min(Owner->GetTimeScale(), MaxNoiseDriftTimeScale);
 		NoiseOffsetKm += FVector(W.X, -W.Y, 0.0) * 0.001 * SimSeconds;                      // Unreal: -Y = north
 		NoiseOffsetKm.X = FMath::Fmod(NoiseOffsetKm.X, 10000.0);
 		NoiseOffsetKm.Y = FMath::Fmod(NoiseOffsetKm.Y, 10000.0);

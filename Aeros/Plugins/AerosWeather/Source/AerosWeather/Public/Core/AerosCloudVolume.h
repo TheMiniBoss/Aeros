@@ -19,8 +19,8 @@ class FAerosSnapshot;
 
 struct AEROSWEATHER_API FAerosCloudVolumeDesc
 {
-	int32 NX = 256, NY = 256, NZ = 48;
-	float SizeKm = 80.f;    // horizontal size (square)
+	int32 NX = 320, NY = 320, NZ = 48;   // 312 m voxels; 100 km keeps storms within ~45 km in 3D (fade 44-50 km)
+	float SizeKm = 100.f;   // horizontal size (square)
 	float HeightKm = 16.f;  // from the ground (z = 0) up
 	FVector Center = FVector::ZeroVector; // world cm, Z ignored
 

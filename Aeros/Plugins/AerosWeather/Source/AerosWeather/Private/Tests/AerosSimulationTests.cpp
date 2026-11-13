@@ -219,6 +219,37 @@ bool FAerosCloudVolumeTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("No anvil far upwind"), FAerosCloudVolume::SampleDensity(SingleGrid, Desc, Upwind, ELkm - 0.8f) < 0.05f);
 	TestTrue(TEXT("Clear below the cloud base away from storms"), FAerosCloudVolume::SampleDensity(SingleGrid, Desc, Upwind, 0.3f) < 0.05f);
 
+	// --- Two overlapping anvils with different tops (11 and 13 km): the anvil top must stay continuous
+	// across the overlap (no 2 km step where one anvil takes over from the other)
+	{
+		FAerosSnapshot Pair = Snap;
+		Pair.Storms.Reset();
+		const FVector Side(-Dir500.Y, Dir500.X, 0.0);
+		FAerosStormData Low = St, High = St;
+		Low.CloudTop = 11000.f;
+		High.CloudTop = 13000.f;
+		High.UpdraftLocation = High.UpdraftLocation + Side * 600000.0;
+		if (!High.HailCoreLocation.IsZero()) High.HailCoreLocation = High.HailCoreLocation + Side * 600000.0;
+		Pair.Storms.Add(Low);
+		Pair.Storms.Add(High);
+		TArray<uint8> PairGrid;
+		FAerosCloudVolume::Build(Pair, Desc, PairGrid);
+		auto AnvilTop = [&](const FVector& At)
+		{
+			for (float Alt = Desc.HeightKm - 0.5f * Desc.VoxelKmZ(); Alt > 6.f; Alt -= Desc.VoxelKmZ())
+				if (FAerosCloudVolume::SampleDensity(PairGrid, Desc, At, Alt) > 0.1f) return Alt;
+			return 0.f;
+		};
+		float MaxStep = 0.f, Prev = -1.f;
+		for (double Off = -300000.0; Off <= 900000.0; Off += 30000.0)
+		{
+			const float Top = AnvilTop(St.UpdraftLocation + Dir500 * 2000000.0 + Side * Off);
+			if (Top > 0.f && Prev > 0.f) MaxStep = FMath::Max(MaxStep, FMath::Abs(Top - Prev));
+			Prev = Top;
+		}
+		TestTrue(TEXT("Overlapping anvils: top has no step (< 0.7 km between columns 300 m apart)"), MaxStep < 0.7f);
+	}
+
 	// --- Storm outside the grid: nothing drawn, no wrap-around
 	FAerosCloudVolumeDesc Far = Desc;
 	Far.Center = FAerosCloudVolume::SnapCenter(St.UpdraftLocation + FVector(20000000.0, 0.0, 0.0));

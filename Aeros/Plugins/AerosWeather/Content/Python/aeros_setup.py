@@ -149,6 +149,7 @@ def create_default_texture():
 #   N   3D Perlin-Worley shape noise (engine volume texture, single channel, 6 km tiles: km-scale lobes)
 #   N2  same shape noise at 3 km tiles: 150-600 m bubbles (cauliflower turrets); N and N2 read at mip 1
 #   E   3D Worley erosion noise (4 km tiles; smaller tiles alias into grain at a few km)
+#   F   same erosion noise stretched (16 km x 16 km x 1.5 km tiles): fibrous ice in anvils
 # Placement: a cellular cumulus field (1.1 km cells, one puff per cell with probability = cover), shallow
 # in fair weather, growing into towers where the column is convective. In the spirit of Horizon / Nubis, 3D noises then
 # erode the edges (billowy cauliflower at the top, wispy at the base), flat dark bases. Extra layers: anvils near the tropopause
@@ -175,6 +176,7 @@ float lowFbm  = saturate((N.r  - 0.78) / 0.18);   // billowy Perlin-Worley, 6 km
 float bubbles = saturate((N2.r - 0.78) / 0.18);   // same noise, 3 km tiles: 150-600 m turrets
 float highFbm = saturate((E.r  - 0.45) / 0.45);   // Worley, 4 km tiles: 100 m detail
 float highMod = lerp(highFbm, 1.0 - highFbm, saturate(h * 3.0));   // wispy base, billowy top
+float fib     = saturate((F.r  - 0.45) / 0.45);   // erosion noise stretched 10x horizontally: ice fibres
 
 float2 q = P.xy / 1.1 + float2(lowFbm - 0.5, bubbles - 0.5) * 0.6;   // domain warp: no perfect circles
 float2 qi = floor(q);
@@ -209,9 +211,10 @@ float cloud   = saturate((bubbles - (1.0 - cv)) / max(cv, 0.05));
 cloud = saturate((cloud - highMod * 0.15) / 0.85);
 cloud = saturate(cloud * 3.0);
 
-// --- Anvil: thin flat sheet 9.8-12.4 km, ragged fibrous edges, thinner far downwind
-float anvilBand = saturate((AltKm - 9.8) / 0.7) * saturate((12.4 - AltKm) / 0.35);
-float anvil     = anvilBand * saturate(anvilCv * 1.3 - (1.0 - lowFbm) * 0.5) * (0.5 + 0.5 * highFbm);
+// --- Anvil: flat sharp top at the tropopause, ragged base, thinner where the anvil cover fades
+float anvilBase = 12.4 - (0.5 + 2.0 * anvilCv) * (0.75 + 0.5 * lowFbm);
+float anvilBand = saturate((AltKm - anvilBase) / 0.6) * saturate((12.4 - AltKm) / 0.25);
+float anvil     = anvilBand * saturate((anvilCv * 1.3 - (1.0 - lowFbm) * 0.3 - (1.0 - fib) * 0.2) * 2.0);
 
 // --- Shelf cloud: layered wedge between 0.4 and 1.9 km along the gust front
 float shelfBand = saturate((AltKm - 0.45) / 0.08) * saturate((1.9 - AltKm) / 0.6);
@@ -225,11 +228,16 @@ float2 edgeUV = abs(VU.xy - 0.5) * 2.0;
 float voxIn   = Weight * (1.0 - smoothstep(0.875, 1.0, max(edgeUV.x, edgeUV.y)));
 float voxRaw  = lerp(VP.r, VC.r, Blend);
 float voxDark = lerp(VP.g, VC.g, Blend);
+// Liquid cloud (below ~8 km) bubbles into cauliflower turrets; glaciated cloud above (anvil, upper
+// tower) is smooth and fibrous: eroded by the horizontally stretched noise, not carved by bubbles.
+float iceK    = smoothstep(9.0, 11.5, AltKm);
 float voxCv   = saturate(voxRaw * 2.0);   // a narrow carved rim, solid core
-float vox     = saturate((bubbles - (1.0 - voxCv)) / max(voxCv, 0.05));   // turrets
-vox = saturate(saturate((vox - highMod * 0.15) / 0.85) * 2.5);
+float voxCu   = saturate((bubbles - (1.0 - voxCv)) / max(voxCv, 0.05));   // turrets
+voxCu = saturate(saturate((voxCu - highMod * 0.15) / 0.85) * 2.5);
+float voxIce  = saturate((voxRaw - (1.0 - lowFbm) * 0.2 - (1.0 - fib) * 0.2) * 3.0);
+float vox     = lerp(voxCu, voxIce, iceK);
 
-float full2D      = max(cloud, max(anvil * 0.4, shelf * 0.9));
+float full2D      = max(cloud, max(anvil, shelf * 0.9));
 float cumulusOnly = cloud * (1.0 - smoothstep(0.2, 0.4, conv));
 float density = lerp(full2D, max(cumulusOnly, vox), voxIn);
 // Rain greys only the lower cloud (liquid, below ~6 km); the glaciated tops stay white
@@ -286,6 +294,12 @@ def create_cloud_material(default_tex):
     noise_erosion = node(mat, unreal.MaterialExpressionTextureSample, -1300, 1050,
                          texture=unreal.load_asset("/Engine/EngineSky/VolumetricClouds/T_VolumeNoiseErosion32"))
     link(uvw_erosion, "", noise_erosion, "UVs")
+    uvw_fib = binop(mat, unreal.MaterialExpressionMultiply, pos,
+                    node(mat, unreal.MaterialExpressionConstant3Vector, -1800, 1550, constant=unreal.LinearColor(1.0 / 16.0, 1.0 / 16.0, 1.0 / 1.5, 1)),
+                    -1600, 1500)
+    noise_fib = node(mat, unreal.MaterialExpressionTextureSample, -1300, 1500,
+                     texture=unreal.load_asset("/Engine/EngineSky/VolumetricClouds/T_VolumeNoiseErosion32"))
+    link(uvw_fib, "", noise_fib, "UVs")
     noise_bubbles = node(mat, unreal.MaterialExpressionTextureSample, -1300, 1250, **mip1,
                          texture=unreal.load_asset("/Engine/EngineSky/VolumetricClouds/T_VolumeNoiseShape128"))
     link(uvw_bubbles, "", noise_bubbles, "UVs")
@@ -336,7 +350,7 @@ def create_cloud_material(default_tex):
     custom.set_editor_property("description", "AerosCloudDensity")
     custom.set_editor_property("output_type", unreal.CustomMaterialOutputType.CMOT_FLOAT4)
     inputs = []
-    for name in ["AltKm", "P", "Wx", "Sx", "N", "N2", "E", "VP", "VC", "VU", "Blend", "Weight"]:
+    for name in ["AltKm", "P", "Wx", "Sx", "N", "N2", "E", "F", "VP", "VC", "VU", "Blend", "Weight"]:
         ci = unreal.CustomInput()
         ci.set_editor_property("input_name", name)
         inputs.append(ci)
@@ -349,6 +363,7 @@ def create_cloud_material(default_tex):
     link(noise_shape, "RGBA", custom, "N")
     link(noise_erosion, "RGBA", custom, "E")
     link(noise_bubbles, "RGBA", custom, "N2")
+    link(noise_fib, "RGBA", custom, "F")
     link(vox_samples[0], "RGBA", custom, "VP")
     link(vox_samples[1], "RGBA", custom, "VC")
     link(vox_uvw[1], "", custom, "VU")

@@ -2,6 +2,7 @@
 
 #include "Core/AerosCloudVolume.h"
 #include "Core/AerosSnapshot.h"
+#include "Core/AerosPhysics.h"
 #include "Async/ParallelFor.h"
 
 // Unity build: helpers in a uniquely named namespace (see CLAUDE.md).
@@ -30,14 +31,30 @@ namespace AerosCloudVolumeInternal
 		float Reach = 10.f;              // km: columns farther than this from the updraft ignore the storm
 	};
 
-	/** Anvil footprint per column (km of anvil top, strength, distance along the anvil / length). */
+	/** Anvil footprint per column (km of anvil top, strength, distance along the anvil / length).
+	 *  Overlapping anvils blend: top, along and near-core are weighted means (Weight = sum of the splats),
+	 *  so the top does not jump by 2 km where one anvil takes over from another. */
 	struct FAnvilColumn
 	{
 		float Strength = 0.f;
 		float TopKm = 0.f;
 		float Along = 0.f; // 0 at the tower, 1 at the far end
 		float NearCore = 0.f; // 1 close to the tower (mammatus), 0 beyond 30 km
+		float Weight = 0.f;
 	};
+
+	/** Smooth 2D value noise in [0, 1] on a lattice of Cell km, from world km (stable when the grid recentres). */
+	inline float ValueNoise(float WX, float WY, float Cell, uint32 Seed)
+	{
+		const float FX = WX / Cell, FY = WY / Cell;
+		const int32 IX = FMath::FloorToInt(FX), IY = FMath::FloorToInt(FY);
+		const float TX = FX - IX, TY = FY - IY;
+		const float SX = TX * TX * (3.f - 2.f * TX), SY = TY * TY * (3.f - 2.f * TY);
+		auto H = [Seed](int32 X, int32 Y) { return Aeros::Phys::Hash01(uint32(X), uint32(Y), Seed, 0x51ED27u); };
+		const float A = FMath::Lerp(H(IX, IY), H(IX + 1, IY), SX);
+		const float B = FMath::Lerp(H(IX, IY + 1), H(IX + 1, IY + 1), SX);
+		return FMath::Lerp(A, B, SY);
+	}
 }
 
 FVector FAerosCloudVolume::SnapCenter(const FVector& Viewer, float StepKm)
@@ -145,18 +162,26 @@ void FAerosCloudVolume::Build(const FAerosSnapshot& Snap, const FAerosCloudVolum
 					const float D2 = (FMath::Square(PX - CX) + FMath::Square(PY - CY)) / FMath::Square(Radius);
 					if (D2 >= 1.f) continue;
 					const float V = Strength * Fade * (1.f - D2 * D2);
+					if (V <= 0.f) continue;
 					FAnvilColumn& A = Anvil[X + Y * NX];
-					if (V > A.Strength)
-					{
-						A.Strength = V;
-						A.TopKm = Sh.EL;
-						A.Along = FMath::Clamp(Along / LengthKm, 0.f, 1.f);
-						A.NearCore = FMath::Clamp(1.f - Along / 30.f, 0.f, 1.f);
-					}
+					A.Strength = FMath::Max(A.Strength, V);
+					A.Weight += V;
+					A.TopKm += V * Sh.EL;
+					A.Along += V * FMath::Clamp(Along / LengthKm, 0.f, 1.f);
+					A.NearCore += V * FMath::Clamp(1.f - Along / 30.f, 0.f, 1.f);
 				}
 			}
 		}
 	}
+
+	for (FAnvilColumn& A : Anvil)
+	{
+		if (A.Weight <= 0.f) continue;
+		A.TopKm /= A.Weight;
+		A.Along /= A.Weight;
+		A.NearCore /= A.Weight;
+	}
+	const float CenterKmX = float(Desc.Center.X / CmPerKm), CenterKmY = float(Desc.Center.Y / CmPerKm);
 
 	// ---- Fill, one row of columns per task
 	ParallelFor(NY, [&](int32 Y)
@@ -217,8 +242,12 @@ void FAerosCloudVolume::Build(const FAerosSnapshot& Snap, const FAerosCloudVolum
 				// Anvil: flat top at the EL, base rising downwind, mammatus lobes near the core
 				if (A.Strength > 0.f)
 				{
-					const float Thick = (1.5f + 1.0f * A.Strength) * (1.f - 0.5f * A.Along);
-					const float Lobes = 0.5f * A.NearCore * FMath::Clamp(0.5f + 0.25f * (FMath::Sin(PX * 1.9f) + FMath::Sin(PY * 2.3f)), 0.f, 1.f);
+					// Thinner toward the edges and far downwind: a wedge, not a slab with vertical walls
+					const float Thick = (1.5f + 1.0f * A.Strength) * (1.f - 0.5f * A.Along) * (0.3f + 0.7f * Smooth(0.f, 0.6f, A.Strength));
+					// Mammatus near the core: irregular pouches (value noise on world km), not a sine grid
+					const float WX = CenterKmX + PX, WY = CenterKmY + PY;
+					const float Pouch = Smooth(0.45f, 0.85f, ValueNoise(WX, WY, 1.6f, 11u) * 0.7f + ValueNoise(WX, WY, 0.7f, 12u) * 0.3f);
+					const float Lobes = 0.7f * A.NearCore * Pouch;
 					const float Base = A.TopKm - Thick - Lobes;
 					if (Alt > Base && Alt < A.TopKm + 0.2f)
 					{

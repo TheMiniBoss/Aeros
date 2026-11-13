@@ -77,6 +77,12 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Aeros")
 	float TextureUpdateRate = 20.f;
 
+	/** The cloud detail noise drifts with the wind at most this many times faster than real time.
+	 *  At x600 the whole cumulus field slid ~9 km/s: the temporal reconstruction of the clouds turned
+	 *  it into grain. Storms are not affected (they move with the simulation maps and voxel grid). */
+	UPROPERTY(EditAnywhere, Category = "Aeros")
+	float MaxNoiseDriftTimeScale = 60.f;
+
 private:
 	void EnsureTextures(int32 NX, int32 NY);
 	void UpdateTextures();
