@@ -83,3 +83,6 @@ DerivedDataCache/*
 **/Binaries/
 **/DerivedDataCache/
 Docs/**/.obsidian/workspace.json
+
+# JetBrains Rider
+.idea/
