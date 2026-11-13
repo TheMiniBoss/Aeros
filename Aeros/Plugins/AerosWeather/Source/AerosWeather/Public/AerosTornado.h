@@ -1,6 +1,6 @@
 // Copyright Aeros. All Rights Reserved.
 //
-// AAerosTornado — spawned by the storm manager under a mesocyclone (roadmap: CAPE > 2500,
+// AAerosTornado - spawned by the storm manager under a mesocyclone (roadmap: CAPE > 2500,
 // strong helicity, ~15% chance per check). Sub-grid phenomenon: it lives in real time,
 // not in simulation time, so gameplay stays readable whatever the weather time scale.
 //

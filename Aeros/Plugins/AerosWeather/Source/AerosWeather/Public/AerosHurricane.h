@@ -1,6 +1,6 @@
 // Copyright Aeros. All Rights Reserved.
 //
-// AAerosHurricane — roadmap "Ouragan": macroscopic entity, cyclonic flow around a low-pressure eye.
+// AAerosHurricane - roadmap "Ouragan": macroscopic entity, cyclonic flow around a low-pressure eye.
 // The wind / rain / pressure fields live in the simulation (Holland vortex). This actor is the
 // replicated, gameplay-facing handle (category, eye position, events, optional VFX).
 

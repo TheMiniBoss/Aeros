@@ -80,6 +80,11 @@ void AAerosWeatherController::Tick(float DeltaSeconds)
 	{
 		const FAerosDateTime Clock = Sub->GetDateTime();
 		SunLight->GetLightComponent()->SetWorldRotation((-Clock.SunDirection).Rotation());
+		// Ash plumes and dust storms dim the sun (clouds are handled by the cloud renderer)
+		if (BaseSunIntensity < 0.f) BaseSunIntensity = SunLight->GetLightComponent()->Intensity;
+		const FAerosWeatherSample Sky = Sub->GetWeatherAtLocation(Sub->GetViewerLocation());
+		const float Dim = FMath::Exp(-Sky.Dust / 40.f - Sky.AshFall * 1.5f);
+		SunLight->GetLightComponent()->SetIntensity(BaseSunIntensity * FMath::Max(Dim, 0.05f));
 	}
 
 	const FAerosWeatherSample Local = Sub->GetWeatherAtLocation(Sub->GetViewerLocation());
@@ -92,6 +97,20 @@ void AAerosWeatherController::Tick(float DeltaSeconds)
 		const float Target = BaseFogDensity * (1.f + Haze + 25.f * Thick * Thick);
 		SmoothedFog = FMath::FInterpTo(SmoothedFog > 0.f ? SmoothedFog : Target, Target, DeltaSeconds, 0.5f);
 		HeightFog->GetComponent()->SetFogDensity(SmoothedFog);
+
+		// Tint: ochre sand, grey ash, white blowing snow
+		const float Sand = FMath::Clamp(Local.Dust / 10.f, 0.f, 1.f);
+		const float Ash = FMath::Clamp(Local.AshFall + Local.AshDepth / 50.f, 0.f, 1.f);
+		FLinearColor Tint = FLinearColor(0.45f, 0.55f, 0.7f);
+		Tint = FMath::Lerp(Tint, FLinearColor(0.75f, 0.5f, 0.25f), Sand);
+		Tint = FMath::Lerp(Tint, FLinearColor(0.25f, 0.24f, 0.23f), Ash);
+		Tint = FMath::Lerp(Tint, FLinearColor(0.9f, 0.92f, 0.95f), Local.BlowingSnow);
+		SmoothedTint = FMath::Lerp(SmoothedTint, Tint, FMath::Clamp(DeltaSeconds, 0.f, 1.f));
+		if (Sand + Ash + Local.BlowingSnow > 0.01f || bTintActive)
+		{
+			HeightFog->GetComponent()->SetFogInscatteringColor(SmoothedTint);
+			bTintActive = Sand + Ash + Local.BlowingSnow > 0.01f;
+		}
 	}
 
 	// Cloud material: weather map + domain mapping

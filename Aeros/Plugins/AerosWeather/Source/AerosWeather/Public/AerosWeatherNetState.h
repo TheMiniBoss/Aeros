@@ -23,6 +23,12 @@ enum class EAerosNetCommand : uint8
 	SetClock,
 	CustomSynoptic,
 	WaterRegions,
+	InjectRain,
+	InjectOutflow,
+	Tsunami,
+	VolcanicEmission,
+	SetLatitude,
+	DesertRegions,
 };
 
 USTRUCT()

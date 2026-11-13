@@ -1,9 +1,9 @@
 {
 	"FileVersion": 3,
-	"Version": 3,
-	"VersionName": "0.3.0",
+	"Version": 4,
+	"VersionName": "0.4.0",
 	"FriendlyName": "Aeros Weather",
-	"Description": "Realistic, optimised weather and natural disaster system: a thermodynamic 2.5D atmosphere (CAPE, helicity, cold pools, hail growth, tropical cyclones) on a worker thread, driving clouds, precipitation, storms, tornadoes, lightning, radar and Chaos destruction.",
+	"Description": "Realistic, optimised weather and natural disaster system: a thermodynamic 2.5D atmosphere (CAPE, helicity, cold pools, hail growth, tropical cyclones) on a worker thread, driving clouds, precipitation, storms, tornadoes, lightning, radar and Chaos destruction. Natural disasters: floods, tsunamis, storm surge, earthquakes, volcanoes, blizzards, sand storms. Live real-world weather via Open-Meteo.",
 	"Category": "Simulation",
 	"CreatedBy": "Aeros",
 	"CreatedByURL": "",

@@ -96,6 +96,20 @@ FAerosWeatherSample FAerosSnapshot::Sample(const FVector& World) const
 	S.Wetness = AEROS_BL(Wet);
 	S.SnowDepth = AEROS_BL(Snow);
 	S.HailCover = AEROS_BL(HailCover);
+	S.SoilMoisture = AEROS_BL(Soil);
+	S.Elevation = AEROS_BL(Elev);
+	S.FeelsLike = AEROS_BL(FeelsLike);
+	S.FloodDepth = AEROS_BL(Flood);
+	S.FloodFlow = SimToWorldDir(AEROS_BL(FlowU), AEROS_BL(FlowV));
+	S.SeaLevelAnomaly = AEROS_BL(Eta);
+	S.Dust = AEROS_BL(Dust);
+	S.AshFall = AEROS_BL(AshFall);
+	S.AshDepth = AEROS_BL(AshDepth);
+	S.BlowingSnow = AEROS_BL(Blow);
+	S.bOcean = Dom->bWater != 0;
+	// Water surface: the sea (with tsunami / surge anomaly) or flood water above the terrain
+	if (S.bOcean) S.WaterSurfaceZ = Settings.SeaLevelZ + Dom->Eta * 100.f;
+	else if (S.FloodDepth > 0.01f) S.WaterSurfaceZ = Settings.SeaLevelZ + (FMath::Max(S.Elevation, 0.f) + S.FloodDepth) * 100.f;
 #undef AEROS_BL
 	return S;
 }
@@ -113,7 +127,10 @@ FAerosWeatherSample FAerosSnapshot::LerpSample(const FAerosWeatherSample& A, con
 	AEROS_L(ConvectiveActivity); AEROS_L(Updraft); AEROS_L(Mesocyclone);
 	AEROS_L(CAPE); AEROS_L(CIN); AEROS_L(LCL); AEROS_L(LFC); AEROS_L(EquilibriumLevel); AEROS_L(FreezingLevel); AEROS_L(LiftedIndex);
 	AEROS_L(SRH01); AEROS_L(SRH03); AEROS_L(BulkShear06); AEROS_L(STP); AEROS_L(SCP); AEROS_L(SHIP);
-	AEROS_L(Wetness); AEROS_L(SnowDepth); AEROS_L(HailCover);
+	AEROS_L(Wetness); AEROS_L(SnowDepth); AEROS_L(HailCover); AEROS_L(SoilMoisture); AEROS_L(Elevation);
+	AEROS_L(FeelsLike); AEROS_L(FloodDepth); AEROS_L(FloodFlow); AEROS_L(SeaLevelAnomaly);
+	AEROS_L(Dust); AEROS_L(AshFall); AEROS_L(AshDepth); AEROS_L(BlowingSnow);
+	if (A.WaterSurfaceZ > -1e6f && B.WaterSurfaceZ > -1e6f) AEROS_L(WaterSurfaceZ);
 #undef AEROS_L
 	S.WindSpeed = float(S.Wind.Size());
 	return S;

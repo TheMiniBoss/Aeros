@@ -1,6 +1,6 @@
 // Copyright Aeros. All Rights Reserved.
 //
-// FAerosSimulation — the thermodynamic engine (pure C++, no UObject, thread agnostic).
+// FAerosSimulation - the thermodynamic engine (pure C++, no UObject, thread agnostic).
 //
 // 2.5D model (roadmap "Grille 2.5D"): a 2D grid of columns. Each column stores three
 // atmospheric levels (surface/boundary layer, 850 hPa ~1.5 km, 500 hPa ~5.6 km) plus a
@@ -48,8 +48,21 @@ struct FAerosCell
 	float Snow = 0.f;      // cm
 	float HailCov = 0.f;   // 0-1
 
+	// ---- Hydrology / hazards (prognostic) --------------------------------
+	float Soil = 60.f;     // mm soil water (capacity 150)
+	float Flood = 0.f;     // m surface water on land (runoff, floods, tsunami run-up)
+	float Eta = 0.f;       // m sea level anomaly on ocean cells (tsunami, storm surge)
+	float MU = 0.f, MV = 0.f; // m2/s ocean volume flux (tsunami / surge solver)
+	float Dust = 0.f;      // g/m2 airborne mineral dust (boundary layer)
+	float Ash = 0.f;       // g/m2 airborne volcanic ash (plume level, moves with 500 hPa wind)
+	float AshDepth = 0.f;  // mm ash on the ground
+
 	// ---- Static surface --------------------------------------------------
 	float Water = 0.f;     // 0-1 open water fraction
+	float Elev = 0.f;      // m terrain height above sea level (cell mean)
+	float ElevDX = 0.f, ElevDY = 0.f; // terrain slope (m/m), east / north
+	float Bathy = 0.f;     // m ocean depth (water cells)
+	float Arid = 0.f;      // 0-1 desert regions
 
 	// ---- Diagnostics -----------------------------------------------------
 	float Psfc = 1013.f;
@@ -67,6 +80,13 @@ struct FAerosCell
 	float Visibility = 20000.f;
 	float StormU = 0.f, StormV = 0.f; // m/s Bunkers right-mover / steering
 	float SensibleFlux = 0.f;  // W/m2
+	float FlowU = 0.f, FlowV = 0.f; // m/s flood water velocity
+	float FloodRise = 0.f;     // m/h flood depth tendency
+	float AshFall = 0.f;       // mm/h
+	float Blow = 0.f;          // 0-1 blowing snow
+	float FeelsLike = 15.f;    // C
+	uint8 TsunamiZone = 0;     // 1 = tsunami waves / run-up here
+	float Prev2 = 0.f;         // ocean solver scratch
 	uint8 PType = 0, Phen = 0;
 	uint8 CycloneZone = 0;     // 0 none, 1 tropical storm, 2 hurricane
 };
@@ -81,6 +101,16 @@ struct FAerosVortex
 	float HollandB = 1.7f;
 	float Age = 0.f;
 	float MaxWind() const;
+};
+
+/** Continuous source in the atmosphere (volcanic vent). */
+struct FAerosEmitter
+{
+	int32 Id = 0;
+	float X = 0.f, Y = 0.f;      // m, domain frame
+	float MassRate = 1e5f;       // kg/s erupted mass (fine ash fraction is taken inside)
+	float Heat = 1.f;            // 0-1, drives a pyro-convective column
+	float Remaining = 3600.f;    // s
 };
 
 struct FAerosTrackedStorm
@@ -127,6 +157,25 @@ public:
 	/** Shift the domain so that it is centred near World (whole cells). */
 	void Recenter(const FVector& World);
 	void SetWaterRegions(const TArray<FAerosWaterRegion>& Regions);
+	void SetDesertRegions(const TArray<FAerosDesertRegion>& Regions);
+	void SetLatitude(float LatitudeDeg);
+
+	// ---- Hazards ----------------------------------------------------------
+	/**
+	 * Terrain height (m above sea level) per cell, row-major NX*NY, sampled for the domain centred on
+	 * SampledCenter. Ignored if the domain moved since. Cells below sea level become ocean.
+	 */
+	void SetElevation(const TArray<float>& HeightsM, const FVector& SampledCenter);
+	/** Extra rain (mm) dumped over an area: floods. */
+	void InjectRain(const FVector& World, float RadiusKm, float Millimetres);
+	/** Cold outflow (thunderstorm downburst / haboob front). DeltaT < 0. */
+	void InjectOutflow(const FVector& World, float RadiusKm, float DeltaT);
+	/** Sea-floor uplift from a submarine earthquake (Mw). Returns false if no ocean there. */
+	bool TriggerTsunami(const FVector& World, float Magnitude);
+	/** Volcanic vent: mass eruption rate (kg/s), duration (s). */
+	int32 AddVolcanicEmitter(const FVector& World, float MassRate, float DurationSeconds);
+	void StopEmitter(int32 Id);
+	bool IsOceanActive() const { return bOceanActive; }
 
 	// ---- Helpers ----------------------------------------------------------
 	FVector DomainToWorld(float Xm, float Ym) const;
@@ -150,6 +199,11 @@ private:
 	void DetectAndTrackStorms(float Interval);
 	void GenerateLightning(float Interval);
 	void TryCycloneGenesis();
+	void StepEmitters(float Dt);
+	void StepHydrology(float Dt);
+	void StepOcean(float Dt);
+	void RecomputeSlopes();
+	float ShoreDistanceKm(const FVector& World) const;
 
 	FAerosSimulationSettings Settings;
 	FAerosSynopticState Synoptic;
@@ -161,6 +215,12 @@ private:
 	TArray<FAerosCell> Prev; // dynamics scratch
 
 	TArray<FAerosVortex> Vortices;
+	TArray<FAerosEmitter> Emitters;
+	TArray<FVector4f> FloodOut;   // hydrology scratch: outflow E, W, N, S (m this step)
+	bool bOceanActive = false;
+	float MaxFlood = 0.f;
+	float OceanQuietTime = 0.f;
+	int32 NextEmitterId = 1;
 	TArray<FAerosTrackedStorm> Storms;
 	TArray<int32> Labels;     // storm labelling scratch
 	TArray<int32> CompCells;  // cell indices of every storm component

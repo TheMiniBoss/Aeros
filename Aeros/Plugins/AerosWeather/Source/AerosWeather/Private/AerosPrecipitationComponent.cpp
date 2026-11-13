@@ -43,6 +43,8 @@ void UAerosPrecipitationComponent::CreateSubComponents()
 	RainVFX = MakeNiagara(TEXT("AerosRainVFX"));
 	SnowVFX = MakeNiagara(TEXT("AerosSnowVFX"));
 	HailVFX = MakeNiagara(TEXT("AerosHailVFX"));
+	DustVFX = MakeNiagara(TEXT("AerosDustVFX"));
+	AshVFX = MakeNiagara(TEXT("AerosAshVFX"));
 
 	RainAudio = NewObject<UAudioComponent>(Owner, TEXT("AerosRainAudio"));
 	RainAudio->SetAutoActivate(false);
@@ -64,6 +66,7 @@ void UAerosPrecipitationComponent::CreateSubComponents()
 	};
 	FallbackRain = MakeISM(TEXT("AerosFallbackRain"), RainMesh);
 	FallbackSolid = MakeISM(TEXT("AerosFallbackSolid"), SolidMesh);
+	FallbackAirborne = MakeISM(TEXT("AerosFallbackAirborne"), SolidMesh);
 }
 
 void UAerosPrecipitationComponent::BeginPlay()
@@ -83,6 +86,17 @@ void UAerosPrecipitationComponent::BeginPlay()
 	if (UNiagaraSystem* S = Settings->RainSystem.LoadSynchronous()) { RainVFX->SetAsset(S); bNiagara = true; }
 	if (UNiagaraSystem* S = Settings->SnowSystem.LoadSynchronous()) { SnowVFX->SetAsset(S); bNiagara = true; }
 	if (UNiagaraSystem* S = Settings->HailSystem.LoadSynchronous()) { HailVFX->SetAsset(S); bNiagara = true; }
+	if (UNiagaraSystem* S = Settings->DustSystem.LoadSynchronous()) DustVFX->SetAsset(S);
+	if (UNiagaraSystem* S = Settings->AshSystem.LoadSynchronous()) AshVFX->SetAsset(S);
+	if (Settings->bUseFallbackVisuals && (!DustVFX->GetAsset() || !AshVFX->GetAsset()))
+	{
+		const FTransform Hidden(FQuat::Identity, FVector(0, 0, -1e7), FVector::ZeroVector);
+		Airborne.SetNum(1500);
+		for (FParticle& P : Airborne) P.bAlive = false;
+		AirborneTransforms.Init(Hidden, Airborne.Num());
+		FallbackAirborne->AddInstances(AirborneTransforms, false, true);
+		AirborneMID = FallbackAirborne->CreateDynamicMaterialInstance(0);
+	}
 	if (USoundBase* Snd = Settings->RainLoopSound.LoadSynchronous()) RainAudio->SetSound(Snd);
 
 	if (!bNiagara && Settings->bUseFallbackVisuals)
@@ -125,6 +139,7 @@ void UAerosPrecipitationComponent::TickComponent(float DeltaTime, ELevelTick Tic
 
 	if (bNiagara) UpdateNiagara();
 	else if (Particles.Num() > 0) UpdateFallback(DeltaTime);
+	UpdateAirborne(DeltaTime);
 
 	if (RainAudio->Sound)
 	{
@@ -258,4 +273,65 @@ void UAerosPrecipitationComponent::UpdateFallback(float DeltaTime)
 	}
 	FallbackRain->BatchUpdateInstancesTransforms(0, RainTransforms, true, true, true);
 	FallbackSolid->BatchUpdateInstancesTransforms(0, SolidTransforms, true, true, true);
+}
+
+void UAerosPrecipitationComponent::UpdateAirborne(float DeltaTime)
+{
+	// Intensities (0-1) of what fills the air
+	const float DustI = FMath::Clamp(Local.Dust / 15.f, 0.f, 1.f);
+	const float AshI = FMath::Clamp(Local.AshFall / 1.f, 0.f, 1.f);
+	const float BlowI = FMath::Clamp(Local.BlowingSnow, 0.f, 1.f);
+
+	auto Drive = [this](UNiagaraComponent* C, float Value)
+	{
+		if (!C || !C->GetAsset()) return;
+		if (Value > 0.01f && !C->IsActive()) C->Activate();
+		if (Value <= 0.01f && C->IsActive()) C->Deactivate();
+		C->SetVariableFloat(TEXT("Intensity"), Value);
+		C->SetVariableVec3(TEXT("Wind"), Local.Wind);
+	};
+	Drive(DustVFX, DustI);
+	Drive(AshVFX, AshI);
+	if (Airborne.Num() == 0) return;
+
+	// Fallback: one population, coloured by the dominant kind
+	int32 Kind = 0; float Intensity = DustI;
+	if (AshI > Intensity) { Kind = 1; Intensity = AshI; }
+	if (BlowI > Intensity) { Kind = 2; Intensity = BlowI; }
+	if ((DustVFX->GetAsset() && Kind == 0) || (AshVFX->GetAsset() && Kind == 1)) Intensity = 0.f;
+	if (Kind != AirborneKind && AirborneMID)
+	{
+		AirborneKind = Kind;
+		const FLinearColor Colors[3] = { FLinearColor(0.55f, 0.38f, 0.2f), FLinearColor(0.2f, 0.19f, 0.18f), FLinearColor(0.95f, 0.97f, 1.f) };
+		AirborneMID->SetVectorParameterValue(TEXT("Color"), Colors[Kind]);
+	}
+
+	const int32 Active = int32(Airborne.Num() * Intensity * DensityScale);
+	const FVector Center = GetComponentLocation();
+	const FVector Wind = Local.Wind * 100.0;
+	const float Time = GetWorld()->GetTimeSeconds();
+	const FTransform Hidden(FQuat::Identity, FVector(Center.X, Center.Y, -1e7), FVector::ZeroVector);
+	for (int32 K = 0; K < Airborne.Num(); ++K)
+	{
+		FParticle& P = Airborne[K];
+		if (K >= Active) { P.bAlive = false; AirborneTransforms[K] = Hidden; continue; }
+		if (!P.bAlive)
+		{
+			const float A = Rand.FRandRange(0.f, 2.f * PI), R = Radius * FMath::Sqrt(Rand.FRand());
+			const float MaxH = Kind == 2 ? 300.f : 2500.f; // blowing snow hugs the ground
+			P.Pos = FVector(Center.X + FMath::Cos(A) * R, Center.Y + FMath::Sin(A) * R, GroundZ + Rand.FRandRange(0.f, MaxH));
+			P.Size = Rand.FRandRange(0.6f, 1.4f);
+			P.bAlive = true;
+		}
+		const FVector Turb(FMath::Sin(Time * 2.3f + K) * 150.f, FMath::Cos(Time * 1.9f + K * 0.7f) * 150.f, FMath::Sin(Time * 3.1f + K * 1.3f) * 80.f);
+		const float Fall = Kind == 1 ? -120.f : (Kind == 2 ? -20.f : -10.f);
+		P.Pos += (Wind + Turb + FVector(0, 0, Fall)) * DeltaTime;
+		FVector D = P.Pos - Center;
+		if (FMath::Abs(D.X) > Radius) P.Pos.X -= FMath::Sign(D.X) * 2.f * Radius;
+		if (FMath::Abs(D.Y) > Radius) P.Pos.Y -= FMath::Sign(D.Y) * 2.f * Radius;
+		if (P.Pos.Z < GroundZ) P.Pos.Z = GroundZ + (Kind == 2 ? 200.f : 2000.f);
+		const float S = (Kind == 2 ? 0.02f : 0.012f) * P.Size;
+		AirborneTransforms[K] = FTransform(FQuat::Identity, P.Pos, FVector(S * 2.f, S, S));
+	}
+	FallbackAirborne->BatchUpdateInstancesTransforms(0, AirborneTransforms, true, true, true);
 }

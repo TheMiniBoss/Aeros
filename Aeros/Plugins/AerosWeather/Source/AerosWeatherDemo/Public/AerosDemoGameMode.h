@@ -33,6 +33,10 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Aeros Demo")
 	int32 NumPhysicsProps = 80;
 
+	/** Add an erupting-capable volcano (with its own cone) 25 km north-west. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Aeros Demo")
+	bool bSpawnVolcano = true;
+
 private:
 	void BuildScene();
 	void SpawnProps();

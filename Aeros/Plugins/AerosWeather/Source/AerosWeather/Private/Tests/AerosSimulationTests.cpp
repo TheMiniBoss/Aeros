@@ -73,3 +73,97 @@ bool FAerosSupercellTest::RunTest(const FString& Parameters)
 }
 
 #endif
+
+#if WITH_DEV_AUTOMATION_TESTS
+
+namespace AerosTests
+{
+	FAerosSimulationSettings Small(EAerosScenario Scenario)
+	{
+		FAerosSimulationSettings S;
+		S.GridSizeX = S.GridSizeY = 64;
+		S.Scenario = Scenario;
+		S.StartDayOfYear = 180;
+		S.StartHour = 11.f;
+		return S;
+	}
+	void Flat(FAerosSimulation& Sim, float Height)
+	{
+		TArray<float> H;
+		H.Init(Height, Sim.GetNX() * Sim.GetNY());
+		Sim.SetElevation(H, Sim.GetSettings().DomainCenter);
+	}
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FAerosHazardTest, "Aeros.Simulation.Disasters",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FAerosHazardTest::RunTest(const FString& Parameters)
+{
+	using namespace AerosTests;
+	// Flood: a 250 mm cloudburst leaves standing water
+	{
+		FAerosSimulation Sim;
+		Sim.Initialize(Small(EAerosScenario::FairWeather));
+		Flat(Sim, 10.f);
+		Sim.InjectRain(FVector::ZeroVector, 10.f, 250.f);
+		for (int32 K = 0; K < 60; ++K) Sim.Step(30.f);
+		float MaxFlood = 0.f;
+		for (const FAerosCell& C : Sim.GetCells()) MaxFlood = FMath::Max(MaxFlood, C.Flood);
+		TestTrue(TEXT("Cloudburst floods (> 10 cm)"), MaxFlood > 0.1f);
+	}
+	// Tsunami: M9 offshore floods the coast
+	{
+		FAerosSimulationSettings S = Small(EAerosScenario::FairWeather);
+		FAerosWaterRegion Ocean;
+		Ocean.Center = FVector(6000000.0, 0, 0); // coast 20 km east
+		Ocean.RadiusKm = 40.f;
+		S.WaterRegions.Add(Ocean);
+		FAerosSimulation Sim;
+		Sim.Initialize(S);
+		Flat(Sim, 2.f);
+		TestTrue(TEXT("Tsunami triggered over the ocean"), Sim.TriggerTsunami(FVector(4500000.0, 0, 0), 9.f));
+		float MaxRunup = 0.f;
+		for (int32 K = 0; K < 60; ++K)
+		{
+			Sim.Step(30.f);
+			for (const FAerosCell& C : Sim.GetCells()) if (C.Water < 0.5f) MaxRunup = FMath::Max(MaxRunup, C.Flood);
+		}
+		TestTrue(TEXT("Coast inundated (> 30 cm)"), MaxRunup > 0.3f);
+	}
+	// Dust: a gust front over the desert raises sand
+	{
+		FAerosSimulation Sim;
+		Sim.Initialize(Small(EAerosScenario::DesertDust));
+		Sim.InjectOutflow(FVector::ZeroVector, 15.f, -12.f);
+		float MaxDust = 0.f;
+		for (int32 K = 0; K < 60; ++K)
+		{
+			Sim.Step(30.f);
+			for (const FAerosCell& C : Sim.GetCells()) MaxDust = FMath::Max(MaxDust, C.Dust);
+		}
+		TestTrue(TEXT("Haboob lifts dust (> 2 g/m2)"), MaxDust > 2.f);
+	}
+	// Volcano: ash falls downwind
+	{
+		FAerosSimulation Sim;
+		Sim.Initialize(Small(EAerosScenario::FairWeather));
+		Sim.AddVolcanicEmitter(FVector(-3000000.0, 0, 0), 1e6f, 7200.f);
+		for (int32 K = 0; K < 120; ++K) Sim.Step(30.f);
+		float MaxAsh = 0.f;
+		for (const FAerosCell& C : Sim.GetCells()) MaxAsh = FMath::Max(MaxAsh, C.AshDepth);
+		TestTrue(TEXT("Ash deposit (> 0.5 mm)"), MaxAsh > 0.5f);
+	}
+	// Blizzard: snowpack + gale = whiteout
+	{
+		FAerosSimulation Sim;
+		Sim.Initialize(Small(EAerosScenario::Blizzard));
+		for (int32 K = 0; K < 60; ++K) Sim.Step(30.f);
+		int32 Blizzard = 0;
+		for (const FAerosCell& C : Sim.GetCells()) Blizzard += C.Phen == uint8(EAerosPhenomenon::Blizzard) ? 1 : 0;
+		TestTrue(TEXT("Blizzard conditions"), Blizzard > 0);
+	}
+	return true;
+}
+
+#endif

@@ -7,6 +7,9 @@
 #include "AerosWeatherRadar.h"
 #include "AerosCloudManager.h"
 #include "AerosTornado.h"
+#include "AerosVolcano.h"
+#include "AerosEarthquake.h"
+#include "AerosLiveWeather.h"
 #include "Engine/Canvas.h"
 #include "Engine/Engine.h"
 #include "Engine/Font.h"
@@ -99,7 +102,7 @@ void AAerosDemoHUD::DrawHUD()
 	DrawPanel(X - 8, Y - 6, 330, 172);
 	const FLinearColor PhCol = UAerosWeatherLibrary::IsSevere(S) ? Danger : Accent;
 	Y = Line(X, Y, UAerosWeatherLibrary::PhenomenonToText(S.Phenomenon).ToString().ToUpper(), PhCol, 1.2f);
-	Y = Line(X, Y, FString::Printf(TEXT("Temp %.1f C   Dew point %.1f C   RH %.0f%%"), S.Temperature, S.DewPoint, S.RelativeHumidity * 100.f));
+	Y = Line(X, Y, FString::Printf(TEXT("Temp %.1f C (feels %.0f)  Dew %.1f C  RH %.0f%%"), S.Temperature, S.FeelsLike, S.DewPoint, S.RelativeHumidity * 100.f));
 	Y = Line(X, Y, FString::Printf(TEXT("Pressure %.1f hPa   Ground %.1f C"), S.Pressure, S.GroundTemperature));
 	Y = Line(X, Y, FString::Printf(TEXT("Wind %.0f km/h from %s (%.0f deg)"), S.WindSpeed * 3.6f, *Compass(WindFrom(S.Wind)), WindFrom(S.Wind)));
 	Y = Line(X, Y, FString::Printf(TEXT("Clouds %.0f%%  base %.0f m  top %.0f m"), S.CloudCover * 100.f, S.CloudBase, S.CloudTop));
@@ -119,6 +122,21 @@ void AAerosDemoHUD::DrawHUD()
 	Y = Line(X, Y, FString::Printf(TEXT("SRH 0-1 %.0f   0-3 %.0f m2/s2   Shear 0-6 %.0f m/s"), S.SRH01, S.SRH03, S.BulkShear06));
 	Y = Line(X, Y, FString::Printf(TEXT("STP %.1f   SCP %.1f   SHIP %.1f   Meso %.0f%%"), S.STP, S.SCP, S.SHIP, S.Mesocyclone * 100.f), S.STP > 1.f ? Danger : FLinearColor::White);
 	Y = Line(X, Y, FString::Printf(TEXT("Convective activity %.0f%%"), S.ConvectiveActivity * 100.f), Dim);
+
+	// ---- Hazards -----------------------------------------------------------------------
+	Y += 14.f;
+	const float Shake = Sub->GetGroundShakingAt(Viewer);
+	DrawPanel(X - 8, Y - 6, 330, 128);
+	Y = Line(X, Y, TEXT("HAZARDS"), Accent);
+	Y = Line(X, Y, FString::Printf(TEXT("Flood %.2f m  current %.1f m/s  soil %.0f%%"), S.FloodDepth, S.FloodFlow.Size(), S.SoilMoisture * 100.f), S.FloodDepth > 0.15f ? Danger : FLinearColor::White);
+	Y = Line(X, Y, FString::Printf(TEXT("Sea level %+.2f m  elevation %.0f m %s"), S.SeaLevelAnomaly, S.Elevation, S.bOcean ? TEXT("(ocean)") : TEXT("")), FMath::Abs(S.SeaLevelAnomaly) > 0.5f ? Danger : FLinearColor::White);
+	Y = Line(X, Y, FString::Printf(TEXT("Dust %.1f g/m2   blowing snow %.0f%%"), S.Dust, S.BlowingSnow * 100.f), S.Dust > 6.f ? Warn : FLinearColor::White);
+	Y = Line(X, Y, FString::Printf(TEXT("Ash fall %.2f mm/h   ash on ground %.1f mm"), S.AshFall, S.AshDepth), S.AshFall > 0.05f ? Warn : FLinearColor::White);
+	Y = Line(X, Y, FString::Printf(TEXT("Ground shaking %.2f g  (Mercalli %d)"), Shake, Shake > 0.001f ? AAerosEarthquake::MercalliFromPGA(Shake) : 1), Shake > 0.1f ? Danger : FLinearColor::White);
+	if (UAerosLiveWeather* Live = Sub->GetLiveWeather(); Live && (Live->IsActive() || Live->IsBusy()))
+	{
+		Y = Line(X, Y, FString::Printf(TEXT("LIVE %s"), *Live->GetStatus()), Accent);
+	}
 
 	// ---- Nearby storms -------------------------------------------------------------------------
 	TArray<FAerosStormData> Storms = Sub->GetStorms();
@@ -157,6 +175,46 @@ void AAerosDemoHUD::DrawHUD()
 			}
 		}
 	}
+	if (Warning.IsEmpty() && Shake > 0.02f)
+	{
+		Warning = FString::Printf(TEXT("EARTHQUAKE  Mercalli %d  %.2f g"), AAerosEarthquake::MercalliFromPGA(Shake), Shake);
+	}
+	if (Warning.IsEmpty())
+	{
+		FVector Coast, Offshore;
+		if (S.Phenomenon == EAerosPhenomenon::Tsunami || (Sub->FindNearestOcean(Viewer, Coast, Offshore, 10.f) && FMath::Abs(Sub->GetWeatherAtLocation(Offshore).SeaLevelAnomaly) > 0.4f
+			&& FVector::Dist2D(Coast, Viewer) < 6000000.0))
+		{
+			Warning = FString::Printf(TEXT("TSUNAMI WARNING  sea %+.1f m  coast %.0f km %s"), Sub->GetWeatherAtLocation(Offshore).SeaLevelAnomaly,
+				FVector::Dist2D(Coast, Viewer) * 1e-5, *Compass(Bearing(Viewer, Coast)));
+		}
+	}
+	if (Warning.IsEmpty())
+	{
+		for (const AAerosVolcano* V : Sub->GetVolcanoes())
+		{
+			const float D = float(FVector::Dist2D(V->GetActorLocation(), Viewer)) * 1e-5f;
+			if (V->State == EAerosVolcanoState::Erupting && D < 80.f)
+			{
+				Warning = FString::Printf(TEXT("VOLCANIC ERUPTION  VEI %d  plume %.0f km  %.0f km %s"), V->CurrentVEI, V->GetPlumeHeight() * 0.001f, D, *Compass(Bearing(Viewer, V->GetActorLocation())));
+				break;
+			}
+			if (V->State == EAerosVolcanoState::Unrest && D < 80.f) { Warning = TEXT("VOLCANO UNREST: ERUPTION IMMINENT"); break; }
+		}
+	}
+	if (Warning.IsEmpty())
+	{
+		switch (S.Phenomenon)
+		{
+		case EAerosPhenomenon::FlashFlood: Warning = TEXT("FLASH FLOOD WARNING: GET TO HIGH GROUND"); break;
+		case EAerosPhenomenon::Flood: Warning = TEXT("FLOOD WARNING"); break;
+		case EAerosPhenomenon::StormSurge: Warning = TEXT("STORM SURGE WARNING"); break;
+		case EAerosPhenomenon::Blizzard: Warning = TEXT("BLIZZARD WARNING: WHITEOUT"); break;
+		case EAerosPhenomenon::Sandstorm: Warning = TEXT("DUST STORM WARNING"); break;
+		case EAerosPhenomenon::VolcanicAshfall: Warning = TEXT("ASHFALL ADVISORY"); break;
+		default: break;
+		}
+	}
 	if (Warning.IsEmpty() && UAerosWeatherLibrary::IsSevere(S)) Warning = TEXT("SEVERE WEATHER: TAKE SHELTER");
 	if (!Warning.IsEmpty())
 	{
@@ -170,7 +228,7 @@ void AAerosDemoHUD::DrawHUD()
 	{
 		DrawText(Pawn->LastMessage, FLinearColor(1, 1, 1, FMath::Min(Pawn->MessageTime, 1.f)), SW * 0.5f - 250.f, SH - 80.f, GEngine->GetMediumFont());
 	}
-	Line(20.f, SH - 26.f, TEXT("F1/Tab: help & HUD   1-7 scenarios   B bubble   T tornado   H hurricane   F fly to storm   +/- time   R radar"), Dim);
+	Line(20.f, SH - 26.f, TEXT("F1/Tab aide   ZQSD bouger   &\u00E9\"'(-\u00E8_\u00E7\u00E0 sc\u00E9narios   G s\u00E9isme  Y tsunami  U volcan  O d\u00E9luge  L haboob  W m\u00E9t\u00E9o r\u00E9elle"), Dim);
 }
 
 void AAerosDemoHUD::DrawRadar(UAerosWeatherSubsystem* Sub, float X, float Y, float Size)
@@ -230,28 +288,32 @@ void AAerosDemoHUD::DrawRadar(UAerosWeatherSubsystem* Sub, float X, float Y, flo
 
 void AAerosDemoHUD::DrawHelp(float X, float Y)
 {
-	DrawPanel(X - 8, Y - 6, 560, 380);
+	DrawPanel(X - 8, Y - 6, 640, 520);
 	const TCHAR* Lines[] = {
-		TEXT("AEROS WEATHER DEMO - CONTROLS"),
+		TEXT("AEROS WEATHER DEMO - COMMANDES (clavier AZERTY)"),
 		TEXT(""),
-		TEXT("Mouse look, WASD move, E/Space up, Q/C down, Shift x10, Ctrl x100 speed"),
-		TEXT("F1 / Tab      cycle HUD: full -> radar only -> hidden -> this help"),
-		TEXT("1 Climate (seasons)   2 Fair weather   3 Summer thunderstorms"),
-		TEXT("4 Supercell outbreak  5 Winter storm   6 Tropical season   7 Frontal rain"),
-		TEXT("B             inject a thermal bubble 15 km ahead (triggers a storm if unstable)"),
-		TEXT("T             force a tornado under the strongest storm (server)"),
-		TEXT("H             seed a hurricane 250 km east (ocean)"),
-		TEXT("F             teleport near the nearest storm"),
-		TEXT("+ / -         simulation speed x2 / /2      P pause weather"),
-		TEXT("N / M         -1 / +1 hour          J / K   -1 / +1 month (seasons)"),
-		TEXT("R             radar product: reflectivity / velocity / precipitation type"),
-		TEXT("V             debug draw (storm circles, wind arrows)"),
+		TEXT("Souris regarder, Z Q S D (ou fl\u00E8ches) bouger, Espace/E monter, A/C descendre"),
+		TEXT("Shift x10, Ctrl x100 vitesse         F1 / Tab  HUD complet / radar / cach\u00E9 / aide"),
 		TEXT(""),
-		TEXT("Console: aeros.Scenario N, aeros.TimeScale X, aeros.Time day hour,"),
-		TEXT("         aeros.Bubble, aeros.Hurricane, aeros.Tornado, stat Aeros"),
+		TEXT("SC\u00C9NARIOS  &  Climat (saisons)      \u00E9  Beau temps          \"  Orages d'\u00E9t\u00E9"),
+		TEXT("           '  Supercellules         (  Temp\u00EAte de neige    -  Saison tropicale"),
+		TEXT("           \u00E8  Pluie frontale        _  Blizzard            \u00E7  D\u00E9sert / temp\u00EAtes de sable"),
+		TEXT("           \u00E0  Mousson / inondations"),
 		TEXT(""),
-		TEXT("Tip: the clock runs at x60 by default. Use - to slow down to real time"),
-		TEXT("to chase a tornado; use + to watch storms form and seasons change."),
+		TEXT("M\u00C9T\u00C9O       B bulle chaude (orage)   T tornade   H ouragan (+ onde de temp\u00EAte)"),
+		TEXT("D\u00C9SASTRES   G s\u00E9isme M6.6              Y s\u00E9isme sous-marin M9 + tsunami"),
+		TEXT("            U \u00E9ruption du volcan (VEI 3, 4, 5, 6, 2...)   O d\u00E9luge 250 mm (crue)"),
+		TEXT("            L rafale descendante (haboob sur sol sec)"),
+		TEXT("M\u00C9T\u00C9O R\u00C9ELLE  W : Paris, Oklahoma City, Miami, Tokyo, Reykjavik... (Open-Meteo, temps r\u00E9el)"),
+		TEXT("VOYAGE      F orage le plus proche   V volcan   I c\u00F4te (face \u00E0 la mer)"),
+		TEXT("TEMPS       = / ) (ou pav\u00E9 + / -) vitesse x2 / \u00F72    P pause"),
+		TEXT("            N / M  -1 / +1 heure      J / K  -1 / +1 mois (saisons)"),
+		TEXT("AFFICHAGE   R radar : r\u00E9flectivit\u00E9 / vitesse / type / risques    X debug"),
+		TEXT(""),
+		TEXT("Console : aeros.Scenario 0-10, aeros.TimeScale X, aeros.Time jour heure, aeros.Quake M km,"),
+		TEXT("          aeros.Tsunami M, aeros.Flood mm, aeros.Haboob, aeros.Eruption VEI, aeros.Live lat lon nom"),
+		TEXT(""),
+		TEXT("Astuce : le temps tourne en x60. Ralentis avec ) pour suivre une tornade ou un tsunami."),
 	};
 	for (const TCHAR* L : Lines) Y = Line(X, Y, L, FLinearColor::White);
 }

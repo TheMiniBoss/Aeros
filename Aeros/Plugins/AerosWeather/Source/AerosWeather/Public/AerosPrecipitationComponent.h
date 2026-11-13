@@ -1,6 +1,6 @@
 // Copyright Aeros. All Rights Reserved.
 //
-// UAerosPrecipitationComponent — local precipitation around the viewer (roadmap LOD: rain
+// UAerosPrecipitationComponent - local precipitation around the viewer (roadmap LOD: rain
 // is only instanced near the player; far away the weather map / fog carry it).
 // Put it on the player pawn or camera. Drives Niagara systems from the project settings
 // (User.Intensity, User.Wind, User.HailSize). Without Niagara assets it falls back to a
@@ -60,7 +60,17 @@ public:
 	TObjectPtr<UNiagaraComponent> HailVFX;
 
 	UPROPERTY(Transient, BlueprintReadOnly, Category = "Aeros")
+	TObjectPtr<UNiagaraComponent> DustVFX;
+
+	UPROPERTY(Transient, BlueprintReadOnly, Category = "Aeros")
+	TObjectPtr<UNiagaraComponent> AshVFX;
+
+	UPROPERTY(Transient, BlueprintReadOnly, Category = "Aeros")
 	TObjectPtr<UAudioComponent> RainAudio;
+
+	/** Sand / ash / blowing snow (fallback renderer). */
+	UPROPERTY(Transient, BlueprintReadOnly, Category = "Aeros")
+	TObjectPtr<UInstancedStaticMeshComponent> FallbackAirborne;
 
 	UPROPERTY(Transient, BlueprintReadOnly, Category = "Aeros")
 	TObjectPtr<UInstancedStaticMeshComponent> FallbackRain;
@@ -82,11 +92,16 @@ private:
 	void Respawn(FParticle& P, bool bSolid, bool bAnyHeight);
 	void UpdateGroundHeight();
 	void CreateSubComponents();
+	void UpdateAirborne(float DeltaTime);
 
 	FAerosWeatherSample Local;
 	TArray<FParticle> Particles;
 	TArray<FTransform> RainTransforms;
 	TArray<FTransform> SolidTransforms;
+	TArray<FParticle> Airborne;
+	TArray<FTransform> AirborneTransforms;
+	UPROPERTY(Transient) TObjectPtr<UMaterialInstanceDynamic> AirborneMID;
+	int32 AirborneKind = -1;
 	float GroundZ = 0.f;
 	float GroundTimer = 0.f;
 	float HailSoundAccum = 0.f;

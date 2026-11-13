@@ -9,6 +9,10 @@
 #include "AerosWeatherNetState.h"
 #include "AerosWeatherController.h"
 #include "AerosTornado.h"
+#include "AerosHazardManager.h"
+#include "AerosEarthquake.h"
+#include "AerosVolcano.h"
+#include "AerosLiveWeather.h"
 #include "Core/AerosPhysics.h"
 #include "Engine/World.h"
 #include "Engine/Engine.h"
@@ -45,8 +49,12 @@ void UAerosWeatherSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 	Super::Initialize(Collection);
 	StormManager = NewObject<UAerosStormManager>(this);
 	CloudManager = NewObject<UAerosCloudManager>(this);
+	HazardManager = NewObject<UAerosHazardManager>(this);
+	LiveWeather = NewObject<UAerosLiveWeather>(this);
 	StormManager->Initialize(this);
 	CloudManager->Initialize(this);
+	HazardManager->Initialize(this);
+	LiveWeather->Initialize(this);
 	ActiveSettings = UAerosWeatherSettings::Get()->DefaultSimulation;
 }
 
@@ -55,6 +63,8 @@ void UAerosWeatherSubsystem::Deinitialize()
 	StopSimulation();
 	if (StormManager) StormManager->Shutdown();
 	if (CloudManager) CloudManager->Shutdown();
+	if (HazardManager) HazardManager->Shutdown();
+	if (LiveWeather) LiveWeather->Shutdown();
 	Super::Deinitialize();
 }
 
@@ -108,6 +118,8 @@ void UAerosWeatherSubsystem::StartSimulation(const FAerosSimulationSettings& Set
 	LastLightningSeq = 0;
 	KnownStorms.Reset();
 	KnownCyclones.Reset();
+	TerrainCenter = FVector(1e30, 0, 0); // forces a terrain sampling pass
+	TerrainCursor = -1;
 
 	UWorld* World = GetWorld();
 	if (World && HasAuthority() && World->GetNetMode() != NM_Standalone)
@@ -156,8 +168,11 @@ void UAerosWeatherSubsystem::Tick(float DeltaTime)
 	PullSnapshot();
 	MaybeFollowViewer();
 
+	UpdateTerrainSampling();
 	if (StormManager) StormManager->Tick(DeltaTime);
+	if (HazardManager) HazardManager->Tick(DeltaTime);
 	if (CloudManager) CloudManager->Tick(DeltaTime);
+	if (LiveWeather) LiveWeather->Tick(DeltaTime);
 	BroadcastEvents();
 
 	// ---- Debug draw ---------------------------------------------------------------
@@ -376,6 +391,32 @@ void UAerosWeatherSubsystem::ApplyNetCommand(uint8 Type, const FVector& Location
 		Cmd = [Regions](FAerosSimulation& Sim) { Sim.SetWaterRegions(Regions); };
 		break;
 	}
+	case EAerosNetCommand::DesertRegions:
+	{
+		const TArray<FAerosDesertRegion> Regions = ActiveSettings.DesertRegions;
+		Cmd = [Regions](FAerosSimulation& Sim) { Sim.SetDesertRegions(Regions); };
+		break;
+	}
+	case EAerosNetCommand::InjectRain:
+		Cmd = [Location, Params](FAerosSimulation& Sim) { Sim.InjectRain(Location, float(Params.X), float(Params.Y)); };
+		break;
+	case EAerosNetCommand::InjectOutflow:
+		Cmd = [Location, Params](FAerosSimulation& Sim) { Sim.InjectOutflow(Location, float(Params.X), float(Params.Y)); };
+		break;
+	case EAerosNetCommand::Tsunami:
+		Cmd = [Location, Params](FAerosSimulation& Sim) { Sim.TriggerTsunami(Location, float(Params.X)); };
+		OnTsunami.Broadcast(Location, float(Params.X));
+		break;
+	case EAerosNetCommand::VolcanicEmission:
+		Cmd = [Location, Params](FAerosSimulation& Sim) { Sim.AddVolcanicEmitter(Location, float(Params.X), float(Params.Y)); };
+		break;
+	case EAerosNetCommand::SetLatitude:
+	{
+		const float Lat = float(Params.X);
+		ActiveSettings.LatitudeDeg = Lat;
+		Cmd = [Lat](FAerosSimulation& Sim) { Sim.SetLatitude(Lat); };
+		break;
+	}
 	default:
 		return;
 	}
@@ -406,6 +447,8 @@ void UAerosWeatherSubsystem::ApplyNetState(const AAerosWeatherNetState& State)
 	ActiveSettings.TimeScale = State.Settings.TimeScale;
 	ActiveSettings.CustomSynoptic = State.Settings.CustomSynoptic;
 	ActiveSettings.WaterRegions = State.Settings.WaterRegions;
+	ActiveSettings.DesertRegions = State.Settings.DesertRegions;
+	ActiveSettings.SeismicZones = State.Settings.SeismicZones;
 	bPaused = State.bServerPaused;
 
 	// Follow the server clock; fast-forward on join (commands are timed, so the replay is exact)
@@ -479,6 +522,138 @@ void UAerosWeatherSubsystem::RecenterDomain(FVector WorldLocation)
 	IssueCommand(uint8(EAerosNetCommand::Recenter), WorldLocation, FVector4(0, 0, 0, 0));
 }
 
+void UAerosWeatherSubsystem::SetDesertRegions(const TArray<FAerosDesertRegion>& Regions)
+{
+	if (!HasAuthority()) return;
+	ActiveSettings.DesertRegions = Regions;
+	if (NetState) NetState->ServerSetSettings(ActiveSettings);
+	IssueCommand(uint8(EAerosNetCommand::DesertRegions), FVector::ZeroVector, FVector4(0, 0, 0, 0));
+}
+
+void UAerosWeatherSubsystem::SetLatitude(float LatitudeDeg)
+{
+	IssueCommand(uint8(EAerosNetCommand::SetLatitude), FVector::ZeroVector, FVector4(FMath::Clamp(LatitudeDeg, -89.f, 89.f), 0, 0, 0));
+}
+
+AAerosEarthquake* UAerosWeatherSubsystem::TriggerEarthquake(FVector Epicenter, float Magnitude, float DepthKm)
+{
+	return HazardManager ? HazardManager->SpawnEarthquake(Epicenter, Magnitude, DepthKm) : nullptr;
+}
+
+void UAerosWeatherSubsystem::TriggerTsunami(FVector Source, float Magnitude)
+{
+	IssueCommand(uint8(EAerosNetCommand::Tsunami), Source, FVector4(Magnitude, 0, 0, 0));
+}
+
+void UAerosWeatherSubsystem::InjectRain(FVector WorldLocation, float RadiusKm, float Millimetres)
+{
+	IssueCommand(uint8(EAerosNetCommand::InjectRain), WorldLocation, FVector4(RadiusKm, Millimetres, 0, 0));
+}
+
+void UAerosWeatherSubsystem::InjectOutflow(FVector WorldLocation, float RadiusKm, float DeltaTemperature)
+{
+	IssueCommand(uint8(EAerosNetCommand::InjectOutflow), WorldLocation, FVector4(RadiusKm, FMath::Min(DeltaTemperature, 0.f), 0, 0));
+}
+
+void UAerosWeatherSubsystem::StartVolcanicEmission(FVector Vent, float MassRateKgPerSecond, float DurationSeconds)
+{
+	IssueCommand(uint8(EAerosNetCommand::VolcanicEmission), Vent, FVector4(MassRateKgPerSecond, DurationSeconds, 0, 0));
+}
+
+float UAerosWeatherSubsystem::GetGroundShakingAt(FVector WorldLocation) const
+{
+	return HazardManager ? HazardManager->GetShakingAt(WorldLocation) : 0.f;
+}
+
+TArray<AAerosVolcano*> UAerosWeatherSubsystem::GetVolcanoes() const
+{
+	return HazardManager ? HazardManager->GetVolcanoes() : TArray<AAerosVolcano*>();
+}
+
+bool UAerosWeatherSubsystem::FindNearestOcean(FVector From, FVector& OutCoast, FVector& OutOffshore, float OffshoreKm) const
+{
+	if (!Current || !Current->IsValid()) return false;
+	float GX, GY;
+	Current->WorldToGrid(From, GX, GY);
+	int32 Best = -1;
+	float BestD2 = TNumericLimits<float>::Max();
+	for (int32 J = 0; J < Current->NY; ++J)
+	{
+		for (int32 I = 0; I < Current->NX; ++I)
+		{
+			if (!Current->Cells[I + J * Current->NX].bWater) continue;
+			const float D2 = FMath::Square(I + 0.5f - GX) + FMath::Square(J + 0.5f - GY);
+			if (D2 < BestD2) { BestD2 = D2; Best = I + J * Current->NX; }
+		}
+	}
+	if (Best < 0) return false;
+	OutCoast = Current->GridToWorld(Best % Current->NX + 0.5f, Best / Current->NX + 0.5f);
+	const FVector Dir = (OutCoast - From).GetSafeNormal2D();
+	OutOffshore = OutCoast + (Dir.IsNearlyZero() ? FVector(1, 0, 0) : Dir) * OffshoreKm * 100000.0;
+	return true;
+}
+
+void UAerosWeatherSubsystem::ResampleTerrain()
+{
+	TerrainCenter = FVector(1e30, 0, 0);
+	TerrainCursor = -1;
+}
+
+void UAerosWeatherSubsystem::UpdateTerrainSampling()
+{
+	if (!ActiveSettings.bSampleTerrain || !Current || !Current->IsValid() || !SimThread) return;
+	UWorld* World = GetWorld();
+	if (!World) return;
+
+	// (Re)start when the domain moved
+	if (TerrainCursor < 0 && !Current->DomainCenter.Equals(TerrainCenter, 1.0))
+	{
+		TerrainCenter = Current->DomainCenter;
+		TerrainNX = Current->NX;
+		TerrainNY = Current->NY;
+		TerrainCellCm = Current->CellM * 100.f;
+		TerrainHeights.SetNumUninitialized(TerrainNX * TerrainNY);
+		TerrainCursor = 0;
+	}
+	if (TerrainCursor < 0) return;
+
+	// Time-sliced: a few thousand traces per frame, no hitch
+	const int32 Total = TerrainNX * TerrainNY;
+	const int32 End = FMath::Min(TerrainCursor + 3000, Total);
+	FCollisionQueryParams Params(SCENE_QUERY_STAT(AerosTerrain), false);
+	for (int32 K = TerrainCursor; K < End; ++K)
+	{
+		const float GX = K % TerrainNX + 0.5f, GY = K / TerrainNX + 0.5f;
+		const double X = TerrainCenter.X + (GX - TerrainNX * 0.5f) * TerrainCellCm;
+		const double Y = TerrainCenter.Y - (GY - TerrainNY * 0.5f) * TerrainCellCm;
+		FHitResult Hit;
+		float Height = 1.f; // nothing below: low flat land
+		if (World->LineTraceSingleByChannel(Hit, FVector(X, Y, 1500000.0), FVector(X, Y, -1500000.0), ECC_WorldStatic, Params))
+		{
+			Height = float(Hit.ImpactPoint.Z - ActiveSettings.SeaLevelZ) * 0.01f;
+		}
+		TerrainHeights[K] = Height;
+	}
+	TerrainCursor = End;
+	if (TerrainCursor >= Total)
+	{
+		TerrainCursor = -1;
+		const TArray<float> Heights = TerrainHeights;
+		const FVector Center = TerrainCenter;
+		SimThread->Enqueue([Heights, Center](FAerosSimulation& Sim) { Sim.SetElevation(Heights, Center); });
+	}
+}
+
+void UAerosWeatherSubsystem::RequestRealWeather(float Latitude, float Longitude, const FString& PlaceName, bool bApplyLocalTime, bool bKeepUpdating)
+{
+	if (LiveWeather && HasAuthority()) LiveWeather->Request(Latitude, Longitude, PlaceName, bApplyLocalTime, bKeepUpdating);
+}
+
+void UAerosWeatherSubsystem::StopRealWeather()
+{
+	if (LiveWeather) LiveWeather->Stop();
+}
+
 AAerosTornado* UAerosWeatherSubsystem::ForceTornado(int32 StormId)
 {
 	return StormManager ? StormManager->ForceTornado(StormId) : nullptr;
@@ -498,6 +673,7 @@ FAerosWeatherSample UAerosWeatherSubsystem::GetWeatherAtLocation(FVector WorldLo
 		S.WindSpeed = float(S.Wind.Size());
 		if (StormManager->IsInsideTornado(WorldLocation, 3.f)) S.Phenomenon = EAerosPhenomenon::Tornado;
 	}
+	if (HazardManager && HazardManager->GetShakingAt(WorldLocation) > 0.05f) S.Phenomenon = EAerosPhenomenon::Earthquake;
 	return S;
 }
 
@@ -559,6 +735,11 @@ UTexture2D* UAerosWeatherSubsystem::GetSurfaceMapTexture() const
 	return CloudManager ? CloudManager->GetSurfaceMap() : nullptr;
 }
 
+UTexture2D* UAerosWeatherSubsystem::GetHazardMapTexture() const
+{
+	return CloudManager ? CloudManager->GetHazardMap() : nullptr;
+}
+
 FVector4 UAerosWeatherSubsystem::GetDomainRect() const
 {
 	if (!Current) return FVector4(0, 0, 1, 1);
@@ -578,11 +759,11 @@ namespace
 
 	FAutoConsoleCommandWithWorldAndArgs CmdScenario(
 		TEXT("aeros.Scenario"),
-		TEXT("aeros.Scenario <0-7>: 0 Climate, 1 Fair, 2 SummerStorms, 3 Supercells, 4 Winter, 5 Tropical, 6 FrontalRain"),
+		TEXT("aeros.Scenario <0-10>: 0 Climate, 1 Fair, 2 SummerStorms, 3 Supercells, 4 Winter, 5 Tropical, 6 FrontalRain, 7 Custom, 8 Blizzard, 9 Desert, 10 Monsoon"),
 		FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
 		{
 			if (UAerosWeatherSubsystem* Sub = SubFromWorld(World); Sub && Args.Num() > 0)
-				Sub->SetScenario(static_cast<EAerosScenario>(FMath::Clamp(FCString::Atoi(*Args[0]), 0, 7)));
+				Sub->SetScenario(static_cast<EAerosScenario>(FMath::Clamp(FCString::Atoi(*Args[0]), 0, 10)));
 		}));
 
 	FAutoConsoleCommandWithWorldAndArgs CmdTimeScale(
@@ -622,6 +803,63 @@ namespace
 		{
 			if (UAerosWeatherSubsystem* Sub = SubFromWorld(World))
 				Sub->SpawnHurricane(Sub->GetViewerLocation() - FVector(15000000.0, 0, 0), Args.Num() > 0 ? FCString::Atof(*Args[0]) : 960.f, 35.f);
+		}));
+
+	FAutoConsoleCommandWithWorldAndArgs CmdQuake(
+		TEXT("aeros.Quake"), TEXT("aeros.Quake [magnitude] [distanceKm]: earthquake near the viewer (server)"),
+		FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+		{
+			if (UAerosWeatherSubsystem* Sub = SubFromWorld(World))
+			{
+				const float Km = Args.Num() > 1 ? FCString::Atof(*Args[1]) : 15.f;
+				Sub->TriggerEarthquake(Sub->GetViewerLocation() + FVector(Km * 100000.0, 0, 0), Args.Num() > 0 ? FCString::Atof(*Args[0]) : 6.5f, 10.f);
+			}
+		}));
+
+	FAutoConsoleCommandWithWorldAndArgs CmdTsunami(
+		TEXT("aeros.Tsunami"), TEXT("aeros.Tsunami [magnitude]: submarine earthquake off the nearest coast"),
+		FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+		{
+			UAerosWeatherSubsystem* Sub = SubFromWorld(World);
+			FVector Coast, Offshore;
+			if (Sub && Sub->FindNearestOcean(Sub->GetViewerLocation(), Coast, Offshore, 70.f))
+				Sub->TriggerEarthquake(Offshore, Args.Num() > 0 ? FCString::Atof(*Args[0]) : 9.f, 20.f);
+		}));
+
+	FAutoConsoleCommandWithWorldAndArgs CmdFlood(
+		TEXT("aeros.Flood"), TEXT("aeros.Flood [mm]: torrential rain over the viewer"),
+		FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+		{
+			if (UAerosWeatherSubsystem* Sub = SubFromWorld(World))
+				Sub->InjectRain(Sub->GetViewerLocation(), 15.f, Args.Num() > 0 ? FCString::Atof(*Args[0]) : 250.f);
+		}));
+
+	FAutoConsoleCommandWithWorldAndArgs CmdHaboob(
+		TEXT("aeros.Haboob"), TEXT("aeros.Haboob: gust front 20 km away blowing toward the viewer"),
+		FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+		{
+			if (UAerosWeatherSubsystem* Sub = SubFromWorld(World))
+				Sub->InjectOutflow(Sub->GetViewerLocation() + FVector(-2000000.0, 0, 0), 20.f, -12.f);
+		}));
+
+	FAutoConsoleCommandWithWorldAndArgs CmdEruption(
+		TEXT("aeros.Eruption"), TEXT("aeros.Eruption [VEI]: erupt the nearest volcano"),
+		FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+		{
+			UAerosWeatherSubsystem* Sub = SubFromWorld(World);
+			if (!Sub) return;
+			AAerosVolcano* Best = nullptr;
+			for (AAerosVolcano* V : Sub->GetVolcanoes())
+				if (!Best || FVector::DistSquared(V->GetActorLocation(), Sub->GetViewerLocation()) < FVector::DistSquared(Best->GetActorLocation(), Sub->GetViewerLocation())) Best = V;
+			if (Best) Best->StartEruption(Args.Num() > 0 ? FCString::Atoi(*Args[0]) : 4);
+		}));
+
+	FAutoConsoleCommandWithWorldAndArgs CmdLive(
+		TEXT("aeros.Live"), TEXT("aeros.Live <latitude> <longitude> [name]: project the real current weather of a place (Open-Meteo)"),
+		FConsoleCommandWithWorldAndArgsDelegate::CreateLambda([](const TArray<FString>& Args, UWorld* World)
+		{
+			if (UAerosWeatherSubsystem* Sub = SubFromWorld(World); Sub && Args.Num() > 1)
+				Sub->RequestRealWeather(FCString::Atof(*Args[0]), FCString::Atof(*Args[1]), Args.Num() > 2 ? Args[2] : TEXT("Custom"), true, true);
 		}));
 
 	FAutoConsoleCommandWithWorldAndArgs CmdTornado(

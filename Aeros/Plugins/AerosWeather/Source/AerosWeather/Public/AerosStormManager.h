@@ -1,6 +1,6 @@
 // Copyright Aeros. All Rights Reserved.
 //
-// UAerosStormManager — roadmap "UStormManager". Reads the storms detected by the simulation
+// UAerosStormManager - roadmap "UStormManager". Reads the storms detected by the simulation
 // and turns the important ones into actors (LOD: only near players), rolls tornado genesis
 // with the shared seed, follows hurricanes and shows lightning.
 

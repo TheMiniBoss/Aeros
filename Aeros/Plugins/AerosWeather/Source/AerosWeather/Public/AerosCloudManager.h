@@ -1,6 +1,6 @@
 // Copyright Aeros. All Rights Reserved.
 //
-// UAerosCloudManager — roadmap "UCloudManager": turns the grid into GPU data.
+// UAerosCloudManager - roadmap "UCloudManager": turns the grid into GPU data.
 //  * Weather map (RGBA8, one texel per cell): R cloud cover, G cloud base (0-5 km),
 //    B cloud top (0-16 km), A precipitation (sqrt-scaled 0-100 mm/h).
 //    Sample it in a Volumetric Cloud material with:
@@ -32,6 +32,8 @@ public:
 
 	UTexture2D* GetWeatherMap() const { return WeatherMap; }
 	UTexture2D* GetSurfaceMap() const { return SurfaceMap; }
+	/** RGBA8: R flood depth (sqrt, 0-5 m), G dust (0-50 g/m2), B ash on ground (sqrt, 0-100 mm), A sea anomaly (-5..5 m). */
+	UTexture2D* GetHazardMap() const { return HazardMap; }
 
 	/** Current lightning flash brightness at the viewer (0-1). */
 	float GetLightningFlash() const { return Flash; }
@@ -49,10 +51,12 @@ private:
 	UPROPERTY(Transient) TObjectPtr<UAerosWeatherSubsystem> Owner;
 	UPROPERTY(Transient) TObjectPtr<UTexture2D> WeatherMap;
 	UPROPERTY(Transient) TObjectPtr<UTexture2D> SurfaceMap;
+	UPROPERTY(Transient) TObjectPtr<UTexture2D> HazardMap;
 	UPROPERTY(Transient) TObjectPtr<UMaterialParameterCollection> Collection;
 
 	TArray<FColor> WeatherPixels;
 	TArray<FColor> SurfacePixels;
+	TArray<FColor> HazardPixels;
 	int32 TexW = 0, TexH = 0;
 	float Timer = 0.f;
 	float Flash = 0.f;

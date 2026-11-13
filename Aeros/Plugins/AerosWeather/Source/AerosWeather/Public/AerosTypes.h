@@ -42,6 +42,14 @@ enum class EAerosPhenomenon : uint8
 	Tornado             UMETA(DisplayName = "Tornado"),
 	TropicalStorm       UMETA(DisplayName = "Tropical Storm"),
 	Hurricane           UMETA(DisplayName = "Hurricane"),
+	// Natural disasters (appended: values above stay stable)
+	Sandstorm           UMETA(DisplayName = "Sandstorm"),
+	VolcanicAshfall     UMETA(DisplayName = "Volcanic Ashfall"),
+	Flood               UMETA(DisplayName = "Flood"),
+	FlashFlood          UMETA(DisplayName = "Flash Flood"),
+	StormSurge          UMETA(DisplayName = "Storm Surge"),
+	Tsunami             UMETA(DisplayName = "Tsunami"),
+	Earthquake          UMETA(DisplayName = "Earthquake"),
 };
 
 UENUM(BlueprintType)
@@ -64,6 +72,9 @@ enum class EAerosScenario : uint8
 	TropicalSeason       UMETA(DisplayName = "Tropical Season"),
 	FrontalRain          UMETA(DisplayName = "Frontal Rain"),
 	Custom               UMETA(DisplayName = "Custom"),
+	Blizzard             UMETA(DisplayName = "Blizzard"),
+	DesertDust           UMETA(DisplayName = "Desert / Sandstorms"),
+	Monsoon              UMETA(DisplayName = "Monsoon / Floods"),
 };
 
 UENUM(BlueprintType)
@@ -96,6 +107,45 @@ struct AEROSWEATHER_API FAerosSynopticState
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Aeros|Synoptic") FVector2D TemperatureGradient = FVector2D::ZeroVector;
 	/** Horizontal dew point gradient, K per 100 km. Drylines. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Aeros|Synoptic") FVector2D DewPointGradient = FVector2D::ZeroVector;
+	/** Background soil dryness 0-1 (1 = desert: dust storms, poor infiltration -> flash floods). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Aeros|Synoptic") float Aridity = 0.15f;
+};
+
+/** Circular desert (sand, dry soil): dust storms / haboobs. */
+USTRUCT(BlueprintType)
+struct AEROSWEATHER_API FAerosDesertRegion
+{
+	GENERATED_BODY()
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Aeros|Surface") FVector Center = FVector::ZeroVector; // world cm
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Aeros|Surface") float RadiusKm = 60.f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Aeros|Surface") float EdgeWidthKm = 15.f;
+};
+
+/** Area producing spontaneous earthquakes (Gutenberg-Richter, b = 1). */
+USTRUCT(BlueprintType)
+struct AEROSWEATHER_API FAerosSeismicZone
+{
+	GENERATED_BODY()
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Aeros|Seismic") FVector Center = FVector::ZeroVector; // world cm
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Aeros|Seismic") float RadiusKm = 50.f;
+	/** Mean number of M >= 4 events per simulated day. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Aeros|Seismic") float EventsPerDay = 1.f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Aeros|Seismic") float MaxMagnitude = 7.5f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Aeros|Seismic") float DepthKm = 12.f;
+};
+
+USTRUCT(BlueprintType)
+struct AEROSWEATHER_API FAerosEarthquakeData
+{
+	GENERATED_BODY()
+
+	UPROPERTY(BlueprintReadOnly, Category = "Aeros") FVector Epicenter = FVector::ZeroVector; // world cm
+	UPROPERTY(BlueprintReadOnly, Category = "Aeros") float Magnitude = 5.f;  // Mw
+	UPROPERTY(BlueprintReadOnly, Category = "Aeros") float DepthKm = 10.f;
+	UPROPERTY(BlueprintReadOnly, Category = "Aeros") float DurationSeconds = 20.f; // strong shaking at the epicentre
+	UPROPERTY(BlueprintReadOnly, Category = "Aeros") bool bTsunamigenic = false;
 };
 
 /** Circular region of open water (oceans, lakes). Feeds moisture, slows heating, fuels hurricanes. */
@@ -140,6 +190,15 @@ struct AEROSWEATHER_API FAerosSimulationSettings
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Aeros|Physics") bool bEnableSurfaceAccumulation = true;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Aeros|Surface") TArray<FAerosWaterRegion> WaterRegions;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Aeros|Surface") TArray<FAerosDesertRegion> DesertRegions;
+	/** World Z (cm) of mean sea level. Terrain below it becomes ocean when terrain sampling is on. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Aeros|Surface") float SeaLevelZ = 0.f;
+	/** Line-trace the level to get terrain height per cell (mountains: orographic rain, colder peaks, rivers). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Aeros|Surface") bool bSampleTerrain = true;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Aeros|Disasters") bool bEnableHydrology = true;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Aeros|Disasters") bool bEnableDust = true;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Aeros|Disasters") TArray<FAerosSeismicZone> SeismicZones;
 
 	/** World location of the domain centre (cm). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Aeros|World") FVector DomainCenter = FVector::ZeroVector;
@@ -209,6 +268,26 @@ struct AEROSWEATHER_API FAerosWeatherSample
 	UPROPERTY(BlueprintReadOnly, Category = "Aeros|Ground") float Wetness = 0.f;          // 0-1 (puddles > 0.6)
 	UPROPERTY(BlueprintReadOnly, Category = "Aeros|Ground") float SnowDepth = 0.f;        // cm
 	UPROPERTY(BlueprintReadOnly, Category = "Aeros|Ground") float HailCover = 0.f;        // 0-1
+	UPROPERTY(BlueprintReadOnly, Category = "Aeros|Ground") float SoilMoisture = 0.4f;    // 0-1 of capacity
+	UPROPERTY(BlueprintReadOnly, Category = "Aeros|Ground") float Elevation = 0.f;        // m above sea level (cell mean)
+
+	// Comfort
+	UPROPERTY(BlueprintReadOnly, Category = "Aeros|Surface") float FeelsLike = 15.f;      // C (wind chill / heat index)
+
+	// Hazards
+	UPROPERTY(BlueprintReadOnly, Category = "Aeros|Hazards") float FloodDepth = 0.f;      // m of standing / flowing water
+	/** Flood water velocity, world vector m/s. */
+	UPROPERTY(BlueprintReadOnly, Category = "Aeros|Hazards") FVector FloodFlow = FVector::ZeroVector;
+	/** Sea level anomaly (tsunami, storm surge), m. */
+	UPROPERTY(BlueprintReadOnly, Category = "Aeros|Hazards") float SeaLevelAnomaly = 0.f;
+	/** True if the cell is ocean. */
+	UPROPERTY(BlueprintReadOnly, Category = "Aeros|Hazards") bool bOcean = false;
+	/** World Z (cm) of the water surface (ocean or flood). Valid when bOcean or FloodDepth > 0. */
+	UPROPERTY(BlueprintReadOnly, Category = "Aeros|Hazards") float WaterSurfaceZ = -1e7f;
+	UPROPERTY(BlueprintReadOnly, Category = "Aeros|Hazards") float Dust = 0.f;            // g/m2 column (sand / dust)
+	UPROPERTY(BlueprintReadOnly, Category = "Aeros|Hazards") float AshFall = 0.f;         // mm/h volcanic ash
+	UPROPERTY(BlueprintReadOnly, Category = "Aeros|Hazards") float AshDepth = 0.f;        // mm on the ground
+	UPROPERTY(BlueprintReadOnly, Category = "Aeros|Hazards") float BlowingSnow = 0.f;     // 0-1
 };
 
 /** A thunderstorm tracked by the simulation (connected convective cells). */

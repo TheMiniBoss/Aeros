@@ -1,6 +1,6 @@
 // Copyright Aeros. All Rights Reserved.
 //
-// AAerosStormSystem — roadmap "AStormSystem": the gameplay face of one simulated storm.
+// AAerosStormSystem - roadmap "AStormSystem": the gameplay face of one simulated storm.
 // Only the macro state replicates (NetUpdateFrequency 1 Hz). The server applies hail damage
 // (ApplyRadialDamage + Chaos strain fields). Clients smooth the motion locally.
 
@@ -31,6 +31,24 @@ class AEROSWEATHER_API UAerosWindDamageType : public UDamageType
 
 UCLASS()
 class AEROSWEATHER_API UAerosLightningDamageType : public UDamageType
+{
+	GENERATED_BODY()
+};
+
+UCLASS()
+class AEROSWEATHER_API UAerosFloodDamageType : public UDamageType
+{
+	GENERATED_BODY()
+};
+
+UCLASS()
+class AEROSWEATHER_API UAerosLavaDamageType : public UDamageType
+{
+	GENERATED_BODY()
+};
+
+UCLASS()
+class AEROSWEATHER_API UAerosVolcanicDamageType : public UDamageType
 {
 	GENERATED_BODY()
 };

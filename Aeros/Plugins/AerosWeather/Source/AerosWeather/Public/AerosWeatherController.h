@@ -1,6 +1,6 @@
 // Copyright Aeros. All Rights Reserved.
 //
-// AAerosWeatherController — drop one in a level. It starts the simulation with its settings
+// AAerosWeatherController - drop one in a level. It starts the simulation with its settings
 // and plugs the weather into the scene: sun position (seasons + time of day), fog, sky
 // light recapture and the Volumetric Cloud material (weather map).
 
@@ -80,4 +80,7 @@ private:
 
 	float SkyTimer = 0.f;
 	float SmoothedFog = 0.f;
+	float BaseSunIntensity = -1.f;
+	FLinearColor SmoothedTint = FLinearColor(0.45f, 0.55f, 0.7f);
+	bool bTintActive = false;
 };

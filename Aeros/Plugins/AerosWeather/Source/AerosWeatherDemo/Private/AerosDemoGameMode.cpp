@@ -5,6 +5,7 @@
 #include "AerosDemoHUD.h"
 #include "AerosWeatherController.h"
 #include "AerosWeatherRadar.h"
+#include "AerosVolcano.h"
 #include "Engine/DirectionalLight.h"
 #include "Engine/ExponentialHeightFog.h"
 #include "Engine/SkyLight.h"
@@ -47,11 +48,24 @@ AAerosDemoGameMode::AAerosDemoGameMode()
 	DemoSettings.StartHour = 12.f;
 	DemoSettings.LatitudeDeg = 35.f;
 	DemoSettings.TimeScale = 60.f;
+	// Coast 70 km east (tsunamis, storm surge), a desert 120 km west (sand storms),
+	// a seismic zone around the start, and the ground 1.5 m above the sea
 	FAerosWaterRegion Ocean;
-	Ocean.Center = FVector(45000000.0, 0.0, 0.0); // 450 km east
-	Ocean.RadiusKm = 300.f;
-	Ocean.ShoreWidthKm = 6.f;
+	Ocean.Center = FVector(27000000.0, 0.0, 0.0);
+	Ocean.RadiusKm = 200.f;
+	Ocean.ShoreWidthKm = 4.f;
 	DemoSettings.WaterRegions.Add(Ocean);
+	FAerosDesertRegion Desert;
+	Desert.Center = FVector(-12000000.0, 2000000.0, 0.0);
+	Desert.RadiusKm = 55.f;
+	DemoSettings.DesertRegions.Add(Desert);
+	FAerosSeismicZone Fault;
+	Fault.Center = FVector(3000000.0, 0.0, 0.0);
+	Fault.RadiusKm = 60.f;
+	Fault.EventsPerDay = 2.f;
+	Fault.MaxMagnitude = 7.3f;
+	DemoSettings.SeismicZones.Add(Fault);
+	DemoSettings.SeaLevelZ = -150.f;
 }
 
 void AAerosDemoGameMode::StartPlay()
@@ -137,7 +151,7 @@ void AAerosDemoGameMode::BuildScene()
 		}
 	}
 
-	// Ground: a 40 km plane when nothing is under the origin
+	// Ground: a 200 km plane (reaches the coast 70 km east) when nothing is under the origin
 	FHitResult Hit;
 	if (!World->LineTraceSingleByChannel(Hit, FVector(0, 0, 100000), FVector(0, 0, -100000), ECC_WorldStatic))
 	{
@@ -146,7 +160,7 @@ void AAerosDemoGameMode::BuildScene()
 			Ground->SetMobility(EComponentMobility::Movable);
 			UStaticMeshComponent* M = Ground->GetStaticMeshComponent();
 			M->SetStaticMesh(LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Plane.Plane")));
-			M->SetWorldScale3D(FVector(4000.f, 4000.f, 1.f));
+			M->SetWorldScale3D(FVector(200000.f, 200000.f, 1.f));
 			if (UMaterialInterface* GroundMat = LoadOptional<UMaterialInterface>(TEXT("/AerosWeather/Materials/M_AerosGround.M_AerosGround")))
 			{
 				M->SetMaterial(0, GroundMat);
@@ -169,6 +183,20 @@ void AAerosDemoGameMode::BuildScene()
 			Controller->Settings = DemoSettings;
 			Controller->CloudMaterial = CloudMat;
 			Controller->FinishSpawning(FTransform::Identity);
+		}
+	}
+
+	bool bHasVolcano = false;
+	for (TActorIterator<AAerosVolcano> It(World); It; ++It) { bHasVolcano = true; break; }
+	if (!bHasVolcano && bSpawnVolcano)
+	{
+		// 25 km north-west: a 1.8 km high cone (fallback mountain) that can erupt
+		AAerosVolcano* V = World->SpawnActorDeferred<AAerosVolcano>(AAerosVolcano::StaticClass(), FTransform(FVector(-1800000.0, -1800000.0, 0.0)));
+		if (V)
+		{
+			V->bFallbackCone = true;
+			V->MaxVEI = 6;
+			V->FinishSpawning(FTransform(FVector(-1800000.0, -1800000.0, 0.0)));
 		}
 	}
 

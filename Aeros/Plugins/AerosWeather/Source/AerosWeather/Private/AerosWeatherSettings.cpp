@@ -2,6 +2,7 @@
 
 #include "AerosWeatherSettings.h"
 #include "Materials/MaterialParameterCollection.h"
+#include "Materials/MaterialInterface.h"
 
 UAerosWeatherSettings::UAerosWeatherSettings()
 {
@@ -9,4 +10,5 @@ UAerosWeatherSettings::UAerosWeatherSettings()
 	SectionName = TEXT("Aeros Weather");
 	// Created by Content/Python/aeros_setup.py (missing asset = simply not used)
 	WeatherParameterCollection = TSoftObjectPtr<UMaterialParameterCollection>(FSoftObjectPath(TEXT("/AerosWeather/Materials/MPC_AerosWeather.MPC_AerosWeather")));
+	FloodWaterMaterial = TSoftObjectPtr<UMaterialInterface>(FSoftObjectPath(TEXT("/AerosWeather/Materials/M_AerosWater.M_AerosWater")));
 }

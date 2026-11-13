@@ -13,6 +13,7 @@ class USphereComponent;
 class UCameraComponent;
 class UFloatingPawnMovement;
 class UAerosPrecipitationComponent;
+class UAerosWaterSurfaceComponent;
 class APlayerController;
 
 UCLASS()
@@ -38,6 +39,9 @@ public:
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Aeros Demo")
 	TObjectPtr<UAerosPrecipitationComponent> Precipitation;
 
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Aeros Demo")
+	TObjectPtr<UAerosWaterSurfaceComponent> WaterSurface;
+
 	/** cm/s; Shift x10, Ctrl x100 (fly to a storm 50 km away in seconds). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Aeros Demo")
 	float BaseSpeed = 2500.f;
@@ -56,4 +60,6 @@ private:
 	void FlyToNearestStorm();
 
 	int32 DebugLevel = 0;
+	int32 VolcanoVEI = 2;
+	int32 CityIndex = 0;
 };

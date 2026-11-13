@@ -23,6 +23,8 @@ namespace
 	constexpr float UpperMass        = 4000.f;  // kg/m2 heated by convective latent release
 	constexpr float Layer850Mass     = 2000.f;  // kg/m2 of the 850 layer
 	constexpr float DaySeconds       = 86400.f;
+	constexpr float SoilCapacity     = 150.f;   // mm plant-available water
+	constexpr float ElevPressure     = 0.12f;   // hPa per m of terrain
 
 	const int32 MonthStart[13] = { 0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334, 365 };
 
@@ -59,9 +61,29 @@ FAerosSynopticState FAerosSimulation::MakeScenario(EAerosScenario Scenario, floa
 
 	switch (Scenario)
 	{
+	case EAerosScenario::Blizzard:
+		// Arctic outbreak behind a deep low: very cold, strong pressure gradient, snow + blowing snow
+		Set(-12.f, -14.f, -15.f, -16.f, -38.f, FVector2D(16, -6), FVector2D(22, -6), FVector2D(30, 2), 2.f);
+		S.LargeScaleAscent = 0.06f;
+		S.TemperatureGradient = FVector2D(0.0, -3.0);
+		S.Aridity = 0.05f;
+		break;
+	case EAerosScenario::DesertDust:
+		// Hot desert with some monsoon moisture aloft: dry microbursts and haboobs, strong winds lift sand
+		Set(41.f, 10.f, 28.f, 4.f, -8.f, FVector2D(11, 3), FVector2D(14, 4), FVector2D(20, 2), 28.f);
+		S.Aridity = 1.f;
+		S.LargeScaleAscent = -0.005f;
+		break;
+	case EAerosScenario::Monsoon:
+		// Saturated tropical air, persistent ascent: training storms, torrential rain, rivers burst
+		Set(28.f, 25.f, 19.f, 17.f, -5.f, FVector2D(4, 6), FVector2D(8, 12), FVector2D(4, 3), 30.f);
+		S.LargeScaleAscent = 0.07f;
+		S.Aridity = 0.f;
+		break;
 	case EAerosScenario::FairWeather:
 		Set(21.f, 7.f, 11.f, -6.f, -13.f, FVector2D(3, 1), FVector2D(6, 1), FVector2D(12, 0), 20.f);
 		S.LargeScaleAscent = -0.02f;
+		S.Aridity = 0.25f;
 		break;
 	case EAerosScenario::SummerThunderstorms:
 		// Moist, unstable, weak shear: pulse storms and multicells in the afternoon.
@@ -71,6 +93,7 @@ FAerosSynopticState FAerosSimulation::MakeScenario(EAerosScenario Scenario, floa
 		// "Loaded gun": rich moisture under an elevated mixed layer, veering winds, strong shear.
 		Set(29.f, 21.f, 21.f, 6.f, -14.f, FVector2D(-3, 8), FVector2D(3, 18), FVector2D(26, 9), 26.f);
 		S.DewPointGradient = FVector2D(4.0, 0.0); // dryline: drier to the west
+		S.Aridity = 0.35f;
 		break;
 	case EAerosScenario::WinterStorm:
 		Set(-4.f, -6.f, -7.f, -9.f, -33.f, FVector2D(-7, 7), FVector2D(-4, 20), FVector2D(25, 14), 8.f);
@@ -80,11 +103,13 @@ FAerosSynopticState FAerosSimulation::MakeScenario(EAerosScenario Scenario, floa
 	case EAerosScenario::TropicalSeason:
 		Set(28.f, 24.f, 17.f, 14.f, -6.f, FVector2D(-5, 0.5), FVector2D(-6, 1), FVector2D(-3, 1), 30.f);
 		S.LargeScaleAscent = 0.01f;
+		S.Aridity = 0.05f;
 		break;
 	case EAerosScenario::FrontalRain:
 		Set(13.f, 11.f, 7.f, 6.f, -21.f, FVector2D(4, 6), FVector2D(14, 12), FVector2D(30, 6), 14.f);
 		S.TemperatureGradient = FVector2D(0.0, -3.0);
 		S.LargeScaleAscent = 0.05f;
+		S.Aridity = 0.05f;
 		break;
 	case EAerosScenario::Climate:
 	case EAerosScenario::Custom:
@@ -108,6 +133,7 @@ FAerosSynopticState FAerosSimulation::MakeScenario(EAerosScenario Scenario, floa
 			FMath::Lerp(WestS, EastS, Tropic), FMath::Lerp(West850, East850, Tropic), FMath::Lerp(West500, East500, Tropic),
 			Mean + Amp * 0.6f * (2.f * SeasonLag - 1.f) + 1.f);
 		S.LargeScaleAscent = Lerp(0.015f, -0.005f, Season) * (1.f - Tropic);
+		S.Aridity = Lerp(0.1f, 0.3f, Season);
 		break;
 	}
 	}
@@ -135,7 +161,10 @@ void FAerosSimulation::Initialize(const FAerosSimulationSettings& InSettings)
 	Vortices.Reset();
 	Storms.Reset();
 	Lightning.Reset();
-	NextStormId = NextVortexId = NextStrikeSeq = 1;
+	NextStormId = NextVortexId = NextStrikeSeq = NextEmitterId = 1;
+	Emitters.Reset();
+	bOceanActive = false;
+	MaxFlood = 0.f;
 	GradientOrigin = Settings.DomainCenter;
 	CellOffsetX = CellOffsetY = 0;
 
@@ -153,10 +182,13 @@ void FAerosSimulation::Initialize(const FAerosSimulationSettings& InSettings)
 			// Tiny deterministic noise breaks symmetry (convection needs it).
 			C.T += (Hash01(Settings.Seed, I, J, 7) - 0.5f) * 0.4f;
 			C.Tg = C.Water > 0.5f ? Synoptic.SeaSurfaceTemperature : C.T;
+			C.Soil = SoilCapacity * Lerp(0.55f, 0.1f, FMath::Max(Synoptic.Aridity, C.Arid));
+			if (C.Water < 0.5f && C.T < -2.f) C.Snow = FMath::Clamp((-C.T - 1.f) * 2.f, 0.f, 25.f); // existing snowpack in cold climates
 			ColumnDiagnostics(C);
 		}
 	}
 	Prev = Cells;
+	FloodOut.SetNumZeroed(NX * NY);
 	Labels.SetNumUninitialized(NX * NY);
 }
 
@@ -192,15 +224,94 @@ FAerosCell FAerosSimulation::MakeBackgroundCell(float Xm, float Ym) const
 
 void FAerosSimulation::ApplyStaticSurface(int32 I, int32 J, FAerosCell& C) const
 {
-	C.Water = 0.f;
-	if (Settings.WaterRegions.Num() == 0) return;
 	const FVector World = DomainToWorld((I + 0.5f) * DX, (J + 0.5f) * DX);
+	C.Water = 0.f;
+	C.Bathy = 0.f;
 	for (const FAerosWaterRegion& R : Settings.WaterRegions)
 	{
 		const float Dkm = float(FVector::Dist2D(World, R.Center)) * 1e-5f;
 		const float Shore = FMath::Max(R.ShoreWidthKm, 0.1f);
 		C.Water = FMath::Max(C.Water, FMath::Clamp((R.RadiusKm - Dkm) / Shore + 0.5f, 0.f, 1.f));
+		// Continental shelf (~3 m/km for 50 km) then slope to the abyss
+		const float Inside = R.RadiusKm - Dkm;
+		if (Inside > 0.f)
+		{
+			const float Depth = Inside < 50.f ? 20.f + 3.f * Inside : 170.f + 40.f * (Inside - 50.f);
+			C.Bathy = FMath::Max(C.Bathy, FMath::Min(Depth, 4000.f));
+		}
 	}
+	// Terrain sampled below sea level is ocean too
+	if (C.Elev < -0.5f)
+	{
+		C.Water = 1.f;
+		C.Bathy = FMath::Max(C.Bathy, FMath::Min(-C.Elev, 6000.f));
+	}
+	if (C.Water >= 0.5f) C.Bathy = FMath::Max(C.Bathy, 10.f);
+
+	C.Arid = 0.f;
+	for (const FAerosDesertRegion& R : Settings.DesertRegions)
+	{
+		const float Dkm = float(FVector::Dist2D(World, R.Center)) * 1e-5f;
+		C.Arid = FMath::Max(C.Arid, FMath::Clamp((R.RadiusKm - Dkm) / FMath::Max(R.EdgeWidthKm, 0.1f) + 0.5f, 0.f, 1.f));
+	}
+}
+
+float FAerosSimulation::ShoreDistanceKm(const FVector& World) const
+{
+	float Best = -1e6f;
+	for (const FAerosWaterRegion& R : Settings.WaterRegions)
+	{
+		Best = FMath::Max(Best, R.RadiusKm - float(FVector::Dist2D(World, R.Center)) * 1e-5f);
+	}
+	return Best;
+}
+
+void FAerosSimulation::RecomputeSlopes()
+{
+	const float Inv = 1.f / (2.f * DX);
+	for (int32 J = 0; J < NY; ++J)
+	{
+		for (int32 I = 0; I < NX; ++I)
+		{
+			auto E = [this](int32 X, int32 Y) { return FMath::Max(Cells[FMath::Clamp(X, 0, NX - 1) + FMath::Clamp(Y, 0, NY - 1) * NX].Elev, 0.f); };
+			FAerosCell& C = Cells[I + J * NX];
+			C.ElevDX = FMath::Clamp((E(I + 1, J) - E(I - 1, J)) * Inv, -0.3f, 0.3f);
+			C.ElevDY = FMath::Clamp((E(I, J + 1) - E(I, J - 1)) * Inv, -0.3f, 0.3f);
+		}
+	}
+}
+
+void FAerosSimulation::SetElevation(const TArray<float>& HeightsM, const FVector& SampledCenter)
+{
+	if (HeightsM.Num() != NX * NY) return;
+	if (FVector::Dist2D(SampledCenter, Settings.DomainCenter) > DX * 50.0) return; // domain moved meanwhile
+	for (int32 J = 0; J < NY; ++J)
+	{
+		for (int32 I = 0; I < NX; ++I)
+		{
+			FAerosCell& C = Cells[I + J * NX];
+			C.Elev = HeightsM[I + J * NX];
+			ApplyStaticSurface(I, J, C);
+		}
+	}
+	RecomputeSlopes();
+}
+
+void FAerosSimulation::SetDesertRegions(const TArray<FAerosDesertRegion>& Regions)
+{
+	Settings.DesertRegions = Regions;
+	for (int32 J = 0; J < NY; ++J)
+		for (int32 I = 0; I < NX; ++I)
+			ApplyStaticSurface(I, J, Cells[I + J * NX]);
+}
+
+void FAerosSimulation::SetLatitude(float LatitudeDeg)
+{
+	Settings.LatitudeDeg = FMath::Clamp(LatitudeDeg, -89.f, 89.f);
+	Coriolis = CoriolisF(Settings.LatitudeDeg);
+	if (FMath::Abs(Coriolis) < 1e-5f) Coriolis = (Settings.LatitudeDeg < 0.f ? -1.f : 1.f) * 1e-5f;
+	UpdateSynoptic();
+	UpdateSun();
 }
 
 void FAerosSimulation::SetWaterRegions(const TArray<FAerosWaterRegion>& Regions)
@@ -323,7 +434,10 @@ void FAerosSimulation::Step(float Dt)
 	UpdateSynoptic();
 	UpdateSun();
 	StepDynamics(Dt);
+	StepEmitters(Dt);
 	StepColumnPhysics(Dt);
+	if (bOceanActive || Vortices.Num() > 0) StepOcean(Dt);
+	if (Settings.bEnableHydrology) StepHydrology(Dt);
 	if (Settings.bEnableTropicalCyclones) StepCyclones(Dt);
 
 	StormTimer += Dt;
@@ -438,11 +552,12 @@ void FAerosSimulation::StepDynamics(float Dt)
 					C.Us = Get(B, &FAerosCell::Us); C.Vs = Get(B, &FAerosCell::Vs);
 					C.Uo = Get(B, &FAerosCell::Uo); C.Vo = Get(B, &FAerosCell::Vo);
 					C.P = Get(B, &FAerosCell::P);   C.ColdPool = Get(B, &FAerosCell::ColdPool);
+					C.Dust = Get(B, &FAerosCell::Dust);
 				}
 				else
 				{
 					const FAerosCell& G0 = Background();
-					C.T = G0.T; C.Q = G0.Q; C.Us = G0.Us; C.Vs = G0.Vs; C.Uo = C.Vo = 0.f; C.P = 0.f; C.ColdPool = 0.f;
+					C.T = G0.T; C.Q = G0.Q; C.Us = G0.Us; C.Vs = G0.Vs; C.Uo = C.Vo = 0.f; C.P = 0.f; C.ColdPool = 0.f; C.Dust = 0.f;
 				}
 				// 850 group
 				if (MakeBilin(I - Src.U850 * S, J - Src.V850 * S, B))
@@ -460,11 +575,12 @@ void FAerosSimulation::StepDynamics(float Dt)
 				{
 					C.T500 = Get(B, &FAerosCell::T500);
 					C.U500 = Get(B, &FAerosCell::U500); C.V500 = Get(B, &FAerosCell::V500);
+					C.Ash = Get(B, &FAerosCell::Ash);
 				}
 				else
 				{
 					const FAerosCell& G0 = Background();
-					C.T500 = G0.T500; C.U500 = G0.U500; C.V500 = G0.V500;
+					C.T500 = G0.T500; C.U500 = G0.U500; C.V500 = G0.V500; C.Ash = 0.f;
 				}
 				// Storm group: clouds, rain and convection move with the storm motion.
 				// Monotone cubic keeps compact storm cells from smearing out (bilinear is too diffusive).
@@ -593,7 +709,7 @@ void FAerosSimulation::StepColumnPhysics(float Dt)
 
 void FAerosSimulation::ColumnDiagnostics(FAerosCell& C) const
 {
-	C.Psfc = StdPressure + C.P + C.PForced;
+	C.Psfc = StdPressure + C.P + C.PForced - FMath::Max(C.Elev, 0.f) * ElevPressure;
 	C.Td = FMath::Min(DewPoint(C.Q, C.Psfc), C.T);
 	C.RH = RelativeHumidity(C.T, C.Q, C.Psfc);
 
@@ -785,13 +901,17 @@ void FAerosSimulation::ColumnPhysics(int32 I, int32 J, FAerosCell& C, float Dt) 
 	const float Xm = (I + 0.5f) * DX, Ym = (J + 0.5f) * DX;
 	float BgT, BgQ, BgT850, BgQ850, BgT500;
 	BackgroundAt(Xm, Ym, BgT, BgQ, BgT850, BgQ850, BgT500);
+	const float ElevPos = FMath::Max(C.Elev, 0.f);
+	BgT -= 0.0065f * ElevPos; // standard lapse rate: mountains are colder (snow on peaks)
 	const uint32 GI = uint32(I + CellOffsetX), GJ = uint32(J + CellOffsetY);
 	const uint32 StepSalt = uint32(StepCount);
+	const float Aridity = FMath::Max(Synoptic.Aridity, C.Arid);
+	float MeltCm = 0.f; // snow melted this step (cm of snow ~ mm of water)
 
 	C.CycloneZone = 0;
 	if (Vortices.Num() > 0) ApplyCycloneForcing(I, J, C, Dt);
 
-	C.Psfc = StdPressure + C.P + C.PForced;
+	C.Psfc = StdPressure + C.P + C.PForced - ElevPos * ElevPressure;
 	const float Wind = FMath::Sqrt(FMath::Square(C.Us + C.Uo) + FMath::Square(C.Vs + C.Vo));
 	const bool bWater = C.Water >= 0.5f;
 
@@ -801,12 +921,13 @@ void FAerosSimulation::ColumnPhysics(int32 I, int32 J, FAerosCell& C, float Dt) 
 	if (!bWater && C.Snow > 1.f) Albedo = Lerp(0.2f, 0.8f, FMath::Clamp(C.Snow / 10.f, 0.f, 1.f));
 	Albedo = Lerp(Albedo, 0.55f, C.HailCov * 0.7f);
 	const float SinElev = Settings.bEnableDiurnalCycle ? SinSunElev : 0.32f;
-	const float SW = Solar * SinElev * 0.75f * (1.f - Albedo) * (1.f - 0.72f * FMath::Pow(CC, 1.5f));
+	const float Aerosol = FMath::Exp(-C.Dust / 30.f - C.Ash / 40.f); // dust storms and ash plumes dim the sun
+	const float SW = Solar * SinElev * 0.75f * (1.f - Albedo) * (1.f - 0.72f * FMath::Pow(CC, 1.5f)) * Aerosol;
 	const float TgK = C.Tg + K0;
 	const float LWnet = Sigma * TgK * TgK * TgK * TgK * (0.24f - 0.17f * CC);
 	const float Ch = 0.003f * (Wind + 2.f);
 	const float Hs = RhoAir * Cp * Ch * (C.Tg - C.T);
-	const float Avail = Lerp(FMath::Clamp(0.2f + 0.8f * C.Wet + (C.Snow > 0.5f ? 0.4f : 0.f), 0.f, 1.f), 1.f, C.Water);
+	const float Avail = Lerp(FMath::Clamp(0.05f + 0.5f * C.Soil / SoilCapacity + 0.6f * C.Wet + (C.Snow > 0.5f ? 0.4f : 0.f), 0.f, 1.f), 1.f, C.Water);
 	float Evap = RhoAir * Ch * (SatMixingRatio(C.Tg, C.Psfc) - C.Q) * Avail; // kg/m2/s
 	if (Evap < 0.f) Evap *= 0.3f; // dew
 	const float LE = Lv * Evap;
@@ -825,6 +946,7 @@ void FAerosSimulation::ColumnPhysics(int32 I, int32 J, FAerosCell& C, float Dt) 
 		{
 			const float Melt = FMath::Min(C.Snow, C.Tg * 0.75f);
 			C.Snow -= Melt;
+			MeltCm += Melt;
 			C.Tg -= Melt / 0.75f;
 		}
 	}
@@ -857,7 +979,9 @@ void FAerosSimulation::ColumnPhysics(int32 I, int32 J, FAerosCell& C, float Dt) 
 	C.PForced = FMath::Clamp(-0.6f * C.ColdPool - 0.12f * (C.T - BgT), -8.f, 10.f);
 	C.Psfc = StdPressure + C.P + C.PForced;
 
-	const float W850 = FMath::Clamp(-(0.5f * C.Div + 0.5f * C.Div850) * 1500.f, -0.5f, 0.5f) + Synoptic.LargeScaleAscent;
+	// Orographic lift: wind blowing up a slope
+	const float WOrog = (C.Us + C.Uo) * C.ElevDX + (C.Vs + C.Vo) * C.ElevDY;
+	const float W850 = FMath::Clamp(-(0.5f * C.Div + 0.5f * C.Div850) * 1500.f + 0.5f * WOrog, -0.5f, 0.5f) + Synoptic.LargeScaleAscent;
 	C.T850 -= 0.0098f * W850 * Dt * 0.5f;
 	C.T500 -= 0.0098f * Synoptic.LargeScaleAscent * Dt * 0.4f;
 	C.ColdPool *= FMath::Exp(-Dt / 5400.f);
@@ -882,7 +1006,7 @@ void FAerosSimulation::ColumnPhysics(int32 I, int32 J, FAerosCell& C, float Dt) 
 	{
 		const float WTherm = Hs > 0.f ? FMath::Pow(G / (C.T + K0) * Hs / (RhoAir * Cp) * HBL, 1.f / 3.f) : 0.f;
 		const float WConv = FMath::Max(0.f, -C.Div) * 1000.f;
-		const float WTrig = 0.5f * WTherm + WConv + 0.8f * MesoscaleLift(GI, GJ) + 0.4f * Hash01(Settings.Seed, GI, GJ, StepSalt);
+		const float WTrig = 0.5f * WTherm + WConv + FMath::Max(WOrog, 0.f) + 0.8f * MesoscaleLift(GI, GJ) + 0.4f * Hash01(Settings.Seed, GI, GJ, StepSalt);
 		const float ETrig = 40.f * WTrig * WTrig;
 		const bool bEnvOK = C.CAPE > 100.f && C.Q > 0.006f;
 #ifdef AEROS_SIM_DEBUG
@@ -974,7 +1098,9 @@ void FAerosSimulation::ColumnPhysics(int32 I, int32 J, FAerosCell& C, float Dt) 
 		// Sub-cloud evaporation + downdrafts entraining dry mid-level air build the cold pool
 		const float RH850 = RelativeHumidity(C.T850, C.Q850, 850.f);
 		const float EvapFrac = FMath::Clamp((1.f - C.RH) * FMath::Min(C.LCL, 3000.f) / 2000.f + 0.3f * (1.f - RH850) * C.Conv, 0.f, 0.7f);
-		const float E = Fall * EvapFrac;
+		// Evaporation cannot exceed what the sub-cloud air can still hold (it saturates)
+		const float Deficit = FMath::Max(0.f, SatMixingRatio(C.T, C.Psfc) - C.Q) * RhoAir * 1000.f; // kg/m2
+		const float E = FMath::Min(Fall * EvapFrac, 0.5f * Deficit);
 		const float Cool = Lv * E / (Cp * RhoAir * 1000.f);
 		C.T -= Cool;
 		C.ColdPool = FMath::Max(C.ColdPool - Cool, -12.f);
@@ -1043,9 +1169,88 @@ void FAerosSimulation::ColumnPhysics(int32 I, int32 J, FAerosCell& C, float Dt) 
 		const float Dry = (0.1f + FMath::Max(SW, 0.f) / 500.f + Wind / 15.f) * Dt / (3.f * 3600.f) * (C.T > 0.f ? 1.f : 0.3f);
 		C.Wet = FMath::Clamp(bWater ? 1.f : C.Wet - Dry, 0.f, 1.f);
 		C.HailCov = FMath::Clamp(C.HailCov - C.HailCov * Dt * (1.f + FMath::Max(C.T, 0.f) / 4.f) / 2400.f, 0.f, 1.f);
-		if (C.T > 0.f) C.Snow = FMath::Max(0.f, C.Snow - 0.3f * C.T * Dt / 3600.f);
+		if (C.T > 0.f)
+		{
+			const float Melt = FMath::Min(C.Snow, 0.3f * C.T * Dt / 3600.f);
+			C.Snow -= Melt;
+			MeltCm += Melt;
+		}
 		if (bWater) C.Snow = 0.f;
 		if (C.Snow > 0.5f) C.Tg = FMath::Min(C.Tg, 0.f);
+	}
+
+	// ---- 8b. Hydrology: infiltration, runoff, ponding (lateral routing in StepHydrology) ---
+	if (Settings.bEnableHydrology && !bWater)
+	{
+		const float LiquidFrac = PT == EAerosPrecipType::Snow ? 0.f : (PT == EAerosPrecipType::Sleet ? 0.5f : 1.f);
+		const float RainMM = C.PrecipRate * Dt / 3600.f * LiquidFrac;
+		// Saturation-excess runoff from wet areas (variable source area), the rest tries to infiltrate
+		const float SatFrac = FMath::Pow(C.Soil / SoilCapacity, 4.f);
+		const float DirectRunoff = (RainMM + MeltCm) * (0.03f + 0.9f * SatFrac);
+		const float WaterIn = (RainMM + MeltCm - DirectRunoff) + C.Flood * 1000.f;
+		// Infiltration: fast in dry soil, slow when saturated, very slow on frozen or crusted desert soil
+		const float InfRate = (C.Tg < -1.f ? 0.5f : 2.f + 18.f * (1.f - C.Soil / SoilCapacity)) * (1.f - 0.8f * Aridity); // mm/h
+		const float Inf = FMath::Clamp(InfRate * Dt / 3600.f, 0.f, FMath::Min(WaterIn, SoilCapacity - C.Soil));
+		C.Soil += Inf;
+		float Ponded = WaterIn - Inf + DirectRunoff;
+		Ponded = FMath::Max(0.f, Ponded - (1.f + 6.f * SinElev) * Dt / DaySeconds * (C.T > 0.f ? 1.f : 0.2f)); // evaporation (~5 mm/day)
+		C.Soil = FMath::Max(0.f, C.Soil - (0.5f + 4.f * SinElev) * Dt / DaySeconds * (C.Soil / SoilCapacity)); // evapotranspiration + drainage
+		const float NewFlood = Ponded * 0.001f;
+		C.FloodRise = (NewFlood - C.Flood) / Dt * 3600.f;
+		C.Flood = NewFlood;
+		C.Wet = FMath::Max(C.Wet, FMath::Clamp(C.Flood * 20.f + (C.Soil / SoilCapacity - 0.8f) * 2.f, 0.f, 1.f));
+	}
+	else if (bWater)
+	{
+		C.Flood = 0.f;
+		C.Soil = SoilCapacity;
+	}
+
+	// ---- 8c. Mineral dust (sand storms, haboobs) ---------------------------------------
+	if (Settings.bEnableDust)
+	{
+		if (!bWater && C.Snow < 0.5f && C.Flood < 0.01f && C.Tg > 0.f && Aridity > 0.05f)
+		{
+			// Saltation threshold rises with soil moisture; flux ~ (u - ut) u^2 above it (Marticorena-like).
+			// Calibrated: 11 m/s over desert -> ~5 km visibility, a 25 m/s haboob front -> a few hundred metres.
+			const float Threshold = 8.f + 10.f * C.Wet + 8.f * C.Soil / SoilCapacity;
+			if (Wind > Threshold) C.Dust += 2e-6f * Aridity * Aridity * FMath::Square(Wind - Threshold) * Wind * Dt;
+		}
+		C.Dust *= FMath::Exp(-Dt / (3.f * 3600.f)) * FMath::Exp(-Dt * C.PrecipRate / 3600.f); // settling + wash-out
+		C.Dust = FMath::Clamp(C.Dust, 0.f, 300.f);
+	}
+
+	// ---- 8d. Volcanic ash fall ------------------------------------------------------
+	C.AshFall = 0.f;
+	if (C.Ash > 0.001f)
+	{
+		const float Fall = C.Ash * (1.f - FMath::Exp(-Dt / 5400.f * (1.f + C.PrecipRate))); // g/m2, rain scavenges
+		C.Ash -= Fall;
+		if (!bWater) C.AshDepth += Fall * 0.001f; // 1 kg/m2 = 1 mm (bulk density ~1000 kg/m3)
+		C.AshFall = Fall * 0.001f / Dt * 3600.f;
+	}
+
+	// ---- 8e. Blowing snow, comfort ----------------------------------------------------
+	C.Blow = (C.Snow > 2.f && C.T < -1.f && C.Wet < 0.2f && PT != EAerosPrecipType::Rain) ? SmoothStep01((Wind - 9.f) / 8.f) : 0.f;
+	if (C.Blow > 0.f) C.Snow = FMath::Max(0.f, C.Snow - C.Blow * 0.2f * Dt / 3600.f); // sublimation / drifting away
+	{
+		const float Kmh = Wind * 3.6f;
+		if (C.T <= 10.f && Kmh > 4.8f)
+		{
+			const float V16 = FMath::Pow(Kmh, 0.16f);
+			C.FeelsLike = 13.12f + 0.6215f * C.T - 11.37f * V16 + 0.3965f * C.T * V16; // wind chill (Environment Canada)
+		}
+		else if (C.T >= 27.f && C.RH > 0.4f)
+		{
+			const float F = C.T * 1.8f + 32.f, R = C.RH * 100.f; // NOAA Rothfusz heat index (F)
+			const float HI = -42.379f + 2.04901523f * F + 10.14333127f * R - 0.22475541f * F * R - 6.83783e-3f * F * F
+				- 5.481717e-2f * R * R + 1.22874e-3f * F * F * R + 8.5282e-4f * F * R * R - 1.99e-6f * F * F * R * R;
+			C.FeelsLike = (HI - 32.f) / 1.8f;
+		}
+		else
+		{
+			C.FeelsLike = C.T;
+		}
 	}
 
 	// ---- 9. Clouds, visibility, phenomenon -------------------------------------------
@@ -1067,16 +1272,27 @@ void FAerosSimulation::ColumnPhysics(int32 I, int32 J, FAerosCell& C, float Dt) 
 		Vis = FMath::Min(Vis, PT == EAerosPrecipType::Snow ? 6000.f / (1.f + C.PrecipRate * 3.f) : 20000.f / (1.f + C.PrecipRate * 0.5f));
 		if (PT == EAerosPrecipType::Snow && Wind > 12.f) Vis *= 0.3f;
 	}
-	C.Visibility = Vis;
+	if (C.Dust > 0.05f) Vis = FMath::Min(Vis, 6500.f / C.Dust);            // extinction ~0.6 m2/g over a 1 km layer
+	if (C.AshFall > 0.01f) Vis = FMath::Min(Vis, 3000.f / (1.f + C.AshFall * 20.f));
+	if (C.Blow > 0.f) Vis = Lerp(Vis, 80.f, C.Blow);                       // whiteout
+	C.Visibility = FMath::Max(Vis, 20.f);
+	const float FlowSpeed = FMath::Sqrt(C.FlowU * C.FlowU + C.FlowV * C.FlowV);
 
 	EAerosPhenomenon Ph;
-	if (C.CycloneZone == 2) Ph = EAerosPhenomenon::Hurricane;
+	const bool bBlizzard = (C.Blow > 0.3f || (PT == EAerosPrecipType::Snow && C.PrecipRate > 0.1f)) && Wind >= 15.f && C.Visibility < 400.f;
+	if (C.TsunamiZone && (C.Flood > 0.2f || bWater)) Ph = Vortices.Num() > 0 ? EAerosPhenomenon::StormSurge : EAerosPhenomenon::Tsunami;
+	else if (C.CycloneZone == 2) Ph = EAerosPhenomenon::Hurricane;
 	else if (C.CycloneZone == 1) Ph = EAerosPhenomenon::TropicalStorm;
+	else if (C.Flood > 0.1f && (FlowSpeed > 0.5f || C.FloodRise > 0.05f)) Ph = EAerosPhenomenon::FlashFlood;
 	else if (C.Meso > 0.5f && C.Conv > 0.4f) Ph = EAerosPhenomenon::Supercell;
 	else if (C.Hail >= 20.f) Ph = EAerosPhenomenon::Hail;
 	else if (C.Conv > 0.4f && (C.W > 25.f || C.Hail >= 25.f || Wind > 25.f)) Ph = EAerosPhenomenon::SevereThunderstorm;
 	else if (C.Conv > 0.15f && C.Lightning > 0.2f) Ph = EAerosPhenomenon::Thunderstorm;
-	else if (PT == EAerosPrecipType::Snow && C.PrecipRate > 0.05f) Ph = (Wind > 15.f && C.PrecipRate > 0.5f) ? EAerosPhenomenon::Blizzard : EAerosPhenomenon::Snow;
+	else if (bBlizzard) Ph = EAerosPhenomenon::Blizzard;
+	else if (C.Flood > 0.15f) Ph = EAerosPhenomenon::Flood; // cell average: low ground is much deeper
+	else if (C.AshFall > 0.05f) Ph = EAerosPhenomenon::VolcanicAshfall;
+	else if (C.Dust > 6.5f) Ph = EAerosPhenomenon::Sandstorm; // visibility < 1 km
+	else if (PT == EAerosPrecipType::Snow && C.PrecipRate > 0.05f) Ph = EAerosPhenomenon::Snow;
 	else if (PT == EAerosPrecipType::FreezingRain && C.PrecipRate > 0.05f) Ph = EAerosPhenomenon::FreezingRain;
 	else if (C.PrecipRate > 8.f) Ph = EAerosPhenomenon::HeavyRain;
 	else if (C.PrecipRate > 0.8f) Ph = EAerosPhenomenon::Rain;
@@ -1094,7 +1310,7 @@ void FAerosSimulation::ColumnPhysics(int32 I, int32 J, FAerosCell& C, float Dt) 
 	C.Q = FMath::Clamp(C.Q, 1e-5f, 0.035f);
 	C.Q850 = FMath::Clamp(C.Q850, 1e-6f, 0.025f);
 	C.Cloud = FMath::Clamp(C.Cloud, 0.f, 20.f);
-	C.Rain = FMath::Clamp(C.Rain, 0.f, 20.f);
+	C.Rain = FMath::Clamp(C.Rain, 0.f, 600.f);
 }
 
 // =====================================================================
@@ -1409,7 +1625,322 @@ void FAerosSimulation::GenerateLightning(float Interval)
 			Lightning.Add(Strike);
 		}
 	}
+	// Volcanic lightning: charge separation in the ash column, independent of CAPE
+	for (const FAerosEmitter& E : Emitters)
+	{
+		const float Rate = 2.f + 25.f * E.Heat * FMath::Clamp(FMath::LogX(10.f, FMath::Max(E.MassRate, 1.f)) - 4.f, 0.f, 4.f) / 4.f; // per min
+		const int32 Count = FMath::Min(int32(Rate / 60.f * Interval * (0.5f + Hash01(Settings.Seed, uint32(StepCount), uint32(E.Id), 0xA5))), 12);
+		for (int32 K = 0; K < Count; ++K)
+		{
+			const float U1 = Hash01(Settings.Seed ^ 0x1111, uint32(StepCount), uint32(E.Id), uint32(K));
+			const float U2 = Hash01(Settings.Seed ^ 0x2222, uint32(StepCount), uint32(E.Id), uint32(K));
+			FAerosLightningStrike Strike;
+			Strike.Sequence = NextStrikeSeq++;
+			Strike.Location = DomainToWorld(E.X + (U1 - 0.5f) * 6000.f, E.Y + (U2 - 0.5f) * 6000.f);
+			Strike.SimTime = float(SimTime - Interval * U1);
+			Strike.PeakCurrent = 8.f + 20.f * U2;
+			Strike.bCloudToGround = U2 < 0.25f;
+			Strike.StormId = -100 - E.Id;
+			Lightning.Add(Strike);
+		}
+	}
 	if (Lightning.Num() > 256) Lightning.RemoveAt(0, Lightning.Num() - 256);
+}
+
+// =====================================================================
+//  Volcanic emitters
+// =====================================================================
+
+int32 FAerosSimulation::AddVolcanicEmitter(const FVector& World, float MassRate, float DurationSeconds)
+{
+	FAerosEmitter E;
+	E.Id = NextEmitterId++;
+	WorldToDomain(World, E.X, E.Y);
+	E.MassRate = FMath::Max(MassRate, 1.f);
+	E.Heat = FMath::Clamp((FMath::LogX(10.f, E.MassRate) - 3.f) / 5.f, 0.1f, 1.f);
+	E.Remaining = FMath::Max(DurationSeconds, 60.f);
+	Emitters.Add(E);
+	return E.Id;
+}
+
+void FAerosSimulation::StopEmitter(int32 Id)
+{
+	Emitters.RemoveAll([Id](const FAerosEmitter& E) { return E.Id == Id; });
+}
+
+void FAerosSimulation::StepEmitters(float Dt)
+{
+	for (int32 K = Emitters.Num() - 1; K >= 0; --K)
+	{
+		FAerosEmitter& E = Emitters[K];
+		const int32 CI = int32(E.X / DX), CJ = int32(E.Y / DX);
+		if (CI >= 0 && CJ >= 0 && CI < NX && CJ < NY)
+		{
+			// ~10% of the erupted mass is fine ash that stays airborne, spread over 3x3 cells
+			const float AshPerCell = E.MassRate * 0.1f * 1000.f * Dt / (9.f * DX * DX); // g/m2
+			for (int32 J = FMath::Max(0, CJ - 1); J <= FMath::Min(NY - 1, CJ + 1); ++J)
+			{
+				for (int32 I = FMath::Max(0, CI - 1); I <= FMath::Min(NX - 1, CI + 1); ++I)
+				{
+					FAerosCell& C = Cells[I + J * NX];
+					C.Ash += AshPerCell;
+					if (I == CI && J == CJ)
+					{
+						// Buoyant eruption column: forces a (pyro)convective cell, with its lightning and rain
+						C.Conv = FMath::Max(C.Conv, 0.7f * E.Heat);
+						C.T += 1.5f * E.Heat * Dt / 600.f;
+						C.Q = FMath::Min(C.Q + 0.002f * E.Heat * Dt / 600.f, 0.03f); // magmatic water vapour
+					}
+				}
+			}
+		}
+		E.Remaining -= Dt;
+		if (E.Remaining <= 0.f) Emitters.RemoveAt(K);
+	}
+}
+
+// =====================================================================
+//  Hydrology: surface runoff routing (Manning), floods
+// =====================================================================
+
+void FAerosSimulation::StepHydrology(float Dt)
+{
+	TRACE_CPUPROFILER_EVENT_SCOPE(Aeros_Hydrology);
+	MaxFlood = 0.f;
+	for (const FAerosCell& C : Cells) MaxFlood = FMath::Max(MaxFlood, C.Flood);
+	if (MaxFlood < 1e-4f) return;
+	if (FloodOut.Num() != NX * NY) FloodOut.SetNumZeroed(NX * NY);
+
+	constexpr float InvManning = 1.f / 0.05f; // floodplain roughness
+	const float InvDX = 1.f / DX;
+
+	// Pass 1: each wet cell decides how much water leaves toward each neighbour
+	ParallelFor(NY, [&](int32 J)
+	{
+		for (int32 I = 0; I < NX; ++I)
+		{
+			const int32 K = I + J * NX;
+			const FAerosCell& C = Cells[K];
+			FVector4f& Out = FloodOut[K];
+			Out = FVector4f(0, 0, 0, 0);
+			if (C.Water >= 0.5f || C.Flood < 1e-4f) continue;
+
+			const float H = C.Elev + C.Flood;
+			const int32 NI[4] = { I + 1, I - 1, I, I };
+			const int32 NJ[4] = { J, J, J + 1, J - 1 };
+			float Total = 0.f;
+			float O[4];
+			for (int32 D = 0; D < 4; ++D)
+			{
+				O[D] = 0.f;
+				if (NI[D] < 0 || NJ[D] < 0 || NI[D] >= NX || NJ[D] >= NY) continue;
+				const FAerosCell& N = Cells[NI[D] + NJ[D] * NX];
+				const float HN = N.Water >= 0.5f ? N.Eta : N.Elev + N.Flood; // the sea is at 0 + anomaly
+				const float Drop = H - HN;
+				if (Drop <= 0.f) continue;
+				const float Slope = Drop * InvDX;
+				const float V = FMath::Min(InvManning * FMath::Pow(C.Flood, 2.f / 3.f) * FMath::Sqrt(Slope), 6.f);
+				O[D] = V * C.Flood * Dt * InvDX;
+				Total += O[D];
+			}
+			const float Limit = 0.5f * C.Flood;
+			const float Scale = Total > Limit ? Limit / Total : 1.f;
+			Out = FVector4f(O[0] * Scale, O[1] * Scale, O[2] * Scale, O[3] * Scale);
+		}
+	});
+
+	// Pass 2: apply outflows and inflows
+	ParallelFor(NY, [&](int32 J)
+	{
+		for (int32 I = 0; I < NX; ++I)
+		{
+			const int32 K = I + J * NX;
+			FAerosCell& C = Cells[K];
+			if (C.Water >= 0.5f) continue;
+			const FVector4f& Mine = FloodOut[K];
+			float In = 0.f;
+			if (I + 1 < NX) In += FloodOut[K + 1].Y;   // east neighbour flowing west
+			if (I - 1 >= 0) In += FloodOut[K - 1].X;   // west neighbour flowing east
+			if (J + 1 < NY) In += FloodOut[K + NX].W;  // north neighbour flowing south
+			if (J - 1 >= 0) In += FloodOut[K - NX].Z;  // south neighbour flowing north
+			const float OutSum = Mine.X + Mine.Y + Mine.Z + Mine.W;
+			const float Depth = FMath::Max(C.Flood, 1e-3f);
+			C.FlowU = (Mine.X - Mine.Y) * DX / (Dt * Depth);
+			C.FlowV = (Mine.Z - Mine.W) * DX / (Dt * Depth);
+			C.Flood = FMath::Max(0.f, C.Flood - OutSum + In);
+		}
+	});
+
+	// Water reaching the sea raises it only while the ocean solver runs (otherwise the sea is infinite)
+	if (bOceanActive)
+	{
+		for (int32 J = 0; J < NY; ++J)
+		{
+			for (int32 I = 0; I < NX; ++I)
+			{
+				const int32 K = I + J * NX;
+				FAerosCell& C = Cells[K];
+				if (C.Water < 0.5f) continue;
+				float In = 0.f;
+				if (I + 1 < NX) In += FloodOut[K + 1].Y;
+				if (I - 1 >= 0) In += FloodOut[K - 1].X;
+				if (J + 1 < NY) In += FloodOut[K + NX].W;
+				if (J - 1 >= 0) In += FloodOut[K - NX].Z;
+				C.Eta += In;
+			}
+		}
+	}
+}
+
+// =====================================================================
+//  Ocean: tsunami propagation and storm surge (linear shallow water)
+// =====================================================================
+
+bool FAerosSimulation::TriggerTsunami(const FVector& World, float Magnitude)
+{
+	float Xm, Ym;
+	WorldToDomain(World, Xm, Ym);
+	// Sea-floor uplift and rupture size from moment magnitude (Wells & Coppersmith-like scaling)
+	const float Amp = 0.5f * FMath::Pow(10.f, 0.5f * (Magnitude - 7.f));                  // m: M7 0.5, M8 1.6, M9 5
+	const float Rkm = FMath::Clamp(0.5f * FMath::Pow(10.f, 0.5f * Magnitude - 1.8f), DX * 0.002f, NX * DX * 0.00025f);
+	const float R = Rkm * 1000.f;
+	bool bAny = false;
+	for (int32 J = 0; J < NY; ++J)
+	{
+		for (int32 I = 0; I < NX; ++I)
+		{
+			FAerosCell& C = Cells[I + J * NX];
+			if (C.Water < 0.5f) continue;
+			const float D2 = FMath::Square((I + 0.5f) * DX - Xm) + FMath::Square((J + 0.5f) * DX - Ym);
+			const float G0 = FMath::Exp(-D2 / (R * R));
+			if (G0 < 0.01f) continue;
+			C.Eta += Amp * G0;
+			bAny = true;
+		}
+	}
+	if (bAny)
+	{
+		bOceanActive = true;
+		OceanQuietTime = 0.f;
+	}
+	return bAny;
+}
+
+void FAerosSimulation::StepOcean(float Dt)
+{
+	TRACE_CPUPROFILER_EVENT_SCOPE(Aeros_Ocean);
+	float HMax = 10.f;
+	int32 NumWater = 0;
+	for (const FAerosCell& C : Cells)
+	{
+		if (C.Water >= 0.5f) { HMax = FMath::Max(HMax, C.Bathy); ++NumWater; }
+	}
+	if (NumWater == 0) { bOceanActive = false; return; }
+	bOceanActive = true;
+
+	constexpr float Grav = 9.81f;
+	const float MaxSub = 0.4f * DX / FMath::Sqrt(Grav * HMax);
+	const int32 NumSub = FMath::Clamp(FMath::CeilToInt(Dt / MaxSub), 1, 200);
+	const float H = Dt / NumSub;
+	const float Inv2DX = 0.5f / DX;
+	const int32 Sponge = 6;
+
+	auto IsSea = [this](int32 I, int32 J) { return I >= 0 && J >= 0 && I < NX && J < NY && Cells[I + J * NX].Water >= 0.5f; };
+	auto SpongeFactor = [&](int32 I, int32 J)
+	{
+		const int32 D = FMath::Min(FMath::Min(I, NX - 1 - I), FMath::Min(J, NY - 1 - J));
+		return D >= Sponge ? 1.f : 1.f - 0.15f * float(Sponge - D) / Sponge; // absorbs waves leaving the domain
+	};
+
+	for (int32 Sub = 0; Sub < NumSub; ++Sub)
+	{
+		// Momentum: gravity (sea slope), inverse barometer + wind stress (storm surge), bottom friction
+		ParallelFor(NY, [&](int32 J)
+		{
+			for (int32 I = 0; I < NX; ++I)
+			{
+				FAerosCell& C = Cells[I + J * NX];
+				if (C.Water < 0.5f) continue;
+				auto EtaAt = [&](int32 X, int32 Y) { return IsSea(X, Y) ? Cells[X + Y * NX].Eta : C.Eta; };
+				auto IBAt = [&](int32 X, int32 Y)
+				{
+					const FAerosCell& N = (X >= 0 && Y >= 0 && X < NX && Y < NY) ? Cells[X + Y * NX] : C;
+					return -0.01f * (N.P + N.PForced); // 1 hPa lower pressure = 1 cm higher sea
+				};
+				const float Depth = FMath::Max(C.Bathy + C.Eta, 1.f);
+				const float DEdx = (EtaAt(I + 1, J) - EtaAt(I - 1, J) - (IBAt(I + 1, J) - IBAt(I - 1, J))) * Inv2DX;
+				const float DEdy = (EtaAt(I, J + 1) - EtaAt(I, J - 1) - (IBAt(I, J + 1) - IBAt(I, J - 1))) * Inv2DX;
+				const float WU = C.Us + C.Uo, WV = C.Vs + C.Vo;
+				const float WS = FMath::Sqrt(WU * WU + WV * WV);
+				C.MU += H * (-Grav * Depth * DEdx + 1.8e-6f * WS * WU);
+				C.MV += H * (-Grav * Depth * DEdy + 1.8e-6f * WS * WV);
+				const float MS = FMath::Sqrt(C.MU * C.MU + C.MV * C.MV);
+				const float Fr = 1.f / (1.f + H * 0.0025f * MS / (Depth * Depth));
+				const float Sp = SpongeFactor(I, J);
+				C.MU *= Fr * Sp;
+				C.MV *= Fr * Sp;
+			}
+		});
+		// Continuity
+		ParallelFor(NY, [&](int32 J)
+		{
+			for (int32 I = 0; I < NX; ++I)
+			{
+				FAerosCell& C = Cells[I + J * NX];
+				if (C.Water < 0.5f) continue;
+				auto MUAt = [&](int32 X, int32 Y) { return IsSea(X, Y) ? Cells[X + Y * NX].MU : 0.f; };
+				auto MVAt = [&](int32 X, int32 Y) { return IsSea(X, Y) ? Cells[X + Y * NX].MV : 0.f; };
+				const float Div = (MUAt(I + 1, J) - MUAt(I - 1, J) + MVAt(I, J + 1) - MVAt(I, J - 1)) * Inv2DX;
+				C.Prev2 = C.Eta - H * Div; // staged: neighbours must read the old Eta
+			}
+		});
+		ParallelFor(NY, [&](int32 J)
+		{
+			for (int32 I = 0; I < NX; ++I)
+			{
+				FAerosCell& C = Cells[I + J * NX];
+				if (C.Water < 0.5f) continue;
+				C.Eta = FMath::Clamp(C.Prev2, -30.f, 30.f) * SpongeFactor(I, J);
+			}
+		});
+	}
+
+	// Run-up: sea above the coastal land floods it (broad-crested weir), and drains back later through hydrology
+	float MaxEta = 0.f;
+	for (FAerosCell& C : Cells) C.TsunamiZone = 0;
+	for (int32 J = 0; J < NY; ++J)
+	{
+		for (int32 I = 0; I < NX; ++I)
+		{
+			FAerosCell& C = Cells[I + J * NX];
+			if (C.Water < 0.5f) continue;
+			MaxEta = FMath::Max(MaxEta, FMath::Abs(C.Eta));
+			if (FMath::Abs(C.Eta) > 0.3f) C.TsunamiZone = 1;
+			const int32 NI[4] = { I + 1, I - 1, I, I };
+			const int32 NJ[4] = { J, J, J + 1, J - 1 };
+			for (int32 D = 0; D < 4; ++D)
+			{
+				if (NI[D] < 0 || NJ[D] < 0 || NI[D] >= NX || NJ[D] >= NY) continue;
+				FAerosCell& L = Cells[NI[D] + NJ[D] * NX];
+				if (L.Water >= 0.5f) continue;
+				// Coarse cells miss wave steepening on the beach: empirical run-up factor ~2 (field surveys)
+				const float Head = 2.f * C.Eta - (FMath::Max(L.Elev, 0.f) + L.Flood);
+				if (Head <= 0.05f) continue;
+				const float Q = 1.7f * Head * FMath::Sqrt(Head);              // m2/s over the coast
+				const float Move = FMath::Min(Q * Dt / DX, Head * 0.5f);      // m of water this step
+				L.Flood += Move;
+				L.TsunamiZone = 1;
+				C.Eta -= Move * 0.25f;                                        // land cell is ~1/4 of the sea perimeter
+			}
+		}
+	}
+
+	OceanQuietTime = MaxEta < 0.02f ? OceanQuietTime + Dt : 0.f;
+	if (Vortices.Num() == 0 && OceanQuietTime > 1800.f)
+	{
+		for (FAerosCell& C : Cells) { C.Eta = 0.f; C.MU = 0.f; C.MV = 0.f; }
+		bOceanActive = false;
+	}
 }
 
 // =====================================================================
@@ -1435,6 +1966,44 @@ void FAerosSimulation::InjectThermal(const FVector& World, float RadiusKm, float
 			C.Q = FMath::Max(1e-5f, C.Q + DeltaQ * G0);
 			C.Q850 = FMath::Max(1e-6f, C.Q850 + DeltaQ * 0.5f * G0);
 			if (DeltaT > 0.f && G0 > 0.3f) C.Conv = FMath::Max(C.Conv, 0.25f * G0);
+		}
+	}
+}
+
+void FAerosSimulation::InjectRain(const FVector& World, float RadiusKm, float Millimetres)
+{
+	float Xm, Ym;
+	WorldToDomain(World, Xm, Ym);
+	const float R = FMath::Max(RadiusKm * 1000.f, DX);
+	for (int32 J = 0; J < NY; ++J)
+	{
+		for (int32 I = 0; I < NX; ++I)
+		{
+			const float D2 = FMath::Square((I + 0.5f) * DX - Xm) + FMath::Square((J + 0.5f) * DX - Ym);
+			const float G0 = FMath::Exp(-D2 / (R * R));
+			if (G0 < 0.01f) continue;
+			FAerosCell& C = Cells[I + J * NX];
+			C.Rain += Millimetres * G0;          // kg/m2 = mm: falls out over the next ~15 minutes
+			C.Cloud = FMath::Max(C.Cloud, 1.5f * G0);
+		}
+	}
+}
+
+void FAerosSimulation::InjectOutflow(const FVector& World, float RadiusKm, float DeltaT)
+{
+	float Xm, Ym;
+	WorldToDomain(World, Xm, Ym);
+	const float R = FMath::Max(RadiusKm * 1000.f, DX);
+	for (int32 J = 0; J < NY; ++J)
+	{
+		for (int32 I = 0; I < NX; ++I)
+		{
+			const float D2 = FMath::Square((I + 0.5f) * DX - Xm) + FMath::Square((J + 0.5f) * DX - Ym);
+			const float G0 = FMath::Exp(-D2 / (R * R));
+			if (G0 < 0.01f) continue;
+			FAerosCell& C = Cells[I + J * NX];
+			C.ColdPool = FMath::Max(C.ColdPool + DeltaT * G0, -15.f);
+			C.T += DeltaT * G0;
 		}
 	}
 }
@@ -1475,6 +2044,8 @@ void FAerosSimulation::Recenter(const FVector& World)
 		}
 	}
 	for (FAerosVortex& V : Vortices) { V.X -= SX * DX; V.Y -= SY * DX; }
+	for (FAerosEmitter& E : Emitters) { E.X -= SX * DX; E.Y -= SY * DX; }
+	RecomputeSlopes();
 	for (FAerosTrackedStorm& S : Storms) { S.X -= SX * DX; S.Y -= SY * DX; }
 }
 
@@ -1508,6 +2079,10 @@ void FAerosSimulation::FillSnapshot(FAerosSnapshot& Out) const
 		S.CAPE = C.CAPE; S.CIN = C.CIN; S.LCL = C.LCL; S.LFC = C.LFC; S.EL = C.EL; S.FZL = C.FZL; S.LI = C.LI;
 		S.SRH01 = C.SRH01; S.SRH03 = C.SRH03; S.Shear06 = C.Shear06; S.STP = C.STP; S.SCP = C.SCP; S.SHIP = C.SHIP;
 		S.Wet = C.Wet; S.Snow = C.Snow; S.HailCover = C.HailCov;
+		S.Soil = C.Soil / SoilCapacity; S.Elev = C.Elev;
+		S.Flood = C.Flood; S.FlowU = C.FlowU; S.FlowV = C.FlowV; S.Eta = C.Eta;
+		S.Dust = C.Dust; S.AshFall = C.AshFall; S.AshDepth = C.AshDepth; S.Blow = C.Blow; S.FeelsLike = C.FeelsLike;
+		S.bWater = C.Water >= 0.5f ? 1 : 0;
 		S.PType = C.PType; S.Phen = C.Phen;
 	}
 

@@ -6,8 +6,12 @@
 #   Materials/MPC_AerosWeather          Material Parameter Collection fed by the plugin
 #   Materials/T_AerosDefaultWeather     tiny linear texture (default for texture parameters)
 #   Materials/M_AerosVolumetricCloud    Volumetric Cloud material driven by the weather map
-#   Materials/M_AerosGround             ground material: wetness, snow, hail accumulation
-#   Maps/L_AerosDemo                    demo level (AerosDemoGameMode)
+#   Materials/M_AerosGround             ground material: wetness, snow, hail, ash accumulation
+#   Materials/M_AerosWater              translucent water (floods, storm surge, tsunami)
+#   Maps/L_AerosDemo                    demo level, GameMode Override = AerosDemoGameMode
+#
+# Each step is independent: if one fails, the others still run, and a summary is
+# printed at the end of the Output Log ("[Aeros] SUMMARY").
 #
 # Run it from the editor: Tools > Execute Python Script... > aeros_setup.py
 # or in the Output Log (Python): exec(open(r"<path>/aeros_setup.py").read())
@@ -31,7 +35,8 @@ eal = unreal.EditorAssetLibrary
 MPC_SCALARS = [
     "AerosWetness", "AerosSnowDepth", "AerosHailCover", "AerosRainIntensity", "AerosSnowIntensity",
     "AerosHailIntensity", "AerosCloudCover", "AerosTemperature", "AerosWindSpeed", "AerosLightningFlash",
-    "AerosFogDensity",
+    "AerosFogDensity", "AerosFloodDepth", "AerosDust", "AerosAshDepth", "AerosAshFall", "AerosBlowingSnow",
+    "AerosShake", "AerosSeaLevel",
 ]
 MPC_VECTORS = ["AerosWind", "AerosDomain"]
 
@@ -224,6 +229,7 @@ def create_ground_material(mpc):
     wet = p("AerosWetness", -900, 0)
     snow = p("AerosSnowDepth", -900, 150)
     hail = p("AerosHailCover", -900, 300)
+    ash = p("AerosAshDepth", -900, 520)
 
     grass = node(mat, unreal.MaterialExpressionConstant3Vector, -900, -200, constant=unreal.LinearColor(0.13, 0.2, 0.07, 1))
     white = node(mat, unreal.MaterialExpressionConstant3Vector, -900, 450, constant=unreal.LinearColor(0.9, 0.92, 0.95, 1))
@@ -237,11 +243,16 @@ def create_ground_material(mpc):
     snow_a = node(mat, unreal.MaterialExpressionSaturate, -600, 150)
     link(binop(mat, unreal.MaterialExpressionDivide, snow, const(mat, 4.0, -800, 220), -700, 150), "", snow_a, "")
     hail_a = binop(mat, unreal.MaterialExpressionMultiply, hail, const(mat, 0.8, -800, 360), -600, 300)
+    ash_a = node(mat, unreal.MaterialExpressionSaturate, -600, 520)
+    link(binop(mat, unreal.MaterialExpressionDivide, ash, const(mat, 20.0, -800, 600), -700, 520), "", ash_a, "")
     cover_a = node(mat, unreal.MaterialExpressionMax, -450, 220)
     link(snow_a, "", cover_a, "A"); link(hail_a, "", cover_a, "B")
     base = node(mat, unreal.MaterialExpressionLinearInterpolate, -300, 0)
     link(wet_col, "", base, "A"); link(white, "", base, "B"); link(cover_a, "", base, "Alpha")
-    mel.connect_material_property(base, "", unreal.MaterialProperty.MP_BASE_COLOR)
+    ash_col = node(mat, unreal.MaterialExpressionConstant3Vector, -300, -200, constant=unreal.LinearColor(0.22, 0.21, 0.2, 1))
+    base_ash = node(mat, unreal.MaterialExpressionLinearInterpolate, -150, 0)
+    link(base, "", base_ash, "A"); link(ash_col, "", base_ash, "B"); link(ash_a, "", base_ash, "Alpha")
+    mel.connect_material_property(base_ash, "", unreal.MaterialProperty.MP_BASE_COLOR)
 
     rough = node(mat, unreal.MaterialExpressionLinearInterpolate, -300, 250)
     link(const(mat, 0.85, -450, 400), "", rough, "A"); link(const(mat, 0.08, -450, 450), "", rough, "B"); link(wet, "", rough, "Alpha")
@@ -262,54 +273,94 @@ def create_ground_material(mpc):
     return mat
 
 
+# ---------------------------------------------------------------- water material
+def create_water_material():
+    mat = get_or_create("M_AerosWater", MAT_DIR, unreal.Material, unreal.MaterialFactoryNew())
+    mel.delete_all_material_expressions(mat)
+    mat.set_editor_property("blend_mode", unreal.BlendMode.BLEND_TRANSLUCENT)
+    mat.set_editor_property("translucency_lighting_mode", unreal.TranslucencyLightingMode.TLM_SURFACE)
+    color = node(mat, unreal.MaterialExpressionConstant3Vector, -400, 0, constant=unreal.LinearColor(0.05, 0.12, 0.1, 1))
+    mel.connect_material_property(color, "", unreal.MaterialProperty.MP_BASE_COLOR)
+    mel.connect_material_property(const(mat, 0.05, -400, 150), "", unreal.MaterialProperty.MP_ROUGHNESS)
+    mel.connect_material_property(const(mat, 0.85, -400, 250), "", unreal.MaterialProperty.MP_OPACITY)
+    mel.recompile_material(mat)
+    eal.save_loaded_asset(mat)
+    log("Water material ready: " + mat.get_path_name())
+    return mat
+
+
 # ---------------------------------------------------------------- demo level
+def demo_game_mode_class():
+    cls = unreal.load_class(None, "/Script/AerosWeatherDemo.AerosDemoGameMode")
+    if cls is None:
+        raise RuntimeError("AerosDemoGameMode class not found: is the AerosWeather plugin compiled and enabled?")
+    return cls
+
+
 def create_demo_map(cloud_mat, ground_mat):
     les = unreal.get_editor_subsystem(unreal.LevelEditorSubsystem)
     actors = unreal.get_editor_subsystem(unreal.EditorActorSubsystem)
+    world_settings_target = None
     if eal.does_asset_exist(MAP_PATH):
         les.load_level(MAP_PATH)
-        log("Demo map already exists, opened it: " + MAP_PATH)
-        return
-    les.new_level(MAP_PATH)
+        log("Demo map exists, opened it (game mode is re-applied): " + MAP_PATH)
+    else:
+        les.new_level(MAP_PATH)
 
-    def spawn(cls, loc=(0, 0, 0), rot=(0, 0, 0)):
-        return actors.spawn_actor_from_class(cls, unreal.Vector(*loc), unreal.Rotator(*rot))
+        def spawn(cls, loc=(0, 0, 0), rot=(0, 0, 0)):
+            return actors.spawn_actor_from_class(cls, unreal.Vector(*loc), unreal.Rotator(*rot))
 
-    sun = spawn(unreal.DirectionalLight, (0, 0, 100000), (0, -45, 0))
-    sun.light_component.set_editor_property("mobility", unreal.ComponentMobility.MOVABLE)
-    sun.light_component.set_editor_property("atmosphere_sun_light", True)
-    spawn(unreal.SkyAtmosphere)
-    sky = spawn(unreal.SkyLight, (0, 0, 50000))
-    sky.light_component.set_editor_property("mobility", unreal.ComponentMobility.MOVABLE)
-    sky.light_component.set_editor_property("real_time_capture", True)
-    fog = spawn(unreal.ExponentialHeightFog)
-    fog.component.set_editor_property("volumetric_fog", True)
-    clouds = spawn(unreal.VolumetricCloud)
-    clouds.volumetric_cloud_component.set_editor_property("material", cloud_mat)
+        sun = spawn(unreal.DirectionalLight, (0, 0, 100000), (0, -45, 0))
+        sun.light_component.set_editor_property("mobility", unreal.ComponentMobility.MOVABLE)
+        sun.light_component.set_editor_property("atmosphere_sun_light", True)
+        spawn(unreal.SkyAtmosphere)
+        sky = spawn(unreal.SkyLight, (0, 0, 50000))
+        sky.light_component.set_editor_property("mobility", unreal.ComponentMobility.MOVABLE)
+        sky.light_component.set_editor_property("real_time_capture", True)
+        fog = spawn(unreal.ExponentialHeightFog)
+        fog.component.set_editor_property("volumetric_fog", True)
+        clouds = spawn(unreal.VolumetricCloud)
+        if cloud_mat:
+            clouds.volumetric_cloud_component.set_editor_property("material", cloud_mat)
 
-    ground = spawn(unreal.StaticMeshActor)
-    ground.static_mesh_component.set_static_mesh(unreal.load_asset("/Engine/BasicShapes/Plane"))
-    ground.set_actor_scale3d(unreal.Vector(4000, 4000, 1))
-    ground.static_mesh_component.set_material(0, ground_mat)
-
-    controller = spawn(unreal.AerosWeatherController)
-    controller.set_editor_property("cloud_material", cloud_mat)
-    spawn(unreal.AerosWeatherRadar)
-    spawn(unreal.PlayerStart, (0, 0, 300))
+        ground = spawn(unreal.StaticMeshActor)
+        ground.static_mesh_component.set_static_mesh(unreal.load_asset("/Engine/BasicShapes/Plane"))
+        ground.set_actor_scale3d(unreal.Vector(200000, 200000, 1))
+        if ground_mat:
+            ground.static_mesh_component.set_material(0, ground_mat)
+        spawn(unreal.PlayerStart, (0, 0, 300))
+        # AerosDemoGameMode adds the weather controller, radar, volcano and props at runtime.
 
     world = unreal.get_editor_subsystem(unreal.UnrealEditorSubsystem).get_editor_world()
-    world.get_world_settings().set_editor_property("default_game_mode", unreal.AerosDemoGameMode)
+    world.get_world_settings().set_editor_property("default_game_mode", demo_game_mode_class())
     les.save_current_level()
-    log("Demo map created: " + MAP_PATH + " (press Play)")
+    log("Demo map saved with GameMode Override = AerosDemoGameMode: " + MAP_PATH)
 
 
 def main():
-    mpc = create_mpc()
-    default_tex = create_default_texture()
-    cloud = create_cloud_material(default_tex)
-    ground = create_ground_material(mpc)
-    create_demo_map(cloud, ground)
-    log("Done. Project Settings > Plugins > Aeros Weather: the MPC is picked up automatically.")
+    results = []
+    assets = {}
+
+    def step(name, fn, *args):
+        try:
+            assets[name] = fn(*args)
+            results.append((name, "OK"))
+        except Exception as e:  # keep going: report everything at the end
+            assets[name] = None
+            results.append((name, "FAILED: " + str(e)))
+            unreal.log_error("[Aeros] {} failed: {}".format(name, e))
+
+    step("MPC", create_mpc)
+    step("Default texture", create_default_texture)
+    step("Cloud material", create_cloud_material, assets.get("Default texture"))
+    step("Ground material", create_ground_material, assets.get("MPC"))
+    step("Water material", create_water_material)
+    step("Demo map", create_demo_map, assets.get("Cloud material"), assets.get("Ground material"))
+
+    log("SUMMARY")
+    for name, status in results:
+        log("  {:<16} {}".format(name, status))
+    log("Open /AerosWeather/Maps/L_AerosDemo and press Play (or set GameMode Override = AerosDemoGameMode in any level).")
 
 
 main()

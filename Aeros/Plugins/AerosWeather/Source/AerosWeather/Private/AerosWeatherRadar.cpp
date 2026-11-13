@@ -116,6 +116,33 @@ FColor AAerosWeatherRadar::PixelColor(const FAerosSnapshot& Snap, const FVector&
 		}
 		return (Col * T).ToFColor(true);
 	}
+	case EAerosRadarProduct::Hazards:
+	{
+		if (C->bWater)
+		{
+			// Sea level anomaly: red = crest, blue = trough (tsunami, surge)
+			const float T = FMath::Clamp(FMath::Abs(C->Eta) / 3.f, 0.f, 1.f);
+			if (T < 0.03f) return FColor(0, 0, 0, 0);
+			return (C->Eta > 0.f ? FLinearColor(1.f, 0.2f * (1.f - T), 0.f) : FLinearColor(0.f, 0.3f, 1.f)).ToFColor(true);
+		}
+		if (C->Flood > 0.02f)
+		{
+			const float T = FMath::Clamp(FMath::Sqrt(C->Flood / 2.f), 0.25f, 1.f);
+			return (FLinearColor(0.1f, 0.4f, 1.f) * T).ToFColor(true);
+		}
+		if (C->AshFall > 0.01f || C->AshDepth > 1.f)
+		{
+			const float T = FMath::Clamp(0.3f + C->AshFall + C->AshDepth / 20.f, 0.3f, 1.f);
+			return (FLinearColor(0.55f, 0.55f, 0.55f) * T).ToFColor(true);
+		}
+		if (C->Dust > 0.5f)
+		{
+			const float T = FMath::Clamp(C->Dust / 20.f, 0.25f, 1.f);
+			return (FLinearColor(0.8f, 0.5f, 0.2f) * T).ToFColor(true);
+		}
+		if (C->Blow > 0.2f) return (FLinearColor(0.85f, 0.9f, 1.f) * C->Blow).ToFColor(true);
+		return FColor(0, 0, 0, 0);
+	}
 	default:
 	{
 		// Roadmap: magenta = hail / tornado

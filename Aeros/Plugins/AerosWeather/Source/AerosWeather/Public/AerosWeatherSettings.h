@@ -10,6 +10,7 @@
 class UNiagaraSystem;
 class USoundBase;
 class UMaterialParameterCollection;
+class UMaterialInterface;
 class AAerosStormSystem;
 class AAerosTornado;
 class AAerosHurricane;
@@ -98,6 +99,26 @@ public:
 	UPROPERTY(Config, EditAnywhere, Category = "Visuals")
 	TSoftObjectPtr<UNiagaraSystem> LightningSystem;
 
+	/** Airborne dust / sand (User.Intensity, User.Wind). */
+	UPROPERTY(Config, EditAnywhere, Category = "Visuals")
+	TSoftObjectPtr<UNiagaraSystem> DustSystem;
+
+	/** Falling volcanic ash (User.Intensity, User.Wind). */
+	UPROPERTY(Config, EditAnywhere, Category = "Visuals")
+	TSoftObjectPtr<UNiagaraSystem> AshSystem;
+
+	/** Eruption column at the vent (User.Intensity, User.PlumeHeight in m). */
+	UPROPERTY(Config, EditAnywhere, Category = "Visuals")
+	TSoftObjectPtr<UNiagaraSystem> VolcanoPlumeSystem;
+
+	/** Spawned along lava flows (User.Intensity). */
+	UPROPERTY(Config, EditAnywhere, Category = "Visuals")
+	TSoftObjectPtr<UNiagaraSystem> LavaSystem;
+
+	/** Water surface for floods / storm surge / tsunami. Default: /AerosWeather/Materials/M_AerosWater (aeros_setup.py). */
+	UPROPERTY(Config, EditAnywhere, Category = "Visuals")
+	TSoftObjectPtr<UMaterialInterface> FloodWaterMaterial;
+
 	/** Built-in instanced-mesh precipitation / debris when no Niagara asset is assigned. */
 	UPROPERTY(Config, EditAnywhere, Category = "Visuals")
 	bool bUseFallbackVisuals = true;
@@ -122,4 +143,40 @@ public:
 
 	UPROPERTY(Config, EditAnywhere, Category = "Audio")
 	TSoftObjectPtr<USoundBase> WindLoopSound;
+
+	UPROPERTY(Config, EditAnywhere, Category = "Audio")
+	TSoftObjectPtr<USoundBase> EarthquakeSound;
+
+	UPROPERTY(Config, EditAnywhere, Category = "Audio")
+	TSoftObjectPtr<USoundBase> VolcanoSound;
+
+	UPROPERTY(Config, EditAnywhere, Category = "Audio")
+	TSoftObjectPtr<USoundBase> ExplosionSound;
+
+	// ---- Disasters ---------------------------------------------------------------
+
+	/** Spontaneous earthquakes from SeismicZones (server). */
+	UPROPERTY(Config, EditAnywhere, Category = "Disasters")
+	bool bSpontaneousEarthquakes = true;
+
+	/** Camera shake strength multiplier for earthquakes / extreme wind. */
+	UPROPERTY(Config, EditAnywhere, Category = "Disasters", meta = (ClampMin = "0"))
+	float CameraShakeScale = 1.f;
+
+	/** Radius (km) around each player where earthquakes / floods push physics bodies. */
+	UPROPERTY(Config, EditAnywhere, Category = "Disasters", meta = (ClampMin = "0.1"))
+	float PhysicsEffectRadiusKm = 2.f;
+
+	// ---- Real-world weather ------------------------------------------------------
+
+	/** Minutes between two refreshes of the real-world weather. */
+	UPROPERTY(Config, EditAnywhere, Category = "Live Weather", meta = (ClampMin = "1"))
+	float LiveRefreshMinutes = 15.f;
+
+	/** Base URL of the Open-Meteo forecast API (self-hosted instances work too). */
+	UPROPERTY(Config, EditAnywhere, Category = "Live Weather")
+	FString OpenMeteoForecastURL = TEXT("https://api.open-meteo.com/v1/forecast");
+
+	UPROPERTY(Config, EditAnywhere, Category = "Live Weather")
+	FString OpenMeteoMarineURL = TEXT("https://marine-api.open-meteo.com/v1/marine");
 };

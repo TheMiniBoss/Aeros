@@ -19,6 +19,9 @@ struct FAerosSnapCell
 	float CAPE = 0.f, CIN = 0.f, LCL = 0.f, LFC = 0.f, EL = 0.f, FZL = 3000.f, LI = 0.f;
 	float SRH01 = 0.f, SRH03 = 0.f, Shear06 = 0.f, STP = 0.f, SCP = 0.f, SHIP = 0.f;
 	float Wet = 0.f, Snow = 0.f, HailCover = 0.f;
+	float Soil = 0.4f, Elev = 0.f, Flood = 0.f, FlowU = 0.f, FlowV = 0.f, Eta = 0.f;
+	float Dust = 0.f, AshFall = 0.f, AshDepth = 0.f, Blow = 0.f, FeelsLike = 15.f;
+	uint8 bWater = 0;
 	uint8 PType = 0, Phen = 0;
 };
 

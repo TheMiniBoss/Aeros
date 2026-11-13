@@ -15,6 +15,7 @@ public class AerosWeather : ModuleRules
 			"CoreUObject",
 			"Engine",
 			"DeveloperSettings",
+			"HTTP",
 		});
 
 		PrivateDependencyModuleNames.AddRange(new string[]
@@ -26,6 +27,7 @@ public class AerosWeather : ModuleRules
 			"Chaos",
 			"PhysicsCore",
 			"NetCore",
+			"Json",
 		});
 	}
 }

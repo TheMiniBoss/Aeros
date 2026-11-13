@@ -50,8 +50,10 @@ void UAerosCloudManager::EnsureTextures(int32 NX, int32 NY)
 	};
 	WeatherMap = Make(TEXT("AerosWeatherMap"));
 	SurfaceMap = Make(TEXT("AerosSurfaceMap"));
+	HazardMap = Make(TEXT("AerosHazardMap"));
 	WeatherPixels.SetNumZeroed(NX * NY);
 	SurfacePixels.SetNumZeroed(NX * NY);
+	HazardPixels.SetNumZeroed(NX * NY);
 }
 
 void UAerosCloudManager::Upload(UTexture2D* Texture, const TArray<FColor>& Pixels, int32 W, int32 H)
@@ -108,10 +110,13 @@ void UAerosCloudManager::UpdateTextures()
 			const float Rain = L(P.PrecipRate, C.PrecipRate);
 			WeatherPixels[Row + I] = FColor(Byte(Cover), Byte(Base / 5000.f), Byte(Top / 16000.f), Byte(FMath::Sqrt(Rain / 100.f)));
 			SurfacePixels[Row + I] = FColor(Byte(L(P.Wet, C.Wet)), Byte(L(P.Snow, C.Snow) / 50.f), Byte(L(P.HailCover, C.HailCover)), Byte((L(P.T, C.T) + 40.f) / 90.f));
+			HazardPixels[Row + I] = FColor(Byte(FMath::Sqrt(L(P.Flood, C.Flood) / 5.f)), Byte(L(P.Dust, C.Dust) / 50.f),
+				Byte(FMath::Sqrt(L(P.AshDepth, C.AshDepth) / 100.f)), Byte(0.5f + L(P.Eta, C.Eta) / 10.f));
 		}
 	}
 	Upload(WeatherMap, WeatherPixels, NX, NY);
 	Upload(SurfaceMap, SurfacePixels, NX, NY);
+	Upload(HazardMap, HazardPixels, NX, NY);
 }
 
 void UAerosCloudManager::UpdateParameterCollection(float DeltaTime)
@@ -150,6 +155,13 @@ void UAerosCloudManager::UpdateParameterCollection(float DeltaTime)
 	MPC->SetScalarParameterValue(TEXT("AerosWindSpeed"), S.WindSpeed);
 	MPC->SetScalarParameterValue(TEXT("AerosLightningFlash"), Flash);
 	MPC->SetScalarParameterValue(TEXT("AerosFogDensity"), FMath::Clamp(1.f - S.Visibility / 20000.f, 0.f, 1.f));
+	MPC->SetScalarParameterValue(TEXT("AerosFloodDepth"), S.FloodDepth);
+	MPC->SetScalarParameterValue(TEXT("AerosDust"), S.Dust);
+	MPC->SetScalarParameterValue(TEXT("AerosAshDepth"), S.AshDepth);
+	MPC->SetScalarParameterValue(TEXT("AerosAshFall"), S.AshFall);
+	MPC->SetScalarParameterValue(TEXT("AerosBlowingSnow"), S.BlowingSnow);
+	MPC->SetScalarParameterValue(TEXT("AerosShake"), Owner->GetGroundShakingAt(Owner->GetViewerLocation()));
+	MPC->SetScalarParameterValue(TEXT("AerosSeaLevel"), S.SeaLevelAnomaly);
 	MPC->SetVectorParameterValue(TEXT("AerosWind"), FLinearColor(float(S.Wind.X), float(S.Wind.Y), float(S.Wind.Z), S.WindSpeed));
 	const FVector4 D = Owner->GetDomainRect();
 	MPC->SetVectorParameterValue(TEXT("AerosDomain"), FLinearColor(float(D.X), float(D.Y), float(D.Z), float(D.W)));

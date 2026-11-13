@@ -1,6 +1,6 @@
 // Copyright Aeros. All Rights Reserved.
 //
-// AAerosWeatherRadar — roadmap "AWeatherRadar": a rotating Doppler radar that scans the
+// AAerosWeatherRadar - roadmap "AWeatherRadar": a rotating Doppler radar that scans the
 // simulation and paints a texture for the UI (green = rain, red = intense, magenta = hail /
 // tornado). The beam sweeps like a real radar: only the pixels it crosses are refreshed.
 
@@ -18,6 +18,7 @@ enum class EAerosRadarProduct : uint8
 	Reflectivity  UMETA(DisplayName = "Base Reflectivity (dBZ)"),
 	Velocity      UMETA(DisplayName = "Radial Velocity (m/s)"),
 	PrecipType    UMETA(DisplayName = "Precipitation Type"),
+	Hazards       UMETA(DisplayName = "Hazards (flood, dust, ash, sea level)"),
 };
 
 UCLASS(Blueprintable)
