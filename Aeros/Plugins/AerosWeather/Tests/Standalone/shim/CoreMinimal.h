@@ -43,7 +43,10 @@ struct FMath {
 };
 struct FVector { double X=0,Y=0,Z=0; FVector(){} FVector(double x,double y,double z):X(x),Y(y),Z(z){}
   static const FVector ZeroVector, UpVector; double Size() const {return std::sqrt(X*X+Y*Y+Z*Z);}
-  static double Dist2D(const FVector&a,const FVector&b){return std::hypot(a.X-b.X,a.Y-b.Y);} };
+  static double Dist2D(const FVector&a,const FVector&b){return std::hypot(a.X-b.X,a.Y-b.Y);}
+  double Size2D() const {return std::hypot(X,Y);} bool IsZero() const {return X==0&&Y==0&&Z==0;}
+  FVector GetSafeNormal2D() const {double l=Size2D(); return l>1e-8?FVector(X/l,Y/l,0):FVector(0,0,0);}
+  bool Equals(const FVector&o,double t=1e-4) const {return std::fabs(X-o.X)<=t&&std::fabs(Y-o.Y)<=t&&std::fabs(Z-o.Z)<=t;} };
 inline const FVector FVector::ZeroVector(0,0,0); inline const FVector FVector::UpVector(0,0,1);
 struct FVector2D { double X=0,Y=0; FVector2D(){} FVector2D(double x,double y):X(x),Y(y){}
   static const FVector2D ZeroVector; FVector2D operator-(const FVector2D&o)const{return {X-o.X,Y-o.Y};} FVector2D operator+(const FVector2D&o)const{return {X+o.X,Y+o.Y};}

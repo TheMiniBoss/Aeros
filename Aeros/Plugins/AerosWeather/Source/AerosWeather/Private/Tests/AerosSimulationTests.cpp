@@ -210,8 +210,14 @@ bool FAerosCloudVolumeTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("Tower is dense at mid height"), FAerosCloudVolume::SampleDensity(Grid, Desc, St.UpdraftLocation, 0.5f * (LCLkm + ELkm)) > 0.5f);
 	TestTrue(TEXT("Nothing 2.5 km above the EL"), FAerosCloudVolume::SampleDensity(Grid, Desc, St.UpdraftLocation, ELkm + 2.5f) < 0.05f);
 	TestTrue(TEXT("Anvil downwind near the EL"), FAerosCloudVolume::SampleDensity(Grid, Desc, Downwind, ELkm - 0.8f) > 0.2f);
-	TestTrue(TEXT("No anvil far upwind"), FAerosCloudVolume::SampleDensity(Grid, Desc, Upwind, ELkm - 0.8f) < 0.05f);
-	TestTrue(TEXT("Clear below the cloud base away from storms"), FAerosCloudVolume::SampleDensity(Grid, Desc, Upwind, 0.3f) < 0.05f);
+	// Upwind checks on this storm alone: in an outbreak another storm upwind legitimately spreads its anvil there
+	FAerosSnapshot Single = Snap;
+	Single.Storms.Reset();
+	Single.Storms.Add(St);
+	TArray<uint8> SingleGrid;
+	FAerosCloudVolume::Build(Single, Desc, SingleGrid);
+	TestTrue(TEXT("No anvil far upwind"), FAerosCloudVolume::SampleDensity(SingleGrid, Desc, Upwind, ELkm - 0.8f) < 0.05f);
+	TestTrue(TEXT("Clear below the cloud base away from storms"), FAerosCloudVolume::SampleDensity(SingleGrid, Desc, Upwind, 0.3f) < 0.05f);
 
 	// --- Storm outside the grid: nothing drawn, no wrap-around
 	FAerosCloudVolumeDesc Far = Desc;
