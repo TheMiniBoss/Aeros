@@ -31,6 +31,7 @@ int main()
 	{ FAerosPhysicsTest T;   std::printf("Physics\n");   T.RunTest(""); Fails += T.Fails; }
 	{ FAerosSupercellTest T; std::printf("Supercell\n"); T.RunTest(""); Fails += T.Fails; }
 	{ FAerosHazardTest T;    std::printf("Disasters\n"); T.RunTest(""); Fails += T.Fails; }
+	{ FAerosCloudVolumeTest T; std::printf("Cloud voxels\n"); T.RunTest(""); Fails += T.Fails; }
 	std::printf("failures: %d\n", Fails);
 	return Fails == 0 ? 0 : 1;
 }

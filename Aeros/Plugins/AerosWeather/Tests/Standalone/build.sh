@@ -7,7 +7,7 @@ cd "$(dirname "$0")"
 CXX="${CXX:-g++}"
 SRC=../../Source/AerosWeather
 FLAGS="-std=c++20 -O2 -Wall -Wno-unused -Ishim -I$SRC/Public -I$SRC/Private"
-CORE="$SRC/Private/Core/AerosSimulation.cpp $SRC/Private/Core/AerosSnapshot.cpp"
+CORE="$SRC/Private/Core/AerosSimulation.cpp $SRC/Private/Core/AerosSnapshot.cpp $SRC/Private/Core/AerosCloudVolume.cpp"
 mkdir -p bin
 $CXX $FLAGS -o bin/run_automation_tests run_automation_tests.cpp $CORE
 $CXX $FLAGS -o bin/scenarios scenarios.cpp $CORE

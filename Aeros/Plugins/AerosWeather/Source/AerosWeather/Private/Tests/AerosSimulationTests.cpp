@@ -167,3 +167,79 @@ bool FAerosHazardTest::RunTest(const FString& Parameters)
 }
 
 #endif
+
+#if WITH_DEV_AUTOMATION_TESTS
+#include "Core/AerosCloudVolume.h"
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FAerosCloudVolumeTest, "Aeros.Clouds.VoxelAnatomy",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FAerosCloudVolumeTest::RunTest(const FString& Parameters)
+{
+	// --- A mature supercell: tower, anvil downwind, nothing above the EL, clear air upwind
+	FAerosSimulationSettings S;
+	S.GridSizeX = S.GridSizeY = 96;
+	S.Scenario = EAerosScenario::SupercellOutbreak;
+	S.StartDayOfYear = 140;
+	S.StartHour = 12.f;
+	S.LatitudeDeg = 37.f;
+	FAerosSimulation Sim;
+	Sim.Initialize(S);
+	Sim.InjectThermal(FVector::ZeroVector, 6.f, 3.f, 0.002f);
+	for (int32 Step = 0; Step < 360; ++Step) Sim.Step(30.f);
+	FAerosSnapshot Snap;
+	Sim.FillSnapshot(Snap);
+
+	const FAerosStormData* Strongest = nullptr;
+	for (const FAerosStormData& St : Snap.Storms)
+		if (!Strongest || St.CloudTop > Strongest->CloudTop) Strongest = &St;
+	TestTrue(TEXT("A storm exists"), Strongest != nullptr);
+	if (!Strongest) return true;
+	const FAerosStormData& St = *Strongest;
+
+	FAerosCloudVolumeDesc Desc;
+	Desc.Center = FAerosCloudVolume::SnapCenter(St.UpdraftLocation);
+	TArray<uint8> Grid;
+	FAerosCloudVolume::Build(Snap, Desc, Grid);
+	TestEqual(TEXT("Grid size RG8"), Grid.Num(), Desc.NX * Desc.NY * Desc.NZ * 2);
+
+	const float ELkm = St.CloudTop * 0.001f, LCLkm = FMath::Max(St.LCL, 300.f) * 0.001f;
+	const FVector Dir500 = FAerosSnapshot::SimToWorldDir(Snap.Synoptic.Wind500.X, Snap.Synoptic.Wind500.Y).GetSafeNormal2D();
+	const FVector Downwind = St.UpdraftLocation + Dir500 * 2500000.0;
+	const FVector Upwind = St.UpdraftLocation - Dir500 * 3500000.0;
+	TestTrue(TEXT("Tower is dense at mid height"), FAerosCloudVolume::SampleDensity(Grid, Desc, St.UpdraftLocation, 0.5f * (LCLkm + ELkm)) > 0.5f);
+	TestTrue(TEXT("Nothing 2.5 km above the EL"), FAerosCloudVolume::SampleDensity(Grid, Desc, St.UpdraftLocation, ELkm + 2.5f) < 0.05f);
+	TestTrue(TEXT("Anvil downwind near the EL"), FAerosCloudVolume::SampleDensity(Grid, Desc, Downwind, ELkm - 0.8f) > 0.2f);
+	TestTrue(TEXT("No anvil far upwind"), FAerosCloudVolume::SampleDensity(Grid, Desc, Upwind, ELkm - 0.8f) < 0.05f);
+	TestTrue(TEXT("Clear below the cloud base away from storms"), FAerosCloudVolume::SampleDensity(Grid, Desc, Upwind, 0.3f) < 0.05f);
+
+	// --- Storm outside the grid: nothing drawn, no wrap-around
+	FAerosCloudVolumeDesc Far = Desc;
+	Far.Center = FAerosCloudVolume::SnapCenter(St.UpdraftLocation + FVector(20000000.0, 0.0, 0.0));
+	TArray<uint8> FarGrid;
+	FAerosCloudVolume::Build(Snap, Far, FarGrid);
+	uint8 FarMax = 0;
+	for (int32 K = 0; K < FarGrid.Num(); K += 2) FarMax = FMath::Max(FarMax, FarGrid[K]);
+	TestTrue(TEXT("Grid 200 km away from every storm stays empty"), FarMax < 13);
+
+	// --- Fair weather: no storm, no stratiform deck -> empty grid (cumulus come from the shader)
+	FAerosSimulation Fair;
+	FAerosSimulationSettings FS = S;
+	FS.Scenario = EAerosScenario::FairWeather;
+	Fair.Initialize(FS);
+	for (int32 Step = 0; Step < 120; ++Step) Fair.Step(30.f);
+	FAerosSnapshot FairSnap;
+	Fair.FillSnapshot(FairSnap);
+	FAerosCloudVolumeDesc FairDesc;
+	TArray<uint8> FairGrid;
+	FAerosCloudVolume::Build(FairSnap, FairDesc, FairGrid);
+	uint8 FairMax = 0;
+	for (int32 K = 0; K < FairGrid.Num(); K += 2) FairMax = FMath::Max(FairMax, FairGrid[K]);
+	TestTrue(TEXT("Fair weather grid is empty"), FairMax < 13);
+
+	// --- Recentring snaps to 10 km
+	TestTrue(TEXT("SnapCenter rounds to 10 km"), FAerosCloudVolume::SnapCenter(FVector(1234567.0, -987654.0, 0.0)).Equals(FVector(1000000.0, -1000000.0, 0.0)));
+	return true;
+}
+
+#endif
