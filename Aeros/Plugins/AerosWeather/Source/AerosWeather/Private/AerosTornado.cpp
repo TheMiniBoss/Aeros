@@ -6,6 +6,9 @@
 #include "AerosStormManager.h"
 #include "AerosStormSystem.h"
 #include "Core/AerosPhysics.h"
+#include "Core/AerosSnapshot.h"
+#include "AerosAssetUtils.h"
+#include "Materials/MaterialInterface.h"
 #include "NiagaraComponent.h"
 #include "NiagaraSystem.h"
 #include "Components/AudioComponent.h"
@@ -46,6 +49,7 @@ AAerosTornado::AAerosTornado()
 
 	static ConstructorHelpers::FObjectFinder<UStaticMesh> ConeMesh(TEXT("/Engine/BasicShapes/Cone.Cone"));
 	static ConstructorHelpers::FObjectFinder<UStaticMesh> CubeMesh(TEXT("/Engine/BasicShapes/Cube.Cube"));
+	static ConstructorHelpers::FObjectFinder<UStaticMesh> SphereMesh(TEXT("/Engine/BasicShapes/Sphere.Sphere"));
 
 	FallbackFunnel = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("FallbackFunnel"));
 	FallbackFunnel->SetupAttachment(RootComponent);
@@ -60,6 +64,17 @@ AAerosTornado::AAerosTornado()
 	FallbackDebris->SetCastShadow(false);
 	FallbackDebris->SetVisibility(false);
 	if (CubeMesh.Succeeded()) FallbackDebris->SetStaticMesh(CubeMesh.Object);
+
+	FallbackWallCloud = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("FallbackWallCloud"));
+	FallbackDustCloud = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("FallbackDustCloud"));
+	for (UStaticMeshComponent* C : { FallbackWallCloud.Get(), FallbackDustCloud.Get() })
+	{
+		C->SetupAttachment(RootComponent);
+		C->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+		C->SetCastShadow(false);
+		C->SetVisibility(false);
+		if (SphereMesh.Succeeded()) C->SetStaticMesh(SphereMesh.Object); // flattened spheres: soft cloud blobs
+	}
 }
 
 void AAerosTornado::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
@@ -102,8 +117,22 @@ void AAerosTornado::BeginPlay()
 		bUseFallback = true;
 		FallbackFunnel->SetVisibility(true);
 		FallbackDebris->SetVisibility(true);
+		// Soft translucent condensation funnel + wall cloud + dust cloud (material from aeros_setup.py)
+		UMaterialInterface* Soft = Aeros::LoadOptional(TSoftObjectPtr<UMaterialInterface>(FSoftObjectPath(TEXT("/AerosWeather/Materials/M_AerosShaft.M_AerosShaft"))));
+		if (Soft)
+		{
+			FallbackFunnel->SetMaterial(0, Soft);
+			FallbackWallCloud->SetMaterial(0, Soft);
+			FallbackDustCloud->SetMaterial(0, Soft);
+			FallbackWallCloud->SetVisibility(true);
+			FallbackDustCloud->SetVisibility(true);
+			WallCloudMID = FallbackWallCloud->CreateDynamicMaterialInstance(0);
+			DustCloudMID = FallbackDustCloud->CreateDynamicMaterialInstance(0);
+		}
 		FunnelMID = FallbackFunnel->CreateDynamicMaterialInstance(0);
 		if (FunnelMID) FunnelMID->SetVectorParameterValue(TEXT("Color"), FLinearColor(0.18f, 0.17f, 0.16f));
+		if (WallCloudMID) WallCloudMID->SetVectorParameterValue(TEXT("Color"), FLinearColor(0.1f, 0.11f, 0.13f));
+		if (DustCloudMID) DustCloudMID->SetVectorParameterValue(TEXT("Color"), FLinearColor(0.3f, 0.24f, 0.17f));
 
 		FRandomStream Rand(Seed);
 		const int32 Count = 180;
@@ -186,7 +215,7 @@ void AAerosTornado::UpdateGround()
 	FHitResult Hit;
 	FCollisionQueryParams Params(SCENE_QUERY_STAT(AerosTornadoGround), false, this);
 	const FVector L = GetActorLocation();
-	if (GetWorld() && GetWorld()->LineTraceSingleByChannel(Hit, FVector(L.X, L.Y, L.Z + 500000.0), FVector(L.X, L.Y, L.Z - 2000000.0), ECC_WorldStatic, Params))
+	if (GetWorld() && GetWorld()->LineTraceSingleByObjectType(Hit, FVector(L.X, L.Y, L.Z + 500000.0), FVector(L.X, L.Y, L.Z - 2000000.0), FCollisionObjectQueryParams(ECC_WorldStatic), Params))
 	{
 		GroundZ = float(Hit.ImpactPoint.Z);
 	}
@@ -200,7 +229,27 @@ void AAerosTornado::Tick(float DeltaSeconds)
 
 	if (HasAuthority())
 	{
-		Age += DeltaSeconds;
+		// Lifetime is tuned for the default x60 clock: age faster when time runs faster,
+		// otherwise tornadoes pile up at high time scales.
+		const UAerosWeatherSubsystem* Sub = UAerosWeatherSubsystem::Get(this);
+		const float TimeFactor = Sub ? FMath::Max(1.f, Sub->GetTimeScale() / 60.f) : 1.f;
+		Age += DeltaSeconds * TimeFactor;
+
+		// A tornado cannot outlive its parent storm (or drift away from it)
+		ParentCheckTimer += DeltaSeconds;
+		if (Sub && ParentStormId >= 0 && ParentCheckTimer > 1.f)
+		{
+			ParentCheckTimer = 0.f;
+			bool bParentNear = false;
+			if (FAerosSnapshotPtr Snap = Sub->GetSnapshot())
+			{
+				for (const FAerosStormData& S : Snap->Storms)
+				{
+					if (S.Id == ParentStormId) { bParentNear = FVector::Dist2D(S.UpdraftLocation, GetActorLocation()) < 2000000.0; break; }
+				}
+			}
+			if (!bParentNear) Age = FMath::Max(Age, Lifetime * 0.8f); // rope out over the last 20 %
+		}
 		// Track: storm motion + slow meander (looping paths are common)
 		const FVector Perp(-TrackVelocity.Y, TrackVelocity.X, 0.0);
 		const float Meander = FMath::Sin(Age * 0.05f + Seed) * 0.35f;
@@ -314,14 +363,29 @@ void AAerosTornado::UpdateFallbackVisuals(float DeltaSeconds)
 	const float Strength = GetStrength();
 	const float Rc = FMath::Max(CoreRadius, 20.f);
 
-	// Funnel: cone tip down, widening into the wall cloud
+	// Funnel: cone tip down, widening into the wall cloud. Visual floor so it reads from far away.
+	const float Vis = FMath::Max(Strength, 0.25f);
 	const float HeightM = 1200.f;
-	const float TopRadiusM = Rc * 4.f;
+	const float TopRadiusM = FMath::Max(Rc * 4.f, 250.f);
 	FallbackFunnel->SetRelativeRotation(FRotator(180.f, VisualTime * 90.f, 0.f));
 	// Engine cone: radius 50 cm, height 100 cm, pivot at centre
-	const float XY = TopRadiusM * 2.f * Strength + 0.01f;
+	const float XY = TopRadiusM * 2.f * Vis + 0.01f;
 	FallbackFunnel->SetRelativeScale3D(FVector(XY, XY, HeightM));
 	FallbackFunnel->SetRelativeLocation(FVector(0, 0, HeightM * 50.f));
+	if (FunnelMID) FunnelMID->SetScalarParameterValue(TEXT("Opacity"), 0.85f * Vis);
+
+	// Wall cloud: wide, dark, slowly rotating lowered base (engine sphere: 1 m diameter)
+	const float WallM = TopRadiusM * 3.f;
+	FallbackWallCloud->SetRelativeScale3D(FVector(WallM * 2.f, WallM * 2.f, 350.f));
+	FallbackWallCloud->SetRelativeLocation(FVector(0, 0, (HeightM + 150.f) * 100.f));
+	FallbackWallCloud->SetRelativeRotation(FRotator(0.f, VisualTime * 6.f, 0.f));
+	if (WallCloudMID) WallCloudMID->SetScalarParameterValue(TEXT("Opacity"), 0.7f);
+
+	// Dust cloud: brown skirt at the ground, grows with the wind
+	const float DustM = Rc * 3.f * (0.5f + Strength);
+	FallbackDustCloud->SetRelativeScale3D(FVector(DustM * 2.f, DustM * 2.f, 200.f * (0.4f + Strength)));
+	FallbackDustCloud->SetRelativeLocation(FVector(0, 0, 100.f * 100.f * (0.4f + Strength)));
+	if (DustCloudMID) DustCloudMID->SetScalarParameterValue(TEXT("Opacity"), 0.6f * Strength);
 
 	float Hemi = 1.f;
 	if (const UAerosWeatherSubsystem* Sub = UAerosWeatherSubsystem::Get(this))

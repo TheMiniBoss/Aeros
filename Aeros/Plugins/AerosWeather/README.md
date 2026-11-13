@@ -23,9 +23,13 @@ Les matériaux et les cartes sont des fichiers binaires (`.uasset`, `.umap`) que
 | `Materials/M_AerosVolumetricCloud` | nuages volumétriques pilotés par la simulation (couverture, base, sommet, orages) |
 | `Materials/M_AerosGround` | sol qui se mouille, s'enneige, blanchit sous la grêle, grisit sous la cendre |
 | `Materials/M_AerosWater` | eau translucide des crues, ondes de tempête et tsunamis |
+| `Materials/M_AerosEmissive` | lueur sans éclairage : éclairs (zigzag du nuage au sol) |
+| `Materials/M_AerosShaft` | volume translucide doux : rideau de pluie / grêle sous les orages |
 | `Maps/L_AerosDemo` | carte démo avec *GameMode Override* = `AerosDemoGameMode` |
 
-Chaque étape est indépendante : à la fin, l'Output Log affiche `[Aeros] SUMMARY` avec OK / FAILED pour chaque asset. Sans le script, la démo marche quand même (nuages du moteur, sol uni, eau opaque).
+Chaque étape est indépendante : à la fin, l'Output Log affiche `[Aeros] SUMMARY` avec OK / FAILED pour chaque asset. Sans le script, la démo marche quand même (nuages du moteur, sol uni, eau opaque, pas de rideau de pluie).
+
+Sans ouvrir l'éditeur : `UnrealEditor-Cmd.exe Aeros.uproject -run=pythonscript -script=<chemin>/aeros_setup.py -unattended -nullrhi` (l'étape carte échoue dans ce mode, les matériaux sont bien créés).
 
 ### Touches de la démo (clavier AZERTY)
 
@@ -44,9 +48,19 @@ Chaque étape est indépendante : à la fin, l'Output Log affiche `[Aeros] SUMMA
 | = / ) (ou pavé + / −, PgUp / PgDn) | vitesse du temps ×2 / ÷2 ; P pause |
 | N / M, J / K | −/+ 1 heure, −/+ 1 mois |
 | R | radar : réflectivité / vitesse / type de précipitation / **risques** (crue, sable, cendre, tsunami) |
-| X | debug ; F1 / Tab : HUD complet → radar → caché → aide |
+| X | debug 3D (zones d'orage, flèches de vent) |
+| F1 / Tab | affichage : **simple** → expert → radar seul → caché → aide |
+| **F2** | **visite guidée** : 10 étapes (orage, tornade, volcan, séisme, tsunami, crue, haboob, blizzard), chacune expliquée à l'écran |
 
 Les chiffres QWERTY (1-0) marchent aussi pour les scénarios.
+
+### Comprendre ce qui se passe
+
+* **HUD simple** (par défaut) : la météo ici en mots simples, une rose des vents relative à la caméra, un paragraphe « ce qui se passe » qui explique la physique en cours, et des jauges de risque (orage, grêle, tornade, vent, inondation, visibilité, neige, secousse).
+* **Marqueurs** : un losange au-dessus de chaque orage, tornade, ouragan, volcan et épicentre, avec type et distance. Hors de l'écran, une flèche au bord donne la direction.
+* **Journal d'événements** (en bas à droite) : formation d'orage, tornade, séisme, tsunami, éruption, changement de temps ici.
+* **HUD expert** : tous les chiffres (sondage, CAPE, SRH, STP…).
+* **Visite guidée** (F2) : chaque étape place la caméra, déclenche le phénomène, l'explique et enregistre une capture dans `Saved/Screenshots/<plateforme>/AerosTour/`. En ligne de commande : `-AerosTour` (ou `-AerosTourQuit` pour quitter à la fin, utile pour des captures automatiques).
 
 Console : `aeros.Scenario 0-10`, `aeros.TimeScale X`, `aeros.Time jour heure`, `aeros.Quake M km`, `aeros.Tsunami M`, `aeros.Flood mm`, `aeros.Haboob`, `aeros.Eruption VEI`, `aeros.Live lat lon nom`, `aeros.Bubble`, `aeros.Hurricane`, `aeros.Tornado`, `aeros.Debug 0-2`, `stat Aeros`.
 

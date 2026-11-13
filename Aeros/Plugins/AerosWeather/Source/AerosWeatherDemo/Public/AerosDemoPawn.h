@@ -53,13 +53,43 @@ public:
 	FString LastMessage;
 	float MessageTime = 0.f;
 
+	/** Guided tour caption, shown by the HUD (empty = no tour running). */
+	FString TourTitle;
+	FString TourCaption;
+
+	/** Guided tour: shows each phenomenon, explains it, and saves a screenshot per step
+	 *  (Saved/Screenshots/AerosTour). Key F2, or "-AerosTour" on the command line
+	 *  ("-AerosTourQuit" also exits at the end, for automated captures). */
+	void StartTour();
+	void StopTour();
+	bool IsTourRunning() const { return TourStep >= 0; }
+
 private:
+	struct FTourStep
+	{
+		FString Title;
+		FString Caption;
+		FString Shot;
+		float Duration = 8.f;
+		TFunction<void()> Enter;
+	};
+
 	void HandleMovement(APlayerController* PC, float DeltaSeconds);
 	void HandleHotkeys(APlayerController* PC);
 	void Notify(const FString& Message);
 	void FlyToNearestStorm();
+	void TeleportLookAt(const FVector& Location, const FVector& Target);
+	void TickTour(float DeltaSeconds);
+	void BuildTour();
 
 	int32 DebugLevel = 0;
 	int32 VolcanoVEI = 2;
 	int32 CityIndex = 0;
+
+	TArray<FTourStep> Tour;
+	int32 TourStep = -1;
+	float TourTime = 0.f;
+	bool bTourShotTaken = false;
+	bool bQuitAfterTour = false;
+	float AutoTourDelay = -1.f;
 };

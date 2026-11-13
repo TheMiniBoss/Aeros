@@ -8,6 +8,8 @@
 #   Materials/M_AerosVolumetricCloud    Volumetric Cloud material driven by the weather map
 #   Materials/M_AerosGround             ground material: wetness, snow, hail, ash accumulation
 #   Materials/M_AerosWater              translucent water (floods, storm surge, tsunami)
+#   Materials/M_AerosEmissive           unlit glow (lightning bolts, lava)
+#   Materials/M_AerosShaft              soft translucent volume (rain shafts, tornado funnel)
 #   Maps/L_AerosDemo                    demo level, GameMode Override = AerosDemoGameMode
 #
 # Each step is independent: if one fails, the others still run, and a summary is
@@ -149,8 +151,9 @@ def create_cloud_material(default_tex):
     domain = node(mat, unreal.MaterialExpressionVectorParameter, -1800, 200, parameter_name="AerosDomain",
                   default_value=unreal.LinearColor(0, 0, 32000000, 32000000))
     wp_xy = mask(mat, wp, -1600, 0, r=True, g=True)
-    d_xy = mask(mat, domain, -1600, 200, r=True, g=True)
-    d_zw = mask(mat, domain, -1600, 300, b=True, a=True)
+    # The default output of a vector parameter is RGB (3 channels): read B and A from "RGBA"
+    d_xy = mask(mat, domain, -1600, 200, r=True, g=True, src_out="RGBA")
+    d_zw = mask(mat, domain, -1600, 300, b=True, a=True, src_out="RGBA")
     rel = binop(mat, unreal.MaterialExpressionSubtract, wp_xy, d_xy, -1400, 50)
     uv0 = binop(mat, unreal.MaterialExpressionDivide, rel, d_zw, -1250, 100)
     half = const(mat, 0.5, -1250, 250)
@@ -185,7 +188,8 @@ def create_cloud_material(default_tex):
     profile = binop(mat, unreal.MaterialExpressionMultiply, rise, fall_inv, 150, 150)
 
     # Billowy detail: procedural noise (cheap settings)
-    noise = node(mat, unreal.MaterialExpressionNoise, -500, 600, scale=0.00008, levels=3, output_min=0.0, output_max=1.0)
+    # World position is in cm: 2.5e-6 gives cloud cells of a few km (0.00008 gave 125 m speckle)
+    noise = node(mat, unreal.MaterialExpressionNoise, -500, 600, scale=0.0000025, levels=4, output_min=0.0, output_max=1.0)
     link(wp, "", noise, "Position")
     one_minus_noise = node(mat, unreal.MaterialExpressionOneMinus, -300, 600)
     link(noise, "", one_minus_noise, "")
@@ -255,7 +259,8 @@ def create_ground_material(mpc):
     mel.connect_material_property(base_ash, "", unreal.MaterialProperty.MP_BASE_COLOR)
 
     rough = node(mat, unreal.MaterialExpressionLinearInterpolate, -300, 250)
-    link(const(mat, 0.85, -450, 400), "", rough, "A"); link(const(mat, 0.08, -450, 450), "", rough, "B"); link(wet, "", rough, "Alpha")
+    # Wet grass is darker and a bit glossy, not a mirror (0.08 reflected the whole sky)
+    link(const(mat, 0.85, -450, 400), "", rough, "A"); link(const(mat, 0.35, -450, 450), "", rough, "B"); link(wet, "", rough, "Alpha")
     rough2 = node(mat, unreal.MaterialExpressionLinearInterpolate, -150, 250)
     link(rough, "", rough2, "A"); link(const(mat, 0.6, -300, 450), "", rough2, "B"); link(cover_a, "", rough2, "Alpha")
     mel.connect_material_property(rough2, "", unreal.MaterialProperty.MP_ROUGHNESS)
@@ -286,6 +291,46 @@ def create_water_material():
     mel.recompile_material(mat)
     eal.save_loaded_asset(mat)
     log("Water material ready: " + mat.get_path_name())
+    return mat
+
+
+# ---------------------------------------------------------------- effect materials
+def create_emissive_material():
+    """Unlit glow (lightning bolts, lava, markers): Color * Intensity."""
+    mat = get_or_create("M_AerosEmissive", MAT_DIR, unreal.Material, unreal.MaterialFactoryNew())
+    mel.delete_all_material_expressions(mat)
+    mat.set_editor_property("shading_model", unreal.MaterialShadingModel.MSM_UNLIT)
+    mat.set_editor_property("used_with_instanced_static_meshes", True)
+    color = node(mat, unreal.MaterialExpressionVectorParameter, -500, 0, parameter_name="Color",
+                 default_value=unreal.LinearColor(0.8, 0.85, 1.0, 1.0))
+    inten = node(mat, unreal.MaterialExpressionScalarParameter, -500, 200, parameter_name="Intensity", default_value=20.0)
+    glow = binop(mat, unreal.MaterialExpressionMultiply, color, inten, -250, 80)
+    mel.connect_material_property(glow, "", unreal.MaterialProperty.MP_EMISSIVE_COLOR)
+    mel.recompile_material(mat)
+    eal.save_loaded_asset(mat)
+    log("Emissive material ready: " + mat.get_path_name())
+    return mat
+
+
+def create_shaft_material():
+    """Soft translucent volume (rain shafts, tornado funnel, dust walls): edges fade out."""
+    mat = get_or_create("M_AerosShaft", MAT_DIR, unreal.Material, unreal.MaterialFactoryNew())
+    mel.delete_all_material_expressions(mat)
+    mat.set_editor_property("blend_mode", unreal.BlendMode.BLEND_TRANSLUCENT)
+    mat.set_editor_property("shading_model", unreal.MaterialShadingModel.MSM_UNLIT)
+    mat.set_editor_property("two_sided", True)
+    color = node(mat, unreal.MaterialExpressionVectorParameter, -600, 0, parameter_name="Color",
+                 default_value=unreal.LinearColor(0.25, 0.28, 0.32, 1.0))
+    mel.connect_material_property(color, "", unreal.MaterialProperty.MP_EMISSIVE_COLOR)
+    opacity = node(mat, unreal.MaterialExpressionScalarParameter, -600, 200, parameter_name="Opacity", default_value=0.5)
+    fresnel = node(mat, unreal.MaterialExpressionFresnel, -600, 320, exponent=1.5)
+    soft = node(mat, unreal.MaterialExpressionOneMinus, -400, 320)
+    link(fresnel, "", soft, "")
+    alpha = binop(mat, unreal.MaterialExpressionMultiply, opacity, soft, -200, 250)
+    mel.connect_material_property(alpha, "", unreal.MaterialProperty.MP_OPACITY)
+    mel.recompile_material(mat)
+    eal.save_loaded_asset(mat)
+    log("Shaft material ready: " + mat.get_path_name())
     return mat
 
 
@@ -347,6 +392,9 @@ def create_demo_map(cloud_mat, ground_mat):
 def main():
     results = []
     assets = {}
+    # Headless runs (-run=pythonscript) start with an empty asset registry: scan our folder so
+    # existing assets are reused instead of failing to be re-created.
+    unreal.AssetRegistryHelpers.get_asset_registry().scan_paths_synchronous([ROOT], True)
 
     def step(name, fn, *args):
         try:
@@ -362,6 +410,8 @@ def main():
     step("Cloud material", create_cloud_material, assets.get("Default texture"))
     step("Ground material", create_ground_material, assets.get("MPC"))
     step("Water material", create_water_material)
+    step("Emissive mat.", create_emissive_material)
+    step("Shaft material", create_shaft_material)
     step("Demo map", create_demo_map, assets.get("Cloud material"), assets.get("Ground material"))
 
     log("SUMMARY")

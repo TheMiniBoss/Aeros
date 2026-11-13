@@ -87,6 +87,14 @@ public:
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Aeros|Tornado")
 	TObjectPtr<UInstancedStaticMeshComponent> FallbackDebris;
 
+	/** Fallback: rotating wall cloud under the storm base, where the funnel hangs from. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Aeros|Tornado")
+	TObjectPtr<UStaticMeshComponent> FallbackWallCloud;
+
+	/** Fallback: dust / debris cloud swirling around the base of the funnel. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Aeros|Tornado")
+	TObjectPtr<UStaticMeshComponent> FallbackDustCloud;
+
 protected:
 	void ApplyPhysicalEffects(float DeltaSeconds);
 	void UpdateFallbackVisuals(float DeltaSeconds);
@@ -102,6 +110,14 @@ private:
 	float VisualTime = 0.f;
 	bool bUseFallback = false;
 
+	float ParentCheckTimer = 0.f;
+
 	UPROPERTY(Transient)
 	TObjectPtr<UMaterialInstanceDynamic> FunnelMID;
+
+	UPROPERTY(Transient)
+	TObjectPtr<UMaterialInstanceDynamic> WallCloudMID;
+
+	UPROPERTY(Transient)
+	TObjectPtr<UMaterialInstanceDynamic> DustCloudMID;
 };

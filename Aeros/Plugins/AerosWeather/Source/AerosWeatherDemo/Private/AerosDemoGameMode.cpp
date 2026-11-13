@@ -151,16 +151,17 @@ void AAerosDemoGameMode::BuildScene()
 		}
 	}
 
-	// Ground: a 200 km plane (reaches the coast 70 km east) when nothing is under the origin
+	// Ground: a 600 km plane (the whole domain, coast 70 km east) when nothing is under the origin
 	FHitResult Hit;
-	if (!World->LineTraceSingleByChannel(Hit, FVector(0, 0, 100000), FVector(0, 0, -100000), ECC_WorldStatic))
+	// Object-type query: only real static geometry counts (the pawn already exists here and blocks every channel)
+	if (!World->LineTraceSingleByObjectType(Hit, FVector(0, 0, 100000), FVector(0, 0, -100000), FCollisionObjectQueryParams(ECC_WorldStatic)))
 	{
 		if (AStaticMeshActor* Ground = World->SpawnActor<AStaticMeshActor>(FVector::ZeroVector, FRotator::ZeroRotator, P))
 		{
 			Ground->SetMobility(EComponentMobility::Movable);
 			UStaticMeshComponent* M = Ground->GetStaticMeshComponent();
 			M->SetStaticMesh(LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Plane.Plane")));
-			M->SetWorldScale3D(FVector(200000.f, 200000.f, 1.f));
+			M->SetWorldScale3D(FVector(600000.f, 600000.f, 1.f)); // 600 km: covers the whole simulated domain
 			if (UMaterialInterface* GroundMat = LoadOptional<UMaterialInterface>(TEXT("/AerosWeather/Materials/M_AerosGround.M_AerosGround")))
 			{
 				M->SetMaterial(0, GroundMat);
@@ -171,6 +172,11 @@ void AAerosDemoGameMode::BuildScene()
 			}
 		}
 		SpawnProps();
+		UE_LOG(LogTemp, Display, TEXT("Aeros demo: no ground under the origin, spawned a 600 km ground plane and props"));
+	}
+	else
+	{
+		UE_LOG(LogTemp, Display, TEXT("Aeros demo: ground found under the origin: %s at Z=%.0f"), *GetNameSafe(Hit.GetActor()), Hit.ImpactPoint.Z);
 	}
 
 	bool bHasController = false;

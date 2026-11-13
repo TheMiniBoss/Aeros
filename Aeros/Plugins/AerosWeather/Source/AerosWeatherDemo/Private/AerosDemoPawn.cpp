@@ -16,6 +16,9 @@
 #include "Kismet/KismetSystemLibrary.h"
 #include "InputCoreTypes.h"
 #include "EngineUtils.h"
+#include "UnrealClient.h"
+#include "Misc/CommandLine.h"
+#include "Misc/Paths.h"
 
 AAerosDemoPawn::AAerosDemoPawn()
 {
@@ -56,7 +59,12 @@ void AAerosDemoPawn::BeginPlay()
 		PC->SetInputMode(FInputModeGameOnly());
 		PC->bShowMouseCursor = false;
 	}
-	Notify(TEXT("Aeros demo ready (AZERTY). F1 = help."));
+	Notify(TEXT("Aeros demo ready (AZERTY). F1 = help, F2 = guided tour."));
+	if (FParse::Param(FCommandLine::Get(), TEXT("AerosTour")) || FParse::Param(FCommandLine::Get(), TEXT("AerosTourQuit")))
+	{
+		bQuitAfterTour = FParse::Param(FCommandLine::Get(), TEXT("AerosTourQuit"));
+		AutoTourDelay = 5.f; // let the simulation start and the first snapshot arrive
+	}
 }
 
 void AAerosDemoPawn::Notify(const FString& Message)
@@ -69,6 +77,8 @@ void AAerosDemoPawn::Tick(float DeltaSeconds)
 {
 	Super::Tick(DeltaSeconds);
 	MessageTime = FMath::Max(0.f, MessageTime - DeltaSeconds);
+	if (AutoTourDelay > 0.f && (AutoTourDelay -= DeltaSeconds) <= 0.f) StartTour();
+	TickTour(DeltaSeconds);
 	APlayerController* PC = Cast<APlayerController>(GetController());
 	if (!PC || !PC->IsLocalController()) return;
 	HandleMovement(PC, DeltaSeconds);
@@ -282,6 +292,10 @@ void AAerosDemoPawn::HandleHotkeys(APlayerController* PC)
 		UKismetSystemLibrary::ExecuteConsoleCommand(this, FString::Printf(TEXT("aeros.Debug %d"), DebugLevel), PC);
 		Notify(FString::Printf(TEXT("Debug draw %d"), DebugLevel));
 	}
+	if (Pressed({ EKeys::F2 }))
+	{
+		if (IsTourRunning()) StopTour(); else StartTour();
+	}
 	if (Pressed({ EKeys::F1, EKeys::Tab }))
 	{
 		if (AAerosDemoHUD* HUD = Cast<AAerosDemoHUD>(PC->GetHUD())) HUD->CycleMode();
@@ -306,4 +320,218 @@ void AAerosDemoPawn::FlyToNearestStorm()
 	}
 	Notify(FString::Printf(TEXT("Teleported near storm %d (%s, %.0f dBZ, hail %.0f mm)"), Storm.Id,
 		*StaticEnum<EAerosStormType>()->GetDisplayNameTextByValue(int64(Storm.Type)).ToString(), Storm.MaxReflectivity, Storm.MaxHail));
+}
+
+// =====================================================================
+//  Guided tour
+// =====================================================================
+
+void AAerosDemoPawn::TeleportLookAt(const FVector& Location, const FVector& Target)
+{
+	SetActorLocation(Location);
+	if (AController* C = GetController()) C->SetControlRotation((Target - Location).Rotation());
+	FHitResult Hit;
+	FCollisionQueryParams Params(SCENE_QUERY_STAT(AerosTourGround), false, this);
+	const bool bHit = GetWorld()->LineTraceSingleByChannel(Hit, Location, Location - FVector(0, 0, 5000000.0), ECC_WorldStatic, Params);
+	UE_LOG(LogTemp, Display, TEXT("Aeros tour: camera at (%.0f, %.0f, %.0f), below: %s at Z=%.0f"), Location.X, Location.Y, Location.Z,
+		bHit ? *GetNameSafe(Hit.GetActor()) : TEXT("nothing"), bHit ? Hit.ImpactPoint.Z : 0.0);
+}
+
+void AAerosDemoPawn::StartTour()
+{
+	BuildTour();
+	if (Tour.Num() == 0) return;
+	TourStep = 0;
+	TourTime = 0.f;
+	bTourShotTaken = false;
+	TourTitle = Tour[0].Title;
+	TourCaption = Tour[0].Caption;
+	if (Tour[0].Enter) Tour[0].Enter();
+}
+
+void AAerosDemoPawn::StopTour()
+{
+	TourStep = -1;
+	TourTitle.Empty();
+	TourCaption.Empty();
+	if (UAerosWeatherSubsystem* Sub = UAerosWeatherSubsystem::Get(this)) Sub->SetTimeScale(60.f);
+	Notify(TEXT("Visite termin\u00E9e."));
+}
+
+void AAerosDemoPawn::TickTour(float DeltaSeconds)
+{
+	if (TourStep < 0 || !Tour.IsValidIndex(TourStep)) return;
+	TourTime += DeltaSeconds;
+	const FTourStep& Step = Tour[TourStep];
+
+	// One screenshot near the end of each step (HUD included, so the explanation is in the picture)
+	if (!bTourShotTaken && TourTime >= Step.Duration - 0.5f)
+	{
+		bTourShotTaken = true;
+		const FString File = FPaths::ScreenShotDir() / TEXT("AerosTour") / (Step.Shot + TEXT(".png"));
+		FScreenshotRequest::RequestScreenshot(File, true, false);
+	}
+	if (TourTime < Step.Duration) return;
+
+	++TourStep;
+	TourTime = 0.f;
+	bTourShotTaken = false;
+	if (!Tour.IsValidIndex(TourStep))
+	{
+		StopTour();
+		if (bQuitAfterTour)
+		{
+			if (APlayerController* PC = Cast<APlayerController>(GetController())) PC->ConsoleCommand(TEXT("quit"));
+		}
+		return;
+	}
+	TourTitle = Tour[TourStep].Title;
+	TourCaption = Tour[TourStep].Caption;
+	if (Tour[TourStep].Enter) Tour[TourStep].Enter();
+}
+
+void AAerosDemoPawn::BuildTour()
+{
+	Tour.Reset();
+	UAerosWeatherSubsystem* Sub = UAerosWeatherSubsystem::Get(this);
+	if (!Sub) return;
+	const int32 NumSteps = 10;
+	auto Title = [NumSteps](int32 K, const TCHAR* Name) { return FString::Printf(TEXT("Visite %d/%d : %s"), K, NumSteps, Name); };
+	auto Forward = [this]() { return GetControlRotation().Vector().GetSafeNormal2D(); };
+
+	FTourStep S;
+
+	S.Title = Title(1, TEXT("une vraie atmosph\u00E8re"));
+	S.Caption = TEXT("Aeros calcule l'air sur 320 x 320 km : temp\u00E9rature, humidit\u00E9, vent et pression, \u00E0 3 altitudes. Rien n'est script\u00E9 : nuages, orages et catastrophes naissent de ces calculs. Le temps passe ici 600 fois plus vite pour que les orages se forment.");
+	S.Shot = TEXT("01_atmosphere");
+	S.Duration = 14.f;
+	S.Enter = [this, Sub]()
+	{
+		Sub->SetScenario(EAerosScenario::SupercellOutbreak);
+		Sub->SetTimeScale(600.f);
+		TeleportLookAt(FVector(0, 0, 40000.0), FVector(1000000.0, 0, 200000.0));
+	};
+	Tour.Add(S);
+
+	S.Title = Title(2, TEXT("un orage"));
+	S.Caption = TEXT("L'air chaud et humide du sol monte, se refroidit et condense : une tour de nuage grimpe jusqu'\u00E0 10-15 km. La colonne sombre sous la base, c'est la pluie (blanch\u00E2tre s'il y a de la gr\u00EAle). Le losange au-dessus dit quel type d'orage c'est et \u00E0 quelle distance.");
+	S.Shot = TEXT("02_orage");
+	S.Duration = 10.f;
+	S.Enter = [this, Sub]()
+	{
+		Sub->SetTimeScale(60.f);
+		FAerosStormData Storm;
+		if (!Sub->GetNearestStorm(GetActorLocation(), Storm, 1000.f))
+		{
+			Sub->InjectThermalBubble(GetActorLocation() + FVector(1500000.0, 0, 0), 8.f, 5.f, 3.f);
+			return;
+		}
+		TeleportLookAt(Storm.UpdraftLocation + FVector(1800000.0, 1800000.0, 30000.0), Storm.UpdraftLocation + FVector(0, 0, 400000.0));
+	};
+	Tour.Add(S);
+
+	S.Title = Title(3, TEXT("vue d'ensemble"));
+	S.Caption = TEXT("Vu de haut. Le radar (en haut \u00E0 droite) montre la pluie : vert = faible, rouge = forte, violet = gr\u00EAle. Les X jaunes marquent les orages qui tournent sur eux-m\u00EAmes (m\u00E9socyclones) : ce sont eux qui font les tornades.");
+	S.Shot = TEXT("03_vue_ensemble");
+	S.Duration = 7.f;
+	S.Enter = [this, Forward]()
+	{
+		const FVector Here = GetActorLocation();
+		TeleportLookAt(FVector(Here.X, Here.Y, 1500000.0), FVector(Here.X, Here.Y, 0.0) + Forward() * 3000000.0);
+	};
+	Tour.Add(S);
+
+	S.Title = Title(4, TEXT("une tornade"));
+	S.Caption = TEXT("Quand l'orage tourne et que la base du nuage est basse, la rotation peut descendre jusqu'au sol : c'est la tornade. Le vent y d\u00E9passe 200 km/h et aspire les caisses. Sa force est not\u00E9e de EF0 \u00E0 EF5.");
+	S.Shot = TEXT("04_tornade");
+	S.Duration = 10.f;
+	S.Enter = [this, Sub]()
+	{
+		if (AAerosTornado* T = Sub->ForceTornado(-1))
+		{
+			const FVector At = T->GetActorLocation();
+			TeleportLookAt(FVector(At.X + 400000.0, At.Y + 300000.0, 25000.0), FVector(At.X, At.Y, 60000.0));
+		}
+	};
+	Tour.Add(S);
+
+	S.Title = Title(5, TEXT("un volcan"));
+	S.Caption = TEXT("Le volcan se r\u00E9veille (petits s\u00E9ismes), puis entre en \u00E9ruption. La colonne de cendres monte jusqu'\u00E0 20-30 km, le vent d'altitude l'emporte et la cendre retombe loin. Coul\u00E9es de lave et bombes volcaniques autour du crat\u00E8re.");
+	S.Shot = TEXT("05_volcan");
+	S.Duration = 22.f;
+	S.Enter = [this, Sub]()
+	{
+		Sub->SetTimeScale(120.f);
+		for (AAerosVolcano* V : Sub->GetVolcanoes())
+		{
+			V->UnrestSeconds = 6.f; // short warning phase so the tour sees the eruption
+			V->StartEruption(5);
+			TeleportLookAt(V->GetActorLocation() + FVector(900000.0, 900000.0, 80000.0), V->GetVentLocation() + FVector(0, 0, 300000.0));
+			break;
+		}
+	};
+	Tour.Add(S);
+
+	S.Title = Title(6, TEXT("un s\u00E9isme"));
+	S.Caption = TEXT("Une faille casse \u00E0 10 km sous terre. Les ondes P (6 km/s) arrivent d'abord, puis les ondes S, plus fortes : la cam\u00E9ra tremble et les caisses tombent. La jauge Secousse donne l'intensit\u00E9 ressentie ici.");
+	S.Shot = TEXT("06_seisme");
+	S.Duration = 7.f;
+	S.Enter = [this, Sub, Forward]()
+	{
+		Sub->SetTimeScale(60.f);
+		TeleportLookAt(FVector(0, 0, 3000.0), FVector(800000.0, 0, 3000.0));
+		Sub->TriggerEarthquake(GetActorLocation() + Forward() * 1200000.0, 6.8f, 10.f);
+	};
+	Tour.Add(S);
+
+	S.Title = Title(7, TEXT("un tsunami"));
+	S.Caption = TEXT("Un s\u00E9isme M9 soul\u00E8ve le fond de la mer au large. La vague file \u00E0 700 km/h en eau profonde, puis ralentit et grandit en arrivant sur la c\u00F4te. Souvent la mer se retire d'abord : c'est le signal pour fuir.");
+	S.Shot = TEXT("07_tsunami");
+	S.Duration = 18.f;
+	S.Enter = [this, Sub]()
+	{
+		FVector Coast, Offshore;
+		if (!Sub->FindNearestOcean(GetActorLocation(), Coast, Offshore, 70.f)) return;
+		Sub->TriggerEarthquake(Offshore, 9.f, 20.f);
+		const FVector Inland = Coast - (Offshore - Coast).GetSafeNormal2D() * 300000.0;
+		TeleportLookAt(FVector(Inland.X, Inland.Y, 5000.0), FVector(Offshore.X, Offshore.Y, 0.0));
+	};
+	Tour.Add(S);
+
+	S.Title = Title(8, TEXT("une crue \u00E9clair"));
+	S.Caption = TEXT("300 mm de pluie tombent d'un coup. Le sol ne peut pas tout absorber : l'eau ruisselle, suit la pente et s'accumule dans les creux. Le courant pousse les objets.");
+	S.Shot = TEXT("08_crue");
+	S.Duration = 14.f;
+	S.Enter = [this, Sub, Forward]()
+	{
+		Sub->SetTimeScale(240.f);
+		TeleportLookAt(FVector(-400000.0, 400000.0, 3000.0), FVector(-400000.0, 400000.0, 0.0) + Forward() * 400000.0);
+		Sub->InjectRain(GetActorLocation(), 15.f, 300.f);
+	};
+	Tour.Add(S);
+
+	S.Title = Title(9, TEXT("une temp\u00EAte de sable"));
+	S.Caption = TEXT("Au-dessus du d\u00E9sert, la rafale froide qui sort d'un orage frappe le sol sec et soul\u00E8ve le sable : un mur de poussi\u00E8re (haboob) avance et la visibilit\u00E9 tombe \u00E0 quelques centaines de m\u00E8tres.");
+	S.Shot = TEXT("09_haboob");
+	S.Duration = 14.f;
+	S.Enter = [this, Sub, Forward]()
+	{
+		Sub->SetScenario(EAerosScenario::DesertDust);
+		Sub->SetTimeScale(60.f);
+		TeleportLookAt(FVector(-12000000.0, 2000000.0, 20000.0), FVector(-10000000.0, 2000000.0, 20000.0));
+		Sub->InjectOutflow(GetActorLocation() + Forward() * 1200000.0, 25.f, -12.f);
+	};
+	Tour.Add(S);
+
+	S.Title = Title(10, TEXT("un blizzard"));
+	S.Caption = TEXT("Air glac\u00E9 et vent fort : la neige tombe, puis le vent la soul\u00E8ve \u00E0 nouveau. Tout devient blanc, on ne voit plus l'horizon. Le froid ressenti est bien plus bas que la temp\u00E9rature.");
+	S.Shot = TEXT("10_blizzard");
+	S.Duration = 16.f;
+	S.Enter = [this, Sub]()
+	{
+		Sub->SetScenario(EAerosScenario::Blizzard);
+		Sub->SetTimeScale(900.f);
+		TeleportLookAt(FVector(0, 0, 3000.0), FVector(1000000.0, 0, 3000.0));
+	};
+	Tour.Add(S);
 }

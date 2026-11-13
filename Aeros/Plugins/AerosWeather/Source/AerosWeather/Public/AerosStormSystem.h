@@ -16,6 +16,9 @@ class UNiagaraComponent;
 class UAudioComponent;
 class UFieldSystemComponent;
 class UPointLightComponent;
+class UStaticMeshComponent;
+class UInstancedStaticMeshComponent;
+class UMaterialInstanceDynamic;
 
 UCLASS()
 class AEROSWEATHER_API UAerosHailDamageType : public UDamageType
@@ -98,9 +101,14 @@ public:
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Aeros|Storm")
 	TObjectPtr<UFieldSystemComponent> FieldSystem;
 
+	/** Fallback visual (no StormSystem Niagara asset): translucent rain / hail shaft under the cloud base. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Aeros|Storm")
+	TObjectPtr<UStaticMeshComponent> RainShaft;
+
 protected:
 	UFUNCTION() void OnRep_StormIntensity();
 	UFUNCTION() void OnRep_StormData();
+	void UpdateRainShaft(float DeltaSeconds);
 
 	/** Roadmap: destructive hail (> 30 mm) -> radial damage + Chaos fractures. */
 	void ProcessExtremeHailDamage();
@@ -110,6 +118,10 @@ private:
 	float DamageTimer = 0.f;
 	FVector SmoothedLocation = FVector::ZeroVector;
 	bool bHasLocation = false;
+
+	UPROPERTY(Transient)
+	TObjectPtr<UMaterialInstanceDynamic> ShaftMID;
+	float ShaftOpacity = 0.f;
 };
 
 /** Short-lived cosmetic flash + thunder for a lightning strike (local only). */
@@ -127,7 +139,16 @@ public:
 	UPROPERTY(VisibleAnywhere, Category = "Aeros")
 	TObjectPtr<UPointLightComponent> Light;
 
+	/** Fallback visual (no LightningSystem Niagara asset): jagged glowing channel, cloud to ground. */
+	UPROPERTY(VisibleAnywhere, Category = "Aeros")
+	TObjectPtr<UInstancedStaticMeshComponent> Bolt;
+
 private:
+	void BuildBolt(const FVector& Top, const FVector& Ground, int32 Seed);
+
+	UPROPERTY(Transient)
+	TObjectPtr<UMaterialInstanceDynamic> BoltMID;
+
 	float Age = 0.f;
 	float Peak = 0.f;
 	float ThunderDelay = -1.f;

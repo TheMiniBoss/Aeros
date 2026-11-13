@@ -4,6 +4,13 @@
 #include "AerosWeatherSubsystem.h"
 #include "AerosWeatherSettings.h"
 #include "AerosStormManager.h"
+#include "AerosAssetUtils.h"
+#include "Components/StaticMeshComponent.h"
+#include "Components/InstancedStaticMeshComponent.h"
+#include "Engine/StaticMesh.h"
+#include "Materials/MaterialInterface.h"
+#include "Materials/MaterialInstanceDynamic.h"
+#include "UObject/ConstructorHelpers.h"
 #include "NiagaraComponent.h"
 #include "NiagaraSystem.h"
 #include "NiagaraFunctionLibrary.h"
@@ -15,7 +22,7 @@
 #include "Engine/World.h"
 #include "Sound/SoundBase.h"
 
-namespace
+namespace AerosStormSystemInternal
 {
 	FVector GroundAt(const UWorld* World, const FVector& Loc)
 	{
@@ -23,8 +30,22 @@ namespace
 		FHitResult Hit;
 		FCollisionQueryParams Params(SCENE_QUERY_STAT(AerosGround), false);
 		const FVector Start(Loc.X, Loc.Y, 2000000.0), End(Loc.X, Loc.Y, -2000000.0);
-		if (World->LineTraceSingleByChannel(Hit, Start, End, ECC_WorldStatic, Params)) return Hit.ImpactPoint;
+		if (World->LineTraceSingleByObjectType(Hit, Start, End, FCollisionObjectQueryParams(ECC_WorldStatic), Params)) return Hit.ImpactPoint; // ignores pawns
 		return FVector(Loc.X, Loc.Y, 0.0);
+	}
+
+	UMaterialInterface* LoadEffectMaterial(const TCHAR* Path)
+	{
+		return Aeros::LoadOptional(TSoftObjectPtr<UMaterialInterface>(FSoftObjectPath(Path)));
+	}
+
+	/** Transform that stretches the engine cylinder (1 m tall, 1 m wide, centred pivot) from A to B. */
+	FTransform SegmentTransform(const FVector& A, const FVector& B, float WidthCm)
+	{
+		const FVector D = B - A;
+		const float Len = float(D.Size());
+		return FTransform(FRotationMatrix::MakeFromZ(D.GetSafeNormal()).Rotator(), (A + B) * 0.5,
+			FVector(WidthCm / 100.f, WidthCm / 100.f, FMath::Max(Len, 1.f) / 100.f));
 	}
 }
 
@@ -48,6 +69,14 @@ AAerosStormSystem::AAerosStormSystem()
 
 	FieldSystem = CreateDefaultSubobject<UFieldSystemComponent>(TEXT("FieldSystem"));
 	FieldSystem->SetupAttachment(RootComponent);
+
+	static ConstructorHelpers::FObjectFinder<UStaticMesh> CylinderMesh(TEXT("/Engine/BasicShapes/Cylinder.Cylinder"));
+	RainShaft = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("RainShaft"));
+	RainShaft->SetupAttachment(RootComponent);
+	RainShaft->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+	RainShaft->SetCastShadow(false);
+	RainShaft->SetVisibility(false);
+	if (CylinderMesh.Succeeded()) RainShaft->SetStaticMesh(CylinderMesh.Object);
 }
 
 void AAerosStormSystem::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
@@ -65,6 +94,15 @@ void AAerosStormSystem::BeginPlay()
 	{
 		StormVFX->SetAsset(Sys);
 		StormVFX->Activate();
+	}
+	else if (Settings->bUseFallbackVisuals && GetNetMode() != NM_DedicatedServer)
+	{
+		// Rain shaft: needs the translucent material from aeros_setup.py (an opaque grey wall would hide the storm)
+		if (UMaterialInterface* Mat = AerosStormSystemInternal::LoadEffectMaterial(TEXT("/AerosWeather/Materials/M_AerosShaft.M_AerosShaft")))
+		{
+			RainShaft->SetMaterial(0, Mat);
+			ShaftMID = RainShaft->CreateDynamicMaterialInstance(0);
+		}
 	}
 	if (USoundBase* Snd = Settings->WindLoopSound.LoadSynchronous())
 	{
@@ -135,6 +173,7 @@ void AAerosStormSystem::Tick(float DeltaSeconds)
 	SmoothedLocation += StormData.Velocity * 100.0 * DeltaSeconds * TimeScale;
 	SmoothedLocation = FMath::VInterpTo(SmoothedLocation, StormData.Location, DeltaSeconds, 0.5f);
 	SetActorLocation(FVector(SmoothedLocation.X, SmoothedLocation.Y, CloudBaseHeight));
+	UpdateRainShaft(DeltaSeconds);
 
 	if (HasAuthority())
 	{
@@ -147,12 +186,31 @@ void AAerosStormSystem::Tick(float DeltaSeconds)
 	}
 }
 
+void AAerosStormSystem::UpdateRainShaft(float DeltaSeconds)
+{
+	if (!ShaftMID) return;
+	// Heavier rain = darker, denser curtain; hail turns it whitish. Fades in and out smoothly.
+	const float Target = StormData.MaxRainRate > 2.f ? FMath::Clamp(StormData.MaxRainRate / 80.f, 0.15f, 0.65f) : 0.f;
+	ShaftOpacity = FMath::FInterpTo(ShaftOpacity, Target, DeltaSeconds, 0.5f);
+	const bool bVisible = ShaftOpacity > 0.01f;
+	RainShaft->SetVisibility(bVisible);
+	if (!bVisible) return;
+
+	// Precipitation core: about half the storm radius, 2-8 km wide, from the ground to the cloud base
+	const float DiameterCm = FMath::Clamp(StormData.RadiusKm * 0.5f, 1.f, 4.f) * 2.f * 100000.f;
+	RainShaft->SetRelativeLocation(FVector(0, 0, -CloudBaseHeight * 0.5f));
+	RainShaft->SetRelativeScale3D(FVector(DiameterCm / 100.f, DiameterCm / 100.f, CloudBaseHeight / 100.f));
+	const float Hail = FMath::Clamp(StormData.MaxHail / 40.f, 0.f, 1.f);
+	ShaftMID->SetVectorParameterValue(TEXT("Color"), FMath::Lerp(FLinearColor(0.16f, 0.18f, 0.22f), FLinearColor(0.55f, 0.6f, 0.68f), Hail));
+	ShaftMID->SetScalarParameterValue(TEXT("Opacity"), ShaftOpacity);
+}
+
 void AAerosStormSystem::ProcessExtremeHailDamage()
 {
 	const float Threshold = UAerosWeatherSettings::Get()->HailDamageThreshold;
 	if (StormData.MaxHail <= Threshold) return;
 
-	const FVector Center = GroundAt(GetWorld(), StormData.HailCoreLocation);
+	const FVector Center = AerosStormSystemInternal::GroundAt(GetWorld(), StormData.HailCoreLocation);
 	const float DamageRadius = 5000.f;  // roadmap values
 	const float DamageAmount = StormData.MaxHail * 0.5f;
 
@@ -194,23 +252,88 @@ AAerosLightningFlash::AAerosLightningFlash()
 	Light->SetLightColor(FLinearColor(0.85f, 0.88f, 1.f));
 	Light->SetCastShadows(false);
 	Light->SetMobility(EComponentMobility::Movable);
+
+	static ConstructorHelpers::FObjectFinder<UStaticMesh> BoltMesh(TEXT("/Engine/BasicShapes/Cylinder.Cylinder"));
+	Bolt = CreateDefaultSubobject<UInstancedStaticMeshComponent>(TEXT("Bolt"));
+	Bolt->SetupAttachment(RootComponent);
+	Bolt->SetUsingAbsoluteLocation(true);
+	Bolt->SetUsingAbsoluteRotation(true);
+	Bolt->SetUsingAbsoluteScale(true);
+	Bolt->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+	Bolt->SetCastShadow(false);
+	Bolt->SetVisibility(false);
+	if (BoltMesh.Succeeded()) Bolt->SetStaticMesh(BoltMesh.Object);
+}
+
+void AAerosLightningFlash::BuildBolt(const FVector& Top, const FVector& Ground, int32 Seed)
+{
+	FRandomStream Rand(Seed);
+	TArray<FTransform> Segments;
+	const int32 N = 18;
+	const float Height = float(Top.Z - Ground.Z);
+	const float Step = Height / N;
+
+	// Main channel: a random walk downwards that ends exactly on the strike point
+	TArray<FVector> Points;
+	Points.Add(Top);
+	FVector Offset = FVector::ZeroVector;
+	for (int32 K = 1; K < N; ++K)
+	{
+		Offset += FVector(Rand.FRandRange(-1.f, 1.f), Rand.FRandRange(-1.f, 1.f), 0.f) * Step * 0.45f;
+		const float T = float(K) / N;
+		Points.Add(FMath::Lerp(Top, Ground, T) + Offset * (1.f - T * T));
+	}
+	Points.Add(Ground);
+	for (int32 K = 0; K + 1 < Points.Num(); ++K)
+	{
+		Segments.Add(AerosStormSystemInternal::SegmentTransform(Points[K], Points[K + 1], 350.f));
+	}
+
+	// Two branches that fork off the upper half and die out
+	for (int32 B = 0; B < 2; ++B)
+	{
+		FVector P = Points[Rand.RandRange(2, N / 2)];
+		const FVector Dir = FVector(Rand.FRandRange(-1.f, 1.f), Rand.FRandRange(-1.f, 1.f), 0.f).GetSafeNormal();
+		for (int32 K = 0; K < 6; ++K)
+		{
+			const FVector Next = P + Dir * Step * Rand.FRandRange(0.4f, 0.9f) + FVector(0, 0, -Step * Rand.FRandRange(0.5f, 1.f));
+			Segments.Add(AerosStormSystemInternal::SegmentTransform(P, Next, 160.f - K * 20.f));
+			P = Next;
+		}
+	}
+
+	Bolt->ClearInstances();
+	Bolt->AddInstances(Segments, false, true);
+	Bolt->SetVisibility(true);
 }
 
 void AAerosLightningFlash::Fire(const FAerosLightningStrike& Strike, const FVector& ViewerLocation)
 {
-	const FVector Ground = GroundAt(GetWorld(), Strike.Location);
+	const FVector Ground = AerosStormSystemInternal::GroundAt(GetWorld(), Strike.Location);
 	SetActorLocation(Ground + FVector(0, 0, Strike.bCloudToGround ? 150000.0 : 600000.0));
 	Peak = Strike.PeakCurrent * (Strike.bCloudToGround ? 4.0e5f : 1.5e5f);
 	Age = 0.f;
 
 	const UAerosWeatherSettings* Settings = UAerosWeatherSettings::Get();
-	if (UNiagaraSystem* Bolt = Settings->LightningSystem.LoadSynchronous(); Bolt && Strike.bCloudToGround)
+	if (UNiagaraSystem* BoltSystem = Settings->LightningSystem.LoadSynchronous(); BoltSystem && Strike.bCloudToGround)
 	{
-		if (UNiagaraComponent* NC = UNiagaraFunctionLibrary::SpawnSystemAtLocation(this, Bolt, Ground))
+		if (UNiagaraComponent* NC = UNiagaraFunctionLibrary::SpawnSystemAtLocation(this, BoltSystem, Ground))
 		{
 			NC->SetVariableVec3(TEXT("Start"), Ground + FVector(0, 0, 150000.0));
 			NC->SetVariableVec3(TEXT("End"), Ground);
 		}
+	}
+	else if (Settings->bUseFallbackVisuals && Strike.bCloudToGround)
+	{
+		if (!BoltMID)
+		{
+			if (UMaterialInterface* Mat = AerosStormSystemInternal::LoadEffectMaterial(TEXT("/AerosWeather/Materials/M_AerosEmissive.M_AerosEmissive")))
+			{
+				Bolt->SetMaterial(0, Mat);
+			}
+			BoltMID = Bolt->CreateDynamicMaterialInstance(0);
+		}
+		BuildBolt(Ground + FVector(0, 0, 150000.0), Ground, Strike.Sequence);
 	}
 
 	// Thunder: speed of sound, real time (sound does not care about the weather time scale)
@@ -228,6 +351,16 @@ void AAerosLightningFlash::Tick(float DeltaSeconds)
 	// Return strokes: 3 quick pulses
 	const float Pulse = FMath::Max3(FMath::Exp(-Age * 40.f), 0.6f * FMath::Exp(-FMath::Abs(Age - 0.09f) * 60.f), 0.4f * FMath::Exp(-FMath::Abs(Age - 0.2f) * 60.f));
 	Light->SetIntensity(Peak * Pulse);
+	if (Bolt->IsVisible())
+	{
+		// The channel glows with the return strokes, then disappears
+		if (BoltMID)
+		{
+			BoltMID->SetScalarParameterValue(TEXT("Intensity"), 60.f * Pulse);
+			BoltMID->SetVectorParameterValue(TEXT("Color"), FLinearColor(0.8f, 0.85f, 1.f));
+		}
+		if (Pulse < 0.03f && Age > 0.25f) Bolt->SetVisibility(false);
+	}
 
 	if (!bThunderPlayed && Age >= ThunderDelay)
 	{

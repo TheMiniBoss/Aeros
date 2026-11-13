@@ -26,23 +26,32 @@ Aeros/Plugins/AerosWeather/
     Public, Private                       couche Unreal : subsystem, thread, managers, acteurs, composants
     Private/Tests/AerosSimulationTests.cpp  tests automation (éditeur)
   Source/AerosWeatherDemo/                module démo : game mode, pawn (AZERTY), HUD canvas
-  Content/Python/aeros_setup.py           crée MPC, matériaux (nuages, sol, eau) et la carte démo dans l'éditeur
+  Content/Python/aeros_setup.py           crée MPC, matériaux (nuages, sol, eau, éclair, rideau de pluie) et la carte démo
   Tests/Standalone/                       tests hors moteur (shim des en-têtes UE) : build.sh / build.bat
 ```
 
 ## État actuel (à vérifier / à faire en priorité)
 
-1. **Le plugin n'a jamais été compilé entièrement dans Unreal 5.8.** Erreurs déjà remontées et corrigées : C4459 (x2), C3495, C2397. Sur le PC de l'utilisateur : compiler en premier, corriger les erreurs, recommencer.
-   - Compiler **éditeur fermé** (sinon Live Coding / Hot Reload bloque les fichiers : erreur LNK1104 sur un `.rsp`). Si LNK1104 revient : supprimer `Aeros/Plugins/AerosWeather/Intermediate` et `Binaries`.
-   - Commande type : `"<UE_5.8>\Engine\Build\BatchFiles\Build.bat" AerosEditor Win64 Development -Project="<chemin>\Aeros\Aeros.uproject" -WaitMutex`
-2. Le cœur de simulation est compilé et testé hors moteur : 21 tests passent (`Tests/Standalone/build.sh`). Les relancer après toute modification de `Private/Core` ou `Public/Core`.
-3. Le script Python (`aeros_setup.py`) n'a pas été vérifié de bout en bout dans l'éditeur : regarder le bloc `[Aeros] SUMMARY` dans l'Output Log.
-4. La météo réelle (Open-Meteo, `UAerosLiveWeather`) n'a jamais été testée : le réseau du cloud bloquait l'API.
-5. Si le plugin **Unreal MCP** est connecté (éditeur ouvert), l'utiliser pour compiler, lancer la démo en PIE, lire les logs et créer les assets.
+1. **Le plugin compile dans UE 5.8** (Build.bat, éditeur fermé). Commande :
+   `"E:\Epic Games\UE_5.8\Engine\Build\BatchFiles\Build.bat" AerosEditor Win64 Development "-Project=<repo>\Aeros\Aeros.uproject" -WaitMutex`
+   (depuis PowerShell). Si LNK1104 : éditeur encore ouvert, ou supprimer `Plugins/AerosWeather/Intermediate` et `Binaries`.
+2. Le cœur de simulation est testé hors moteur : 21 tests (`Tests/Standalone/build.sh`). Les relancer après toute modification de `Private/Core` ou `Public/Core`.
+3. **Assets sans éditeur** : `UnrealEditor-Cmd.exe <uproject> -run=pythonscript -script=<repo>/Aeros/Plugins/AerosWeather/Content/Python/aeros_setup.py -unattended -nosplash -nullrhi`, puis lire `[Aeros] SUMMARY` dans `Aeros/Saved/Logs/Aeros.log` (8 étapes OK attendues).
+4. **Boucle de test visuelle automatique** : `UnrealEditor.exe <uproject> -game -windowed -ResX=1600 -ResY=900 -AerosTourQuit -log=AerosTour.log` (lancer avec PowerShell `Start-Process`, pas Git Bash). La visite guidée (10 étapes) enregistre une capture par étape dans `Aeros/Saved/Screenshots/WindowsEditor/AerosTour/` puis quitte. Lire les PNG pour juger le rendu ; les lignes `Aeros tour:` / `Aeros demo:` du log disent ce qu'il y a sous la caméra.
+5. La météo réelle (Open-Meteo, `UAerosLiveWeather`) n'a jamais été testée.
+6. **Unreal MCP** : plugins activés, `.mcp.json` à la racine (http://127.0.0.1:8000/mcp), démarrage auto dans `Saved/Config/WindowsEditor/EditorPerProjectUserSettings.ini`. Le serveur n'a pas encore été vu en marche : si `unreal-mcp` n'apparaît pas, taper `ModelContextProtocol.StartServer` dans la console de l'éditeur puis recharger la session Claude.
+7. Visuel encore faible / à faire : tours orageuses pas toujours visibles de loin (matériau nuages), vague de tsunami peu visible, sol plat qui reflète le ciel en vue rasante (pas de landscape), effet « Séisme » qui dure longtemps après un M9 (répliques).
 
 ## Règles apprises (erreurs à ne pas refaire)
 
-- **Sources 100 % ASCII** (MSVC) : pas d'accent dans les `.h/.cpp`. Dans les chaînes, utiliser `é` etc. dans `TEXT("...")`.
+- **Sources 100 % ASCII** (MSVC) : pas d'accent dans les `.h/.cpp`. Dans les chaînes, écrire \u00E9 (é), \u00E0 (à)... dans `TEXT("...")`. Attention : les outils Write/Edit décodent `\uXXXX` en vrai caractère. Écrire le texte avec accents puis convertir tous les non-ASCII en `\uXXXX` par un petit script Python (`chr(92)+'u%04X'`).
+- `FString::ToUpper` ne met pas les accents en majuscule (« DéGAGé ») : ne pas l'utiliser sur du texte français.
+- Git Bash convertit les arguments qui commencent par `/` en chemins Windows (`/AerosWeather/Maps/...` devient `C:/Program Files/Git/...`) : lancer Unreal depuis PowerShell.
+- Un tracé « sol » avec `LineTraceSingleByChannel(ECC_WorldStatic)` touche aussi les pawns (profil BlockAll), et le pawn existe déjà dans `StartPlay` en 5.8. Utiliser `LineTraceSingleByObjectType(FCollisionObjectQueryParams(ECC_WorldStatic))`.
+- Matériau sur un `UInstancedStaticMeshComponent` : cocher `used_with_instanced_static_meshes` dans le script, sinon matériau par défaut en jeu.
+- Paramètre vecteur dans un matériau : la sortie par défaut est RGB (3 canaux). Pour lire B/A, prendre la sortie `RGBA`, sinon erreur « Not enough components » et matériau par défaut (c'était la cause du ciel vide).
+- Le script Python en mode `-run=pythonscript` doit scanner le registre d'assets (`scan_paths_synchronous`) avant de tester si un asset existe.
+- Durées de vie des acteurs (tornades, etc.) en secondes réelles : les faire vieillir avec `TimeScale / 60`, sinon ils s'accumulent quand le temps accélère.
 - Pas de variable locale qui porte le nom d'une constante de `Aeros::Phys` (`Cp`, `G`, `Lv`, `Rd`, `K0`...) : `AerosSimulation.cpp` fait `using namespace Aeros::Phys` et UE traite le masquage (C4459/C4456/C4458) comme une **erreur**.
 - **Unity build** : UE colle plusieurs `.cpp` ensemble. Un nom dans un namespace anonyme ou un `using namespace` au niveau fichier « fuit » dans les autres fichiers et masque leurs variables locales (erreur C4459). Mettre les helpers dans un namespace au nom unique (`AerosXxxInternal`) et les `using namespace` **dans les fonctions**.
 - Une lambda ne capture pas une variable `static` (ex. `ConstructorHelpers::FObjectFinder`) : erreur C3495. L'utiliser sans capture.

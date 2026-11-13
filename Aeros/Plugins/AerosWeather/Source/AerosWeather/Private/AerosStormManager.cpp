@@ -175,8 +175,10 @@ AAerosTornado* UAerosStormManager::SpawnTornado(const FAerosStormData& Storm, fl
 	AAerosTornado* T = World->SpawnActorDeferred<AAerosTornado>(Cls, FTransform(Location), nullptr, nullptr, ESpawnActorCollisionHandlingMethod::AlwaysSpawn);
 	if (!T) return nullptr;
 
-	// Strength from the significant tornado parameter: STP ~1 -> EF1-2, STP > 3 -> EF3-5
-	const float MaxWind = FMath::Clamp(32.f + 18.f * FMath::Max(Storm.STP, 0.3f) * (0.5f + RandA), 30.f, 105.f);
+	// Strength: most tornadoes are weak (EF0-EF1), violent ones are rare even in a high-STP
+	// environment. RandA^4 skews the roll toward weak; STP caps how strong it can get.
+	const float Potential = FMath::Clamp(Storm.STP / 4.f, 0.25f, 1.f);
+	const float MaxWind = FMath::Clamp(30.f + 75.f * FMath::Pow(RandA, 4.f) * Potential, 30.f, 105.f);
 	const float Core = FMath::Lerp(40.f, 250.f, FMath::Clamp((MaxWind - 30.f) / 70.f, 0.f, 1.f)) * (0.7f + 0.6f * RandB);
 	const float Life = 120.f + 900.f * RandB * FMath::Clamp(Storm.STP / 2.f, 0.3f, 1.f);
 	const FVector TrackVel = Storm.Velocity.Size2D() > 1.0 ? Storm.Velocity : FVector(10, 0, 0);
@@ -201,7 +203,7 @@ AAerosTornado* UAerosStormManager::ForceTornado(int32 StormId)
 	{
 		FAerosStormData S = *Best;
 		S.STP = FMath::Max(S.STP, 1.5f);
-		return SpawnTornado(S, FMath::FRand(), FMath::FRand());
+		return SpawnTornado(S, FMath::FRandRange(0.75f, 1.f), FMath::FRand()); // a forced tornado should be worth watching
 	}
 
 	// No storm: spawn near the viewer so the feature can be tested anywhere
