@@ -146,10 +146,11 @@ def create_default_texture():
 #   Wx  weather map  (R cover, G base 0-5 km, B top 0-16 km, A precipitation)
 #   Sx  shape map    (R anvil cover, G updraft, B gust front / shelf cloud, A convective activity)
 #   VP/VC voxel grids (previous / current) around the viewer, built from the simulation (FAerosCloudVolume)
-#   N   3D Perlin-Worley shape noise (engine volume texture, 6 km tiles: ~1 km cumulus cells)
-#   E   3D Worley erosion noise (0.8 km tiles)
-# Placement: a cellular cumulus field (1.6 km cells, one dome-shaped puff per cell with probability =
-# cover), merging into towers where cover is high. In the spirit of Horizon / Nubis, 3D noises then
+#   N   3D Perlin-Worley shape noise (engine volume texture, single channel, 6 km tiles: km-scale lobes)
+#   N2  same shape noise at 3 km tiles: 150-600 m bubbles (cauliflower turrets); N and N2 read at mip 1
+#   E   3D Worley erosion noise (4 km tiles; smaller tiles alias into grain at a few km)
+# Placement: a cellular cumulus field (1.1 km cells, one puff per cell with probability = cover), shallow
+# in fair weather, growing into towers where the column is convective. In the spirit of Horizon / Nubis, 3D noises then
 # erode the edges (billowy cauliflower at the top, wispy at the base), flat dark bases. Extra layers: anvils near the tropopause
 # spreading downwind, layered shelf clouds along gust fronts.
 CLOUD_HLSL = r"""
@@ -162,42 +163,51 @@ float gust    = Sx.b;
 float conv    = Sx.a;
 float h       = saturate((AltKm - baseKm) / (topKm - baseKm));
 
-// --- Where the clouds are: a cellular cumulus field (1.6 km cells). Each cell holds a cloud with
-// probability = cover; its radius grows with cover so a 100 % sky (storms) merges into one mass.
-// Each puff is a dome: its radius shrinks toward the top (cumulus) or stays wide (towers, conv).
-float2 q = P.xy / 1.3 + (N.gb - 0.5) * 0.35;   // domain warp: no perfect circles
+// --- Where the clouds are: a cellular cumulus field (1.1 km cells). Each cell holds a cloud with
+// probability = cover. Fair-weather cumulus stay shallow (humilis / mediocris, 0.6-2.5 km deep);
+// only where the column is convective (conv) do they grow into congestus and towers up to the top.
+float towerK  = smoothstep(0.3, 0.7, conv);
+float cuDepth = lerp(0.6 + 1.9 * cover, topKm - baseKm, towerK);
+
+// The engine cloud noises are single-channel (R = G = B, A = 1) and squeezed into a narrow range
+// (shape: 80 % of the texels between 0.83 and 0.94, erosion: 0.57-0.82): stretch them to 0-1.
+float lowFbm  = saturate((N.r  - 0.78) / 0.18);   // billowy Perlin-Worley, 6 km tiles: km-scale lobes
+float bubbles = saturate((N2.r - 0.78) / 0.18);   // same noise, 3 km tiles: 150-600 m turrets
+float highFbm = saturate((E.r  - 0.45) / 0.45);   // Worley, 4 km tiles: 100 m detail
+float highMod = lerp(highFbm, 1.0 - highFbm, saturate(h * 3.0));   // wispy base, billowy top
+
+float2 q = P.xy / 1.1 + float2(lowFbm - 0.5, bubbles - 0.5) * 0.6;   // domain warp: no perfect circles
 float2 qi = floor(q);
-float puff = 0.0;
+float shape = -1.0;   // 1 at a cloud centre, 0 on its outline, < 0 outside
 for (int j = -1; j <= 1; j++)
 {
     for (int i = -1; i <= 1; i++)
     {
         float2 c = qi + float2(i, j);
         float3 r = frac(sin(float3(dot(c, float2(127.1, 311.7)), dot(c, float2(269.5, 183.3)), dot(c, float2(419.2, 371.9)))) * 43758.5453);
-        if (r.z > cover * 1.15) continue;
-        // Each cloud has its own top (50-100 % of the layer): a field of uneven cumulus
-        float topCell = baseKm + (topKm - baseKm) * (0.5 + 0.5 * frac(r.y * 7.13));
+        if (r.z > cover * 1.1) continue;
+        // Each cloud has its own top (45-100 % of the depth): a field of uneven cumulus
+        float topCell = baseKm + cuDepth * (0.45 + 0.55 * frac(r.y * 7.13));
+        topCell -= (topCell - baseKm) * 0.4 * (1.0 - bubbles);   // turrets of uneven height
         if (AltKm > topCell) continue;
         float hc = saturate((AltKm - baseKm) / max(topCell - baseKm, 0.1));
-        float domeC = lerp(sqrt(saturate(1.0 - hc * hc)), 1.0 - 0.35 * hc, conv);
-        float2 center = c + 0.15 + 0.7 * r.xy;
-        float radius = (0.35 + 0.55 * cover) * (0.75 + 0.5 * r.x) * domeC + updraft * 0.4;
-        radius *= lerp(1.0, 0.75 + 0.5 * N.r, conv);   // towers: bulging turrets up the sides
-        puff = max(puff, saturate(1.0 - length(q - center) / max(radius, 0.01)));
+        // Near-vertical sides, rounded top: a cumulus, not a hemisphere
+        float side = sqrt(saturate(1.0 - hc * hc * hc));
+        float2 center = c + 0.2 + 0.6 * r.xy;
+        float radius = (0.3 + 0.35 * cover) * (0.7 + 0.6 * r.x) * side + updraft * 0.4;
+        radius *= lerp(1.0, 0.75 + 0.5 * lowFbm, towerK);   // towers: bulging turrets up the sides
+        shape = max(shape, 1.0 - length(q - center) / max(radius, 0.01));
     }
 }
 
-// Height profile: sharp flat base (100 m), soft top (the dome does the rest)
-float profile = saturate((AltKm - baseKm) / 0.1) * saturate((topKm - AltKm) / max(0.15 * (topKm - baseKm), 0.15));
-float cloud = saturate(puff * 2.2) * profile;
-
-// --- Detail: the 3D noises only erode the edges. Billowy (inverted Worley) at the top,
-// wispy at the base, low-frequency Perlin-Worley breaks the round outline.
-float lowFbm  = N.g * 0.625 + N.b * 0.25 + N.a * 0.125;
-float highFbm = E.r * 0.625 + E.g * 0.25 + E.b * 0.125;
-float highMod = lerp(highFbm, 1.0 - highFbm, saturate(h * 3.0));
-cloud = saturate((cloud - (1.0 - lowFbm) * 0.45) / 0.55);
-cloud = saturate((cloud - highMod * 0.5) / 0.5);
+// Nubis-style carving: the cell field only gives the coverage; Worley bubbles (150-600 m) decide
+// what is cloud. In the core every bubble survives, near the outline only the biggest ones:
+// a cauliflower made of many turrets, not one ball. Then 100 m erosion and a crisp, dense edge.
+float baseCut = saturate((AltKm - baseKm) / 0.08);
+float cv      = saturate(shape * 1.6 + 0.35) * baseCut;
+float cloud   = saturate((bubbles - (1.0 - cv)) / max(cv, 0.05));
+cloud = saturate((cloud - highMod * 0.15) / 0.85);
+cloud = saturate(cloud * 3.0);
 
 // --- Anvil: thin flat sheet 9.8-12.4 km, ragged fibrous edges, thinner far downwind
 float anvilBand = saturate((AltKm - 9.8) / 0.7) * saturate((12.4 - AltKm) / 0.35);
@@ -205,7 +215,7 @@ float anvil     = anvilBand * saturate(anvilCv * 1.3 - (1.0 - lowFbm) * 0.5) * (
 
 // --- Shelf cloud: layered wedge between 0.4 and 1.9 km along the gust front
 float shelfBand = saturate((AltKm - 0.45) / 0.08) * saturate((1.9 - AltKm) / 0.6);
-float layers    = 0.6 + 0.4 * sin(AltKm * 38.0 + N.g * 5.0);
+float layers    = 0.6 + 0.4 * sin(AltKm * 38.0 + lowFbm * 5.0);
 float shelf     = gust * shelfBand * layers * saturate(lowFbm * 1.5 - 0.2);
 
 // --- Voxel grid (storm anatomy synthesised from the simulation), eroded by the same noises.
@@ -215,13 +225,16 @@ float2 edgeUV = abs(VU.xy - 0.5) * 2.0;
 float voxIn   = Weight * (1.0 - smoothstep(0.875, 1.0, max(edgeUV.x, edgeUV.y)));
 float voxRaw  = lerp(VP.r, VC.r, Blend);
 float voxDark = lerp(VP.g, VC.g, Blend);
-float vox     = saturate((voxRaw - (1.0 - lowFbm) * 0.5) / 0.5);   // billows at the km scale
-vox = saturate((vox - highMod * 0.45) / 0.55);                        // cauliflower / wisps
+float voxCv   = saturate(voxRaw * 2.0);   // a narrow carved rim, solid core
+float vox     = saturate((bubbles - (1.0 - voxCv)) / max(voxCv, 0.05));   // turrets
+vox = saturate(saturate((vox - highMod * 0.15) / 0.85) * 2.5);
 
 float full2D      = max(cloud, max(anvil * 0.4, shelf * 0.9));
 float cumulusOnly = cloud * (1.0 - smoothstep(0.2, 0.4, conv));
 float density = lerp(full2D, max(cumulusOnly, vox), voxIn);
-float dark    = lerp(saturate(Wx.a * 1.2 + conv * h * 0.3), max(saturate(Wx.a * 0.5), voxDark), voxIn);
+// Rain greys only the lower cloud (liquid, below ~6 km); the glaciated tops stay white
+float rainDark = saturate(Wx.a * 1.2) * (1.0 - smoothstep(4.0, 7.0, AltKm));
+float dark    = lerp(rainDark, max(rainDark * 0.4, voxDark), voxIn);
 return float4(density, dark, anvil, shelf);
 """
 
@@ -263,13 +276,31 @@ def create_cloud_material(default_tex):
                  default_value=unreal.LinearColor(0, 0, 0, 0))
     pos = binop(mat, unreal.MaterialExpressionSubtract, wp_km, drift, -1800, 500)
     uvw_shape = binop(mat, unreal.MaterialExpressionMultiply, pos, const(mat, 1.0 / 6.0, -1800, 650), -1600, 550)
-    uvw_erosion = binop(mat, unreal.MaterialExpressionMultiply, pos, const(mat, 1.0 / 0.8, -1800, 750), -1600, 700)
-    noise_shape = node(mat, unreal.MaterialExpressionTextureSample, -1300, 800,
+    uvw_erosion = binop(mat, unreal.MaterialExpressionMultiply, pos, const(mat, 1.0 / 4.0, -1800, 750), -1600, 700)
+    uvw_bubbles = binop(mat, unreal.MaterialExpressionMultiply, pos, const(mat, 1.0 / 3.0, -1800, 1300), -1600, 1300)
+    # Mip 1 for the shape noises: their 1-2 texel detail is sub-pixel a few km away and sparkles
+    mip1 = dict(mip_value_mode=unreal.TextureMipValueMode.TMVM_MIP_LEVEL, const_mip_value=1)
+    noise_shape = node(mat, unreal.MaterialExpressionTextureSample, -1300, 800, **mip1,
                        texture=unreal.load_asset("/Engine/EngineSky/VolumetricClouds/T_VolumeNoiseShape128"))
     link(uvw_shape, "", noise_shape, "UVs")
     noise_erosion = node(mat, unreal.MaterialExpressionTextureSample, -1300, 1050,
                          texture=unreal.load_asset("/Engine/EngineSky/VolumetricClouds/T_VolumeNoiseErosion32"))
     link(uvw_erosion, "", noise_erosion, "UVs")
+    noise_bubbles = node(mat, unreal.MaterialExpressionTextureSample, -1300, 1250, **mip1,
+                         texture=unreal.load_asset("/Engine/EngineSky/VolumetricClouds/T_VolumeNoiseShape128"))
+    link(uvw_bubbles, "", noise_bubbles, "UVs")
+
+    # Voxel domain warp (+-1.2 km): the engine noise is single-channel, so take R of two samples at
+    # different scales and stretch them (0.78-0.96 -> 0-1)
+    warp_xy = node(mat, unreal.MaterialExpressionAppendVector, -1900, 1300)
+    link(mask(mat, noise_shape, -2050, 1250, r=True, src_out="RGBA"), "", warp_xy, "A")
+    link(mask(mat, noise_bubbles, -2050, 1320, r=True, src_out="RGBA"), "", warp_xy, "B")
+    warp_xy = binop(mat, unreal.MaterialExpressionSubtract, warp_xy, const(mat, 0.78, -1900, 1380), -1800, 1300)
+    warp_xy = binop(mat, unreal.MaterialExpressionDivide, warp_xy, const(mat, 0.18, -1800, 1380), -1700, 1300)
+    warp_sat = node(mat, unreal.MaterialExpressionSaturate, -1600, 1300)
+    link(warp_xy, "", warp_sat, "")
+    warp_xy = binop(mat, unreal.MaterialExpressionSubtract, warp_sat, const(mat, 0.5, -1600, 1380), -1500, 1300)
+    warp_xy = binop(mat, unreal.MaterialExpressionMultiply, warp_xy, const(mat, 240000.0, -1500, 1380), -1400, 1300)
 
     # Voxel grids: UVW = ((WorldXY - Rect.xy) / Rect.z + 0.5, AltKm / Rect.w), one rect per buffer
     default_volume = unreal.load_asset("/Engine/EngineSky/VolumetricClouds/T_VolumeNoiseShape64")
@@ -287,10 +318,7 @@ def create_cloud_material(default_tex):
         uv_v = binop(mat, unreal.MaterialExpressionDivide, rel_v, r_z, -1700, y)
         uv_v = binop(mat, unreal.MaterialExpressionAdd, uv_v, const(mat, 0.5, -1700, y + 80), -1550, y)
         # Domain warp by the shape noise (+-1.2 km): breaks the voxel cylinders into bulging turrets
-        warp = mask(mat, noise_shape, -1700, y + 200, g=True, b=True, src_out="RGBA")
-        warp = binop(mat, unreal.MaterialExpressionSubtract, warp, const(mat, 0.5, -1700, y + 260), -1600, y + 200)
-        warp = binop(mat, unreal.MaterialExpressionMultiply, warp, const(mat, 240000.0, -1700, y + 300), -1500, y + 200)
-        warp = binop(mat, unreal.MaterialExpressionDivide, warp, r_z, -1400, y + 200)
+        warp = binop(mat, unreal.MaterialExpressionDivide, warp_xy, r_z, -1400, y + 200)
         uv_v = binop(mat, unreal.MaterialExpressionAdd, uv_v, warp, -1450, y + 40)
         w_v = binop(mat, unreal.MaterialExpressionDivide, alt, r_w, -1550, y + 120)
         uvw_v = node(mat, unreal.MaterialExpressionAppendVector, -1400, y)
@@ -308,7 +336,7 @@ def create_cloud_material(default_tex):
     custom.set_editor_property("description", "AerosCloudDensity")
     custom.set_editor_property("output_type", unreal.CustomMaterialOutputType.CMOT_FLOAT4)
     inputs = []
-    for name in ["AltKm", "P", "Wx", "Sx", "N", "E", "VP", "VC", "VU", "Blend", "Weight"]:
+    for name in ["AltKm", "P", "Wx", "Sx", "N", "N2", "E", "VP", "VC", "VU", "Blend", "Weight"]:
         ci = unreal.CustomInput()
         ci.set_editor_property("input_name", name)
         inputs.append(ci)
@@ -320,6 +348,7 @@ def create_cloud_material(default_tex):
     link(shape_map, "RGBA", custom, "Sx")
     link(noise_shape, "RGBA", custom, "N")
     link(noise_erosion, "RGBA", custom, "E")
+    link(noise_bubbles, "RGBA", custom, "N2")
     link(vox_samples[0], "RGBA", custom, "VP")
     link(vox_samples[1], "RGBA", custom, "VC")
     link(vox_uvw[1], "", custom, "VU")
@@ -338,8 +367,8 @@ def create_cloud_material(default_tex):
 
     # Albedo: bright white tops, slightly grey in storm cores
     albedo = node(mat, unreal.MaterialExpressionLinearInterpolate, 50, 100)
-    link(node(mat, unreal.MaterialExpressionConstant3Vector, -150, 50, constant=unreal.LinearColor(0.95, 0.95, 0.97, 1)), "", albedo, "A")
-    link(node(mat, unreal.MaterialExpressionConstant3Vector, -150, 150, constant=unreal.LinearColor(0.75, 0.77, 0.8, 1)), "", albedo, "B")
+    link(node(mat, unreal.MaterialExpressionConstant3Vector, -150, 50, constant=unreal.LinearColor(0.92, 0.92, 0.94, 1)), "", albedo, "A")
+    link(node(mat, unreal.MaterialExpressionConstant3Vector, -150, 150, constant=unreal.LinearColor(0.55, 0.57, 0.6, 1)), "", albedo, "B")
     link(dark, "", albedo, "Alpha")
     mel.connect_material_property(albedo, "", unreal.MaterialProperty.MP_BASE_COLOR)
 
@@ -363,8 +392,8 @@ def create_cloud_material(default_tex):
 
     advanced = node(mat, unreal.MaterialExpressionVolumetricAdvancedMaterialOutput, 700, 1200)
     for key, value in [("const_phase_g", 0.6), ("const_phase_g2", -0.25), ("const_phase_blend", 0.3),
-                       ("multi_scattering_approximation_octave_count", 2), ("const_multi_scattering_contribution", 0.5),
-                       ("const_multi_scattering_occlusion", 0.4), ("const_multi_scattering_eccentricity", 0.5)]:
+                       ("multi_scattering_approximation_octave_count", 2), ("const_multi_scattering_contribution", 0.4),
+                       ("const_multi_scattering_occlusion", 0.6), ("const_multi_scattering_eccentricity", 0.5)]:
         try:
             advanced.set_editor_property(key, value)
         except Exception as e:

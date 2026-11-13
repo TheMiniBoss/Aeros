@@ -14,6 +14,7 @@
 #include "Engine/Texture2D.h"
 #include "Engine/VolumeTexture.h"
 #include "EngineUtils.h"
+#include "HAL/IConsoleManager.h"
 
 AAerosWeatherController::AAerosWeatherController()
 {
@@ -71,7 +72,19 @@ void AAerosWeatherController::BindCloudMaterial()
 	// Storm towers must be visible from far away (default 50 km hid everything beyond),
 	// with more samples so the longer rays keep their detail
 	Cloud->SetTracingMaxDistance(180.f);
-	Cloud->SetViewSampleCountScale(2.f);
+	Cloud->SetViewSampleCountScale(CloudSampleScale);
+	// Self-shadowing through a whole 12-15 km tower (default 15 km): dark storm bases
+	Cloud->SetShadowTracingDistance(25.f);
+	Cloud->SetSkyLightCloudBottomOcclusion(0.75f);
+	// Default (quarter-res tracing + temporal) turns into grain when the time scale makes clouds
+	// move fast: the history no longer matches. Half-res tracing keeps the edges sharp.
+	if (bSharpCloudTracing)
+	{
+		if (IConsoleVariable* Mode = IConsoleManager::Get().FindConsoleVariable(TEXT("r.VolumetricRenderTarget.Mode")))
+		{
+			Mode->Set(1, ECVF_SetByGameSetting);
+		}
+	}
 }
 
 void AAerosWeatherController::Tick(float DeltaSeconds)

@@ -502,7 +502,7 @@ void AAerosDemoPawn::BuildTour()
 	Tour.Add(S);
 
 	S.Title = Title(3, TEXT("une supercellule"));
-	S.Caption = TEXT("Vue de c\u00F4t\u00E9, \u00E0 40 km. La tour monte jusqu'au sommet de la troposph\u00E8re et penche avec le vent d'altitude ; l\u00E0-haut elle s'\u00E9tale en enclume. Sous la base : le c\u0153ur de pluie sombre, le nuage-mur d'o\u00F9 naissent les tornades, et sur le flanc une ligne de tours plus petites.");
+	S.Caption = TEXT("Vue de c\u00F4t\u00E9, \u00E0 25 km. La tour monte jusqu'au sommet de la troposph\u00E8re et penche avec le vent d'altitude ; l\u00E0-haut elle s'\u00E9tale en enclume. Sous la base : le c\u0153ur de pluie sombre, le nuage-mur d'o\u00F9 naissent les tornades, et sur le flanc une ligne de tours plus petites.");
 	S.Shot = TEXT("03_supercellule");
 	S.Duration = 9.f;
 	S.Enter = [this, Sub]()
@@ -516,7 +516,8 @@ void AAerosDemoPawn::BuildTour()
 		Wind = Wind.GetSafeNormal2D();
 		if (Wind.IsNearlyZero()) Wind = FVector(1, 0, 0);
 		const FVector Side(-Wind.Y, Wind.X, 0.0);
-		TeleportLookAt(Storm.UpdraftLocation + Side * 4000000.0 + FVector(0, 0, 30000.0), Storm.UpdraftLocation + FVector(0, 0, 450000.0)); // below the cumulus bases, like a storm chaser
+		// 25 km: well inside the voxel grid around the camera (it fades out from 35 km)
+		TeleportLookAt(Storm.UpdraftLocation + Side * 2500000.0 + FVector(0, 0, 400000.0), Storm.UpdraftLocation + FVector(0, 0, 600000.0)); // 4 km: above the fair-weather cumulus tops, which hide the tower from the ground
 	};
 	Tour.Add(S);
 

@@ -236,8 +236,9 @@ void FAerosCloudVolume::Build(const FAerosSnapshot& Snap, const FAerosCloudVolum
 						const float D = FMath::Sqrt(FMath::Square(PX - (Sh.UX + DX5 * Lean)) + FMath::Square(PY - (Sh.UY + DY5 * Lean)));
 						const float Dome = Alt > Sh.EL - 1.f ? FMath::Sqrt(FMath::Max(1.f - FMath::Square(Alt - (Sh.EL - 1.f)), 0.f)) : 1.f;
 						const float R = Sh.TowerR * FMath::Max(Dome, 0.05f);
+						// No darkness here: the glaciated upper tower is bright white; its dark base comes
+						// from the renderer's self-shadowing, not from the albedo
 						Dens = FMath::Max(Dens, 1.f - Smooth(0.6f * R, R, D));
-						Dark = FMath::Max(Dark, 0.3f * Conv * (Alt - Sh.LCL) / (Sh.EL - Sh.LCL));
 					}
 					// Overshooting top above the EL
 					if (Sh.Overshoot > 0.f && Alt > Sh.EL && Alt < Sh.EL + Sh.Overshoot)

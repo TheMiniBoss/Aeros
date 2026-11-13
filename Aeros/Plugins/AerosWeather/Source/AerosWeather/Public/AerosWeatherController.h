@@ -56,6 +56,16 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Aeros|Scene")
 	TObjectPtr<UMaterialInterface> CloudMaterial;
 
+	/** Trace the clouds at half resolution (r.VolumetricRenderTarget.Mode 1) instead of a quarter:
+	 *  sharp cloud edges seen from the ground, about 1-2 ms more. Off = keep the project setting. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Aeros|Scene")
+	bool bSharpCloudTracing = true;
+
+	/** Cloud view-ray sample count scale. 1.25: ~12 ms GPU from the ground, ~18-20 ms above a cumulus
+	 *  field (1336x751, half-res tracing). 2: smoother towers, ~26 ms from above. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Aeros|Scene", meta = (ClampMin = "0.25", ClampMax = "4"))
+	float CloudSampleScale = 1.25f;
+
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Aeros|Scene")
 	bool bDriveSun = true;
 
