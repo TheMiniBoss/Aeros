@@ -1259,8 +1259,8 @@ void FAerosSimulation::DetectAndTrackStorms(float Interval)
 	{
 		if (Labels[Seed] != -1 || !InMask(Seed)) continue;
 		const int32 Label = Comps.Num();
-		FComp& Cp = Comps.AddDefaulted_GetRef();
-		Cp.Start = CompCells.Num();
+		FComp& Comp = Comps.AddDefaulted_GetRef();
+		Comp.Start = CompCells.Num();
 		Stack.Reset();
 		Stack.Add(Seed);
 		Labels[Seed] = Label;
@@ -1271,20 +1271,20 @@ void FAerosSimulation::DetectAndTrackStorms(float Interval)
 			const FAerosCell& C = Cells[K];
 			const int32 I = K % NX, J = K / NX;
 			const float W = C.Conv + 0.01f;
-			Cp.SumW += W; Cp.SumX += W * (I + 0.5f) * DX; Cp.SumY += W * (J + 0.5f) * DX;
-			Cp.SumSU += W * C.StormU; Cp.SumSV += W * C.StormV;
-			++Cp.Count;
-			Cp.MaxDBZ = FMath::Max(Cp.MaxDBZ, C.DBZ);
-			if (C.W > Cp.MaxW) { Cp.MaxW = C.W; Cp.WIdx = K; Cp.CAPE = C.CAPE; Cp.SRH01 = C.SRH01; Cp.SRH03 = C.SRH03; Cp.Shear = C.Shear06; Cp.LCL = C.LCL; }
-			if (C.Hail > Cp.MaxHail) { Cp.MaxHail = C.Hail; Cp.HailIdx = K; }
-			Cp.MaxRain = FMath::Max(Cp.MaxRain, C.PrecipRate);
-			Cp.MaxConv = FMath::Max(Cp.MaxConv, C.Conv);
-			if (C.Conv > 0.05f) Cp.MaxTop = FMath::Max(Cp.MaxTop, C.CloudTop);
-			Cp.MaxLtg = FMath::Max(Cp.MaxLtg, C.Lightning);
-			Cp.SumLtg += C.Lightning;
-			Cp.MaxSTP = FMath::Max(Cp.MaxSTP, C.STP);
-			Cp.MaxSCP = FMath::Max(Cp.MaxSCP, C.SCP);
-			Cp.MaxMeso = FMath::Max(Cp.MaxMeso, C.Meso);
+			Comp.SumW += W; Comp.SumX += W * (I + 0.5f) * DX; Comp.SumY += W * (J + 0.5f) * DX;
+			Comp.SumSU += W * C.StormU; Comp.SumSV += W * C.StormV;
+			++Comp.Count;
+			Comp.MaxDBZ = FMath::Max(Comp.MaxDBZ, C.DBZ);
+			if (C.W > Comp.MaxW) { Comp.MaxW = C.W; Comp.WIdx = K; Comp.CAPE = C.CAPE; Comp.SRH01 = C.SRH01; Comp.SRH03 = C.SRH03; Comp.Shear = C.Shear06; Comp.LCL = C.LCL; }
+			if (C.Hail > Comp.MaxHail) { Comp.MaxHail = C.Hail; Comp.HailIdx = K; }
+			Comp.MaxRain = FMath::Max(Comp.MaxRain, C.PrecipRate);
+			Comp.MaxConv = FMath::Max(Comp.MaxConv, C.Conv);
+			if (C.Conv > 0.05f) Comp.MaxTop = FMath::Max(Comp.MaxTop, C.CloudTop);
+			Comp.MaxLtg = FMath::Max(Comp.MaxLtg, C.Lightning);
+			Comp.SumLtg += C.Lightning;
+			Comp.MaxSTP = FMath::Max(Comp.MaxSTP, C.STP);
+			Comp.MaxSCP = FMath::Max(Comp.MaxSCP, C.SCP);
+			Comp.MaxMeso = FMath::Max(Comp.MaxMeso, C.Meso);
 
 			const int32 Nb[4] = { I > 0 ? K - 1 : -1, I < NX - 1 ? K + 1 : -1, J > 0 ? K - NX : -1, J < NY - 1 ? K + NX : -1 };
 			for (int32 B : Nb)
@@ -1308,9 +1308,9 @@ void FAerosSimulation::DetectAndTrackStorms(float Interval)
 
 	for (int32 K : Order)
 	{
-		const FComp& Cp = Comps[K];
-		const float X = Cp.SumX / Cp.SumW, Y = Cp.SumY / Cp.SumW;
-		const float Radius = FMath::Sqrt(Cp.Count / PI) * DX;
+		const FComp& Comp = Comps[K];
+		const float X = Comp.SumX / Comp.SumW, Y = Comp.SumY / Comp.SumW;
+		const float Radius = FMath::Sqrt(Comp.Count / PI) * DX;
 
 		int32 BestIdx = -1; float BestD = TNumericLimits<float>::Max();
 		for (int32 P = 0; P < Storms.Num(); ++P)
@@ -1324,7 +1324,7 @@ void FAerosSimulation::DetectAndTrackStorms(float Interval)
 		}
 
 		FAerosTrackedStorm T;
-		float VX = Cp.SumSU / Cp.SumW, VY = Cp.SumSV / Cp.SumW;
+		float VX = Comp.SumSU / Comp.SumW, VY = Comp.SumSV / Comp.SumW;
 		if (BestIdx >= 0)
 		{
 			FAerosTrackedStorm& Old = Storms[BestIdx];
@@ -1347,22 +1347,22 @@ void FAerosSimulation::DetectAndTrackStorms(float Interval)
 		D.Location = DomainToWorld(X, Y);
 		D.Velocity = FAerosSnapshot::SimToWorldDir(VX, VY);
 		D.RadiusKm = Radius * 0.001f;
-		D.NumCells = Cp.Count;
-		D.MaxReflectivity = Cp.MaxDBZ;
-		D.MaxUpdraft = Cp.MaxW;
-		D.MaxHail = Cp.MaxHail;
-		D.MaxRainRate = Cp.MaxRain;
-		D.CloudTop = Cp.MaxTop;
-		D.LightningRate = FMath::Min(Cp.MaxLtg + 0.2f * (Cp.SumLtg - Cp.MaxLtg), 120.f);
-		D.CAPE = Cp.CAPE; D.SRH01 = Cp.SRH01; D.SRH03 = Cp.SRH03; D.BulkShear06 = Cp.Shear; D.LCL = Cp.LCL;
-		D.STP = Cp.MaxSTP; D.SCP = Cp.MaxSCP; D.Mesocyclone = Cp.MaxMeso;
-		D.Intensity = FMath::Clamp(FMath::Max((Cp.MaxDBZ - 30.f) / 35.f, Cp.MaxW / 50.f), 0.f, 1.f);
-		D.Type = Cp.MaxMeso > 0.5f ? EAerosStormType::Supercell : (Cp.Count >= 8 ? EAerosStormType::Multicell : EAerosStormType::SingleCell);
+		D.NumCells = Comp.Count;
+		D.MaxReflectivity = Comp.MaxDBZ;
+		D.MaxUpdraft = Comp.MaxW;
+		D.MaxHail = Comp.MaxHail;
+		D.MaxRainRate = Comp.MaxRain;
+		D.CloudTop = Comp.MaxTop;
+		D.LightningRate = FMath::Min(Comp.MaxLtg + 0.2f * (Comp.SumLtg - Comp.MaxLtg), 120.f);
+		D.CAPE = Comp.CAPE; D.SRH01 = Comp.SRH01; D.SRH03 = Comp.SRH03; D.BulkShear06 = Comp.Shear; D.LCL = Comp.LCL;
+		D.STP = Comp.MaxSTP; D.SCP = Comp.MaxSCP; D.Mesocyclone = Comp.MaxMeso;
+		D.Intensity = FMath::Clamp(FMath::Max((Comp.MaxDBZ - 30.f) / 35.f, Comp.MaxW / 50.f), 0.f, 1.f);
+		D.Type = Comp.MaxMeso > 0.5f ? EAerosStormType::Supercell : (Comp.Count >= 8 ? EAerosStormType::Multicell : EAerosStormType::SingleCell);
 		auto CellWorld = [this](int32 Idx) { return DomainToWorld((Idx % NX + 0.5f) * DX, (Idx / NX + 0.5f) * DX); };
-		D.HailCoreLocation = Cp.HailIdx >= 0 ? CellWorld(Cp.HailIdx) : D.Location;
-		D.UpdraftLocation = Cp.WIdx >= 0 ? CellWorld(Cp.WIdx) : D.Location;
+		D.HailCoreLocation = Comp.HailIdx >= 0 ? CellWorld(Comp.HailIdx) : D.Location;
+		D.UpdraftLocation = Comp.WIdx >= 0 ? CellWorld(Comp.WIdx) : D.Location;
 		Next.Add(T);
-		CompOfStorm.Add(FIntPoint(Cp.Start, Cp.Count));
+		CompOfStorm.Add(FIntPoint(Comp.Start, Comp.Count));
 	}
 	Storms = MoveTemp(Next);
 }
