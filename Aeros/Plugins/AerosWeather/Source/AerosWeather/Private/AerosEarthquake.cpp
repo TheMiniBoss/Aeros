@@ -276,17 +276,19 @@ bool UAerosShakeCameraModifier::ModifyCamera(float DeltaTime, FMinimalViewInfo& 
 	const UAerosWeatherSubsystem* Sub = CameraOwner ? UAerosWeatherSubsystem::Get(CameraOwner) : nullptr;
 	if (!Sub) return false;
 
-	float Target = Sub->GetGroundShakingAt(InOutPOV.Location);
-	// Violent wind (tornado, hurricane eyewall) buffets the camera too
+	// Shaking below ~0.015 g is barely felt by people: no camera motion at all
+	float Target = FMath::Max(0.f, Sub->GetGroundShakingAt(InOutPOV.Location) - 0.015f);
+	// Only really violent wind (tornado core, hurricane eyewall) buffets the camera
 	const float Wind = Sub->GetWeatherAtLocation(InOutPOV.Location).WindSpeed;
-	Target += FMath::Max(0.f, Wind - 25.f) / 120.f;
+	Target += FMath::Max(0.f, Wind - 35.f) / 250.f;
 	Target *= UAerosWeatherSettings::Get()->CameraShakeScale;
 	Smoothed = FMath::FInterpTo(Smoothed, Target, DeltaTime, 6.f);
 	if (Smoothed < 0.002f) return false;
 
-	const float A = FMath::Min(Smoothed, 1.5f);
+	// Perceived motion grows slower than acceleration (sqrt): 0.1 g is a clear shake, 1 g is violent
+	const float A = FMath::Min(FMath::Sqrt(Smoothed), 1.f);
 	auto N = [this](float Speed, float Offset) { return FMath::PerlinNoise1D(Time * Speed + Offset); };
-	InOutPOV.Location += FVector(N(9.f, 0.f), N(9.f, 37.f), N(11.f, 71.f) * 0.6f) * A * 35.f;
-	InOutPOV.Rotation += FRotator(N(7.f, 13.f) * A * 1.8f, N(7.f, 29.f) * A * 1.2f, N(5.f, 53.f) * A * 2.2f);
+	InOutPOV.Location += FVector(N(9.f, 0.f), N(9.f, 37.f), N(11.f, 71.f) * 0.5f) * A * 14.f;
+	InOutPOV.Rotation += FRotator(N(7.f, 13.f) * A * 0.7f, N(7.f, 29.f) * A * 0.5f, N(5.f, 53.f) * A * 0.9f);
 	return false;
 }

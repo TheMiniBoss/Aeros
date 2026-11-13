@@ -71,6 +71,8 @@ private:
 		FString Caption;
 		FString Shot;
 		float Duration = 8.f;
+		/** Take the screenshot when a lightning channel is bright on screen (end of step otherwise). */
+		bool bShotOnLightning = false;
 		TFunction<void()> Enter;
 	};
 

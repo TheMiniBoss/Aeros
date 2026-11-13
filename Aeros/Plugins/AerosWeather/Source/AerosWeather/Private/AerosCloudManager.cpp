@@ -121,18 +121,10 @@ void UAerosCloudManager::UpdateTextures()
 
 void UAerosCloudManager::UpdateParameterCollection(float DeltaTime)
 {
-	// Lightning flash near the viewer
-	Flash = FMath::Max(0.f, Flash - DeltaTime * 6.f);
-	if (FAerosSnapshotPtr Cur = Owner->GetSnapshot())
-	{
-		for (const FAerosLightningStrike& S : Cur->Lightning)
-		{
-			if (S.Sequence <= LastStrikeSeq) continue;
-			LastStrikeSeq = S.Sequence;
-			const float DistKm = float(FVector::Dist2D(S.Location, Owner->GetViewerLocation())) * 1e-5f;
-			Flash = FMath::Max(Flash, FMath::Clamp(1.f - DistKm / 30.f, 0.f, 1.f));
-		}
-	}
+	// Lightning flash: driven by the lightning actors, stroke by stroke (they know the timing)
+	if (PendingFlash > 0.f && PendingFlash >= Flash - DeltaTime * 12.f) FlashLocation = PendingLocation;
+	Flash = FMath::Max(PendingFlash, Flash - DeltaTime * 12.f);
+	PendingFlash = 0.f;
 
 	UWorld* World = Owner->GetWorld();
 	if (!Collection || !World) return;

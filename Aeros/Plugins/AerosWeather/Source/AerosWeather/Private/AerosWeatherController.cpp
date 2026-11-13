@@ -120,6 +120,11 @@ void AAerosWeatherController::Tick(float DeltaSeconds)
 		const FVector4 D = Sub->GetDomainRect();
 		CloudMID->SetVectorParameterValue(TEXT("AerosDomain"), FLinearColor(float(D.X), float(D.Y), float(D.Z), float(D.W)));
 		CloudMID->SetScalarParameterValue(TEXT("AerosLightningFlash"), Sub->GetCloudManager() ? Sub->GetCloudManager()->GetLightningFlash() : 0.f);
+		if (Sub->GetCloudManager())
+		{
+			const FVector L = Sub->GetCloudManager()->GetLightningLocation();
+			CloudMID->SetVectorParameterValue(TEXT("AerosLightningPos"), FLinearColor(float(L.X), float(L.Y), float(L.Z), 1.f));
+		}
 	}
 
 	if (SkyRecaptureInterval > 0.f && SkyLight && SkyLight->GetLightComponent())

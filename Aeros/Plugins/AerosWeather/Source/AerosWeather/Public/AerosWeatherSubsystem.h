@@ -323,6 +323,7 @@ private:
 	EAerosPhenomenon ViewerPhenomenon = EAerosPhenomenon::Clear;
 	float PhenomenonCheckTimer = 0.f;
 	int32 LastLightningSeq = 0;
+	TArray<FAerosLightningStrike> PendingStrikes; // waiting for the displayed clock to reach their SimTime
 	TSet<int32> KnownStorms;
 	TSet<int32> KnownCyclones;
 	float RecenterCooldown = 0.f;

@@ -268,7 +268,7 @@ void AAerosDemoHUD::DrawHUD()
 	if (Sub && Sub->GetCloudManager())
 	{
 		const float Flash = Sub->GetCloudManager()->GetLightningFlash();
-		if (Flash > 0.01f) DrawRect(FLinearColor(0.9f, 0.92f, 1.f, Flash * 0.35f), 0, 0, SW, SH);
+		if (Flash > 0.01f) DrawRect(FLinearColor(0.9f, 0.92f, 1.f, Flash * 0.12f), 0, 0, SW, SH); // subtle: the 3D light and clouds do the rest
 	}
 
 	if (!Sub || !Sub->IsSimulationRunning())

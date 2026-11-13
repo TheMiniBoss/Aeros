@@ -5,6 +5,7 @@
 #include "AerosWeatherSettings.h"
 #include "AerosWeatherModule.h"
 #include "AerosStormSystem.h"
+#include "AerosLightning.h"
 #include "AerosTornado.h"
 #include "AerosHurricane.h"
 #include "Core/AerosPhysics.h"

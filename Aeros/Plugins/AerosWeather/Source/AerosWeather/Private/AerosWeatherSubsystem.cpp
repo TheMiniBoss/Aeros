@@ -116,6 +116,7 @@ void UAerosWeatherSubsystem::StartSimulation(const FAerosSimulationSettings& Set
 	Current = SimThread->GetLatestSnapshot();
 	Previous = Current;
 	LastLightningSeq = 0;
+	PendingStrikes.Reset();
 	KnownStorms.Reset();
 	KnownCyclones.Reset();
 	TerrainCenter = FVector(1e30, 0, 0); // forces a terrain sampling pass
@@ -300,16 +301,29 @@ void UAerosWeatherSubsystem::BroadcastEvents()
 		}
 	}
 
-	// Lightning (deterministic, identical on all machines)
+	// Lightning (deterministic, identical on all machines). Each strike carries its own simulated
+	// time inside the physics step: queue it and fire it when the displayed clock reaches it,
+	// so flashes come at random moments instead of in bursts once per step.
 	for (const FAerosLightningStrike& L : Current->Lightning)
 	{
 		if (L.Sequence > LastLightningSeq)
 		{
 			LastLightningSeq = L.Sequence;
-			OnLightningStrike.Broadcast(L);
-			if (StormManager) StormManager->HandleLightning(L);
+			PendingStrikes.Add(L);
 		}
 	}
+	PendingStrikes.Sort([](const FAerosLightningStrike& A, const FAerosLightningStrike& B) { return A.SimTime < B.SimTime; });
+	int32 Fired = 0;
+	while (Fired < PendingStrikes.Num() && PendingStrikes[Fired].SimTime <= DisplayTime)
+	{
+		const FAerosLightningStrike& L = PendingStrikes[Fired++];
+		// Strikes far behind the clock (pause, big time jumps) are not worth showing
+		if (DisplayTime - L.SimTime > 60.0) continue;
+		OnLightningStrike.Broadcast(L);
+		if (StormManager) StormManager->HandleLightning(L);
+	}
+	if (Fired > 0) PendingStrikes.RemoveAt(0, Fired);
+	if (PendingStrikes.Num() > 512) PendingStrikes.RemoveAt(0, PendingStrikes.Num() - 512);
 
 	// Local phenomenon change
 	PhenomenonCheckTimer -= GetWorld() ? GetWorld()->GetDeltaSeconds() : 0.016f;

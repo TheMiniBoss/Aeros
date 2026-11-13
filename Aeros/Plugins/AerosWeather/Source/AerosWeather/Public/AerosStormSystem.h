@@ -123,35 +123,3 @@ private:
 	TObjectPtr<UMaterialInstanceDynamic> ShaftMID;
 	float ShaftOpacity = 0.f;
 };
-
-/** Short-lived cosmetic flash + thunder for a lightning strike (local only). */
-UCLASS(NotPlaceable, Transient)
-class AEROSWEATHER_API AAerosLightningFlash : public AActor
-{
-	GENERATED_BODY()
-
-public:
-	AAerosLightningFlash();
-	virtual void Tick(float DeltaSeconds) override;
-
-	void Fire(const FAerosLightningStrike& Strike, const FVector& ViewerLocation);
-
-	UPROPERTY(VisibleAnywhere, Category = "Aeros")
-	TObjectPtr<UPointLightComponent> Light;
-
-	/** Fallback visual (no LightningSystem Niagara asset): jagged glowing channel, cloud to ground. */
-	UPROPERTY(VisibleAnywhere, Category = "Aeros")
-	TObjectPtr<UInstancedStaticMeshComponent> Bolt;
-
-private:
-	void BuildBolt(const FVector& Top, const FVector& Ground, int32 Seed);
-
-	UPROPERTY(Transient)
-	TObjectPtr<UMaterialInstanceDynamic> BoltMID;
-
-	float Age = 0.f;
-	float Peak = 0.f;
-	float ThunderDelay = -1.f;
-	float ThunderVolume = 1.f;
-	bool bThunderPlayed = true;
-};

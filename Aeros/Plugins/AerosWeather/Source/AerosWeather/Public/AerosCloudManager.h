@@ -38,6 +38,15 @@ public:
 	/** Current lightning flash brightness at the viewer (0-1). */
 	float GetLightningFlash() const { return Flash; }
 
+	/** World location of the brightest strike this frame (the clouds glow around it). */
+	FVector GetLightningLocation() const { return FlashLocation; }
+
+	/** Lightning actors report their current brightness seen from the viewer (0-1) and position, every frame. */
+	void ReportLightningFlash(float Value, const FVector& Location)
+	{
+		if (Value > PendingFlash) { PendingFlash = Value; PendingLocation = Location; }
+	}
+
 	/** Textures refresh rate (Hz). */
 	UPROPERTY(EditAnywhere, Category = "Aeros")
 	float TextureUpdateRate = 20.f;
@@ -60,5 +69,7 @@ private:
 	int32 TexW = 0, TexH = 0;
 	float Timer = 0.f;
 	float Flash = 0.f;
-	int32 LastStrikeSeq = 0;
+	float PendingFlash = 0.f;
+	FVector PendingLocation = FVector::ZeroVector;
+	FVector FlashLocation = FVector(0, 0, -1.0e9);
 };

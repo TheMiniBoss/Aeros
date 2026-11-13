@@ -23,7 +23,8 @@ Les matériaux et les cartes sont des fichiers binaires (`.uasset`, `.umap`) que
 | `Materials/M_AerosVolumetricCloud` | nuages volumétriques pilotés par la simulation (couverture, base, sommet, orages) |
 | `Materials/M_AerosGround` | sol qui se mouille, s'enneige, blanchit sous la grêle, grisit sous la cendre |
 | `Materials/M_AerosWater` | eau translucide des crues, ondes de tempête et tsunamis |
-| `Materials/M_AerosEmissive` | lueur sans éclairage : éclairs (zigzag du nuage au sol) |
+| `Materials/M_AerosEmissive` | lueur sans éclairage (secours) |
+| `Materials/M_AerosLightning` | canal d'éclair : lueur × luminosité par segment (custom data d'instance) |
 | `Materials/M_AerosShaft` | volume translucide doux : rideau de pluie / grêle sous les orages |
 | `Maps/L_AerosDemo` | carte démo avec *GameMode Override* = `AerosDemoGameMode` |
 
@@ -50,7 +51,7 @@ Sans ouvrir l'éditeur : `UnrealEditor-Cmd.exe Aeros.uproject -run=pythonscript 
 | R | radar : réflectivité / vitesse / type de précipitation / **risques** (crue, sable, cendre, tsunami) |
 | X | debug 3D (zones d'orage, flèches de vent) |
 | F1 / Tab | affichage : **simple** → expert → radar seul → caché → aide |
-| **F2** | **visite guidée** : 10 étapes (orage, tornade, volcan, séisme, tsunami, crue, haboob, blizzard), chacune expliquée à l'écran |
+| **F2** | **visite guidée** : 11 étapes (orage, éclairs de nuit, tornade, volcan, séisme, tsunami, crue, haboob, blizzard), chacune expliquée à l'écran |
 
 Les chiffres QWERTY (1-0) marchent aussi pour les scénarios.
 
@@ -60,7 +61,7 @@ Les chiffres QWERTY (1-0) marchent aussi pour les scénarios.
 * **Marqueurs** : un losange au-dessus de chaque orage, tornade, ouragan, volcan et épicentre, avec type et distance. Hors de l'écran, une flèche au bord donne la direction.
 * **Journal d'événements** (en bas à droite) : formation d'orage, tornade, séisme, tsunami, éruption, changement de temps ici.
 * **HUD expert** : tous les chiffres (sondage, CAPE, SRH, STP…).
-* **Visite guidée** (F2) : chaque étape place la caméra, déclenche le phénomène, l'explique et enregistre une capture dans `Saved/Screenshots/<plateforme>/AerosTour/`. En ligne de commande : `-AerosTour` (ou `-AerosTourQuit` pour quitter à la fin, utile pour des captures automatiques).
+* **Visite guidée** (F2) : chaque étape place la caméra, déclenche le phénomène, l'explique et enregistre une capture dans `Saved/Screenshots/<plateforme>/AerosTour/`. En ligne de commande : `-AerosTour` (ou `-AerosTourQuit` pour quitter à la fin, utile pour des captures automatiques) ; `-AerosTourOnly=1,2,3` ne joue que ces étapes. L'étape « éclairs » prend sa capture au moment où un éclair brille.
 
 Console : `aeros.Scenario 0-10`, `aeros.TimeScale X`, `aeros.Time jour heure`, `aeros.Quake M km`, `aeros.Tsunami M`, `aeros.Flood mm`, `aeros.Haboob`, `aeros.Eruption VEI`, `aeros.Live lat lon nom`, `aeros.Bubble`, `aeros.Hurricane`, `aeros.Tornado`, `aeros.Debug 0-2`, `stat Aeros`.
 
@@ -134,7 +135,7 @@ AAerosWeatherNetState     (réseau : seed + horloge + commandes datées)
 * **Convection** : déclenchement par convergence, thermiques et soulèvement méso-échelle (bruit déterministe), croissance/dissipation, poches froides, mésocyclones, subsidence compensatoire.
 * **Microphysique** : condensation, autoconversion (Kessler), chute, évaporation sous la base, type de précipitation (pluie, neige, grésil, pluie verglaçante, grêle).
 * **Grêle** (roadmap) : vitesse terminale `Vt = 9·D^0.8` → plus gros grêlon soutenu par l'updraft `W ≈ 0.5·√(2·CAPE)`, fonte sous l'isotherme 0 °C.
-* **Foudre** : taux de Price & Rind selon le sommet du nuage, impacts tirés de façon déterministe.
+* **Foudre** : taux de Price & Rind selon le sommet du nuage, impacts tirés de façon déterministe. Chaque impact part à son heure simulée exacte (pas en rafale par pas de calcul). Rendu procédural (`AAerosLightningFlash`) : canal fractal (déplacement du point milieu) avec branches récursives ; **négatif nuage-sol** (~90 % : traceur par bonds, 1 à 8 arcs en retour espacés de 40-120 ms, parfois courant continu), **positif** (~10 % : part de l'enclume à 6-15 km du cœur, un arc très puissant, long courant continu), **intra-nuage** (lueur dans le nuage, parfois « rampant » horizontal sous l'enclume). Luminosité, épaisseur et lumière suivent le courant de crête ; le nuage ne s'illumine qu'autour de l'éclair.
 * **Ouragans** : genèse (SST > 26,5 °C, faible cisaillement, humidité), intensité potentielle selon la SST, déclin sur terre, bandes spirales, œil.
 * **Accumulation** : humidité du sol (flaques), neige (cm), grêle au sol, fonte.
 

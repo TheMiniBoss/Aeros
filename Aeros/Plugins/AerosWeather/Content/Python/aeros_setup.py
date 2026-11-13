@@ -10,6 +10,7 @@
 #   Materials/M_AerosWater              translucent water (floods, storm surge, tsunami)
 #   Materials/M_AerosEmissive           unlit glow (lightning bolts, lava)
 #   Materials/M_AerosShaft              soft translucent volume (rain shafts, tornado funnel)
+#   Materials/M_AerosLightning          lightning channel glow, per-segment brightness (instance custom data 0)
 #   Maps/L_AerosDemo                    demo level, GameMode Override = AerosDemoGameMode
 #
 # Each step is independent: if one fails, the others still run, and a summary is
@@ -211,8 +212,21 @@ def create_cloud_material(default_tex):
     mel.connect_material_property(albedo, "", unreal.MaterialProperty.MP_BASE_COLOR)
 
     flash = node(mat, unreal.MaterialExpressionScalarParameter, 450, 700, parameter_name="AerosLightningFlash", default_value=0.0)
+    # Local glow: a strike only lights the cloud around it, (1 - d / 12 km)^2
+    lpos = node(mat, unreal.MaterialExpressionVectorParameter, 450, 900, parameter_name="AerosLightningPos",
+                default_value=unreal.LinearColor(0, 0, -1.0e9, 1))
+    dist = node(mat, unreal.MaterialExpressionDistance, 600, 900)
+    link(wp, "", dist, "A")
+    link(lpos, "", dist, "B")
+    ratio = binop(mat, unreal.MaterialExpressionDivide, dist, const(mat, 1200000.0, 600, 1000), 700, 950)
+    near = node(mat, unreal.MaterialExpressionOneMinus, 800, 950)
+    link(ratio, "", near, "")
+    near_sat = node(mat, unreal.MaterialExpressionSaturate, 900, 950)
+    link(near, "", near_sat, "")
+    falloff = binop(mat, unreal.MaterialExpressionMultiply, near_sat, near_sat, 1000, 950)
     glow = binop(mat, unreal.MaterialExpressionMultiply, density, flash, 750, 650)
-    glow = binop(mat, unreal.MaterialExpressionMultiply, glow, const(mat, 20.0, 750, 800), 900, 650)
+    glow = binop(mat, unreal.MaterialExpressionMultiply, glow, falloff, 900, 700)
+    glow = binop(mat, unreal.MaterialExpressionMultiply, glow, const(mat, 6.0, 900, 800), 1050, 650)
     mel.connect_material_property(glow, "", unreal.MaterialProperty.MP_EMISSIVE_COLOR)
 
     mel.layout_material_expressions(mat)
@@ -312,16 +326,37 @@ def create_emissive_material():
     return mat
 
 
+def create_lightning_material():
+    """Lightning channel: Color * Intensity * per-instance brightness (custom data 0, default 1)."""
+    mat = get_or_create("M_AerosLightning", MAT_DIR, unreal.Material, unreal.MaterialFactoryNew())
+    mel.delete_all_material_expressions(mat)
+    mat.set_editor_property("shading_model", unreal.MaterialShadingModel.MSM_UNLIT)
+    mat.set_editor_property("used_with_instanced_static_meshes", True)
+    color = node(mat, unreal.MaterialExpressionVectorParameter, -700, 0, parameter_name="Color",
+                 default_value=unreal.LinearColor(0.75, 0.82, 1.0, 1.0))
+    inten = node(mat, unreal.MaterialExpressionScalarParameter, -700, 200, parameter_name="Intensity", default_value=50.0)
+    seg = node(mat, unreal.MaterialExpressionPerInstanceCustomData, -700, 320, data_index=0, const_default_value=1.0)
+    glow = binop(mat, unreal.MaterialExpressionMultiply, color, inten, -450, 80)
+    glow = binop(mat, unreal.MaterialExpressionMultiply, glow, seg, -250, 150)
+    mel.connect_material_property(glow, "", unreal.MaterialProperty.MP_EMISSIVE_COLOR)
+    mel.recompile_material(mat)
+    eal.save_loaded_asset(mat)
+    log("Lightning material ready: " + mat.get_path_name())
+    return mat
+
+
 def create_shaft_material():
     """Soft translucent volume (rain shafts, tornado funnel, dust walls): edges fade out."""
     mat = get_or_create("M_AerosShaft", MAT_DIR, unreal.Material, unreal.MaterialFactoryNew())
     mel.delete_all_material_expressions(mat)
     mat.set_editor_property("blend_mode", unreal.BlendMode.BLEND_TRANSLUCENT)
-    mat.set_editor_property("shading_model", unreal.MaterialShadingModel.MSM_UNLIT)
+    # Lit (not unlit): an emissive colour glows at night. Volumetric lighting = lit by sun, sky and lightning.
+    mat.set_editor_property("shading_model", unreal.MaterialShadingModel.MSM_DEFAULT_LIT)
+    mat.set_editor_property("translucency_lighting_mode", unreal.TranslucencyLightingMode.TLM_VOLUMETRIC_NON_DIRECTIONAL)
     mat.set_editor_property("two_sided", True)
     color = node(mat, unreal.MaterialExpressionVectorParameter, -600, 0, parameter_name="Color",
                  default_value=unreal.LinearColor(0.25, 0.28, 0.32, 1.0))
-    mel.connect_material_property(color, "", unreal.MaterialProperty.MP_EMISSIVE_COLOR)
+    mel.connect_material_property(color, "", unreal.MaterialProperty.MP_BASE_COLOR)
     opacity = node(mat, unreal.MaterialExpressionScalarParameter, -600, 200, parameter_name="Opacity", default_value=0.5)
     fresnel = node(mat, unreal.MaterialExpressionFresnel, -600, 320, exponent=1.5)
     soft = node(mat, unreal.MaterialExpressionOneMinus, -400, 320)
@@ -412,6 +447,7 @@ def main():
     step("Water material", create_water_material)
     step("Emissive mat.", create_emissive_material)
     step("Shaft material", create_shaft_material)
+    step("Lightning mat.", create_lightning_material)
     step("Demo map", create_demo_map, assets.get("Cloud material"), assets.get("Ground material"))
 
     log("SUMMARY")
