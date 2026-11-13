@@ -12,6 +12,7 @@
 #include "Components/VolumetricCloudComponent.h"
 #include "Materials/MaterialInstanceDynamic.h"
 #include "Engine/Texture2D.h"
+#include "Engine/VolumeTexture.h"
 #include "EngineUtils.h"
 
 AAerosWeatherController::AAerosWeatherController()
@@ -126,6 +127,19 @@ void AAerosWeatherController::Tick(float DeltaSeconds)
 			if (Clouds->GetCloudShapeMap()) CloudMID->SetTextureParameterValue(TEXT("AerosCloudShapeMap"), Clouds->GetCloudShapeMap());
 			const FVector Off = Clouds->GetCloudNoiseOffsetKm();
 			CloudMID->SetVectorParameterValue(TEXT("AerosNoiseOffset"), FLinearColor(float(Off.X), float(Off.Y), 0.f, 0.f));
+			// Voxel cloud grid (two buffers, each with its own place)
+			if (Clouds->GetCloudVolume(0) && Clouds->GetCloudVolume(1))
+			{
+				CloudMID->SetTextureParameterValue(TEXT("AerosCloudVolumePrev"), Clouds->GetCloudVolume(0));
+				CloudMID->SetTextureParameterValue(TEXT("AerosCloudVolumeCur"), Clouds->GetCloudVolume(1));
+			}
+			for (int32 K = 0; K < 2; ++K)
+			{
+				const FVector4 R = Clouds->GetCloudVolumeRect(K);
+				CloudMID->SetVectorParameterValue(K == 0 ? TEXT("AerosCloudVolumeRectPrev") : TEXT("AerosCloudVolumeRectCur"), FLinearColor(float(R.X), float(R.Y), float(R.Z), float(R.W)));
+			}
+			CloudMID->SetScalarParameterValue(TEXT("AerosCloudVolumeBlend"), Clouds->GetCloudVolumeBlend());
+			CloudMID->SetScalarParameterValue(TEXT("AerosCloudVolumeWeight"), Clouds->GetCloudVolumeWeight());
 		}
 		const FVector4 D = Sub->GetDomainRect();
 		CloudMID->SetVectorParameterValue(TEXT("AerosDomain"), FLinearColor(float(D.X), float(D.Y), float(D.Z), float(D.W)));

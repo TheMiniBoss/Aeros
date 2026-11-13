@@ -17,11 +17,14 @@
 
 #include "CoreMinimal.h"
 #include "UObject/Object.h"
+#include "Core/AerosCloudVolume.h"
+#include "Tasks/Task.h"
 #include "AerosCloudManager.generated.h"
 
 class UAerosWeatherSubsystem;
 class UTexture2D;
 class UMaterialParameterCollection;
+class UVolumeTexture;
 
 UCLASS()
 class AEROSWEATHER_API UAerosCloudManager : public UObject
@@ -43,6 +46,17 @@ public:
 	/** Debug: writes every channel of the weather and cloud shape maps as greyscale PNGs
 	 *  (Saved/AerosDebug/<Prefix>_<channel>.png, north up). */
 	void DumpMaps(const FString& Prefix) const;
+
+	/** 3D cloud grid around the viewer (FAerosCloudVolume), double buffered. Index 0 = previous, 1 = current. */
+	UVolumeTexture* GetCloudVolume(int32 Index) const { return CloudVolumes[Index == 0 ? 1 - CurVolume : CurVolume]; }
+	/** (CenterX cm, CenterY cm, Size cm, Height km) of the previous (0) or current (1) grid. */
+	FVector4 GetCloudVolumeRect(int32 Index) const;
+	/** 0 = previous grid, 1 = current grid (ramps over 1 s after each upload). */
+	float GetCloudVolumeBlend() const { return VolumeBlend; }
+	/** 0 after a jump of more than 40 km until the grid at the new place is uploaded, else 1. */
+	float GetCloudVolumeWeight() const { return VolumeWeight; }
+	/** Debug: grid slices as PNGs (horizontal at 2 km and 10 km, vertical west-east through the centre). */
+	void DumpVolumeSlices(const FString& Prefix) const;
 
 	/** Cloud drift (km, Unreal XY) accumulated from the mid-level wind: offsets the 3D cloud noise. */
 	FVector GetCloudNoiseOffsetKm() const { return NoiseOffsetKm; }
@@ -68,6 +82,7 @@ private:
 	void UpdateTextures();
 	void UpdateParameterCollection(float DeltaTime);
 	void UpdateShapeMap(const class FAerosSnapshot& Snap);
+	void UpdateCloudVolume(float DeltaTime);
 	static void Upload(UTexture2D* Texture, const TArray<FColor>& Pixels, int32 W, int32 H);
 
 	UPROPERTY(Transient) TObjectPtr<UAerosWeatherSubsystem> Owner;
@@ -75,6 +90,7 @@ private:
 	UPROPERTY(Transient) TObjectPtr<UTexture2D> SurfaceMap;
 	UPROPERTY(Transient) TObjectPtr<UTexture2D> HazardMap;
 	UPROPERTY(Transient) TObjectPtr<UTexture2D> ShapeMap;
+	UPROPERTY(Transient) TObjectPtr<UVolumeTexture> CloudVolumes[2];
 	UPROPERTY(Transient) TObjectPtr<UMaterialParameterCollection> Collection;
 
 	TArray<FColor> WeatherPixels;
@@ -85,6 +101,19 @@ private:
 	uint64 ShapeGeneration = MAX_uint64;
 	float ShapeTimer = 0.f;
 	FVector NoiseOffsetKm = FVector::ZeroVector;
+
+	// Voxel grid: one build at a time on a worker task, uploaded into the older texture
+	FAerosCloudVolumeDesc VolumeDescs[2];
+	int32 CurVolume = 1;
+	float VolumeBlend = 1.f;
+	float VolumeWeight = 0.f;
+	float VolumeTimer = 0.f;
+	uint64 VolumeGeneration = MAX_uint64;
+	bool bVolumeBuilding = false;
+	FAerosCloudVolumeDesc BuildingDesc;
+	TSharedPtr<TArray<uint8>, ESPMode::ThreadSafe> BuildingData;
+	TSharedPtr<TArray<uint8>, ESPMode::ThreadSafe> CurVolumeData; // CPU copy of the current grid (debug slices)
+	UE::Tasks::FTask VolumeTask;
 	int32 TexW = 0, TexH = 0;
 	float Timer = 0.f;
 	float Flash = 0.f;

@@ -434,7 +434,11 @@ void AAerosDemoPawn::TickTour(float DeltaSeconds)
 		{
 			if (UAerosWeatherSubsystem* DumpSub = UAerosWeatherSubsystem::Get(this))
 			{
-				if (DumpSub->GetCloudManager()) DumpSub->GetCloudManager()->DumpMaps(Step.Shot);
+				if (DumpSub->GetCloudManager())
+				{
+					DumpSub->GetCloudManager()->DumpMaps(Step.Shot);
+					DumpSub->GetCloudManager()->DumpVolumeSlices(Step.Shot);
+				}
 			}
 		}
 	}

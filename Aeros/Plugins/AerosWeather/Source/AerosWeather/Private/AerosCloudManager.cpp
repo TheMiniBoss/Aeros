@@ -14,6 +14,9 @@
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
 #include "ImageUtils.h"
+#include "Engine/VolumeTexture.h"
+#include "RenderingThread.h"
+#include "RHICommandList.h"
 
 DECLARE_CYCLE_STAT(TEXT("Aeros Cloud Textures"), STAT_AerosCloudTextures, STATGROUP_Aeros);
 
@@ -99,6 +102,103 @@ void UAerosCloudManager::Tick(float DeltaTime)
 		UpdateTextures();
 	}
 	UpdateParameterCollection(DeltaTime);
+	UpdateCloudVolume(DeltaTime);
+}
+
+FVector4 UAerosCloudManager::GetCloudVolumeRect(int32 Index) const
+{
+	const FAerosCloudVolumeDesc& D = VolumeDescs[Index == 0 ? 1 - CurVolume : CurVolume];
+	return FVector4(D.Center.X, D.Center.Y, D.SizeKm * 100000.0, D.HeightKm);
+}
+
+void UAerosCloudManager::UpdateCloudVolume(float DeltaTime)
+{
+	VolumeBlend = FMath::Min(VolumeBlend + DeltaTime, 1.f);
+	VolumeTimer += DeltaTime;
+
+	// A finished build: upload into the older texture, which becomes the current one
+	if (bVolumeBuilding && VolumeTask.IsCompleted())
+	{
+		bVolumeBuilding = false;
+		const int32 Target = 1 - CurVolume;
+		if (!CloudVolumes[Target])
+		{
+			for (int32 K = 0; K < 2; ++K)
+			{
+				UVolumeTexture* T = UVolumeTexture::CreateTransient(BuildingDesc.NX, BuildingDesc.NY, BuildingDesc.NZ, PF_R8G8, FName(K == 0 ? TEXT("AerosCloudVolumeA") : TEXT("AerosCloudVolumeB")));
+				T->SRGB = false;
+				T->Filter = TF_Bilinear;
+				T->UpdateResource();
+				CloudVolumes[K] = T;
+			}
+		}
+		if (FTextureResource* Resource = CloudVolumes[Target]->GetResource())
+		{
+			TSharedPtr<TArray<uint8>, ESPMode::ThreadSafe> Data = BuildingData;
+			const FAerosCloudVolumeDesc Desc = BuildingDesc;
+			ENQUEUE_RENDER_COMMAND(AerosUploadCloudVolume)([Resource, Data, Desc](FRHICommandListImmediate& RHICmdList)
+			{
+				if (!Resource->TextureRHI) return;
+				const FUpdateTextureRegion3D Region(0, 0, 0, 0, 0, 0, Desc.NX, Desc.NY, Desc.NZ);
+				RHICmdList.UpdateTexture3D(Resource->TextureRHI, 0, Region, Desc.NX * 2, Desc.NX * Desc.NY * 2, Data->GetData());
+			});
+			VolumeDescs[Target] = Desc;
+			CurVolume = Target;
+			CurVolumeData = Data;
+			// After a jump the previous grid is somewhere else: show the new one at once
+			VolumeBlend = VolumeWeight > 0.f ? 0.f : 1.f;
+			VolumeWeight = 1.f;
+		}
+	}
+
+	// Start a new build: at most once per second, only when the weather or the place changed
+	FAerosSnapshotPtr Snap = Owner->GetSnapshot();
+	if (bVolumeBuilding || !Snap || !Snap->IsValid()) return;
+	const FVector Center = FAerosCloudVolume::SnapCenter(Owner->GetViewerLocation());
+	const bool bMoved = !Center.Equals(VolumeDescs[CurVolume].Center, 1.0);
+	if (FVector::Dist2D(Center, VolumeDescs[CurVolume].Center) > 4000000.0) VolumeWeight = 0.f; // > 40 km: hide the stale grid
+	if (VolumeTimer < 1.f || (!bMoved && Snap->Generation == VolumeGeneration)) return;
+
+	VolumeTimer = 0.f;
+	VolumeGeneration = Snap->Generation;
+	BuildingDesc = FAerosCloudVolumeDesc();
+	BuildingDesc.Center = Center;
+	BuildingData = MakeShared<TArray<uint8>, ESPMode::ThreadSafe>();
+	bVolumeBuilding = true;
+	TSharedPtr<TArray<uint8>, ESPMode::ThreadSafe> Out = BuildingData;
+	const FAerosCloudVolumeDesc Desc = BuildingDesc;
+	VolumeTask = UE::Tasks::Launch(UE_SOURCE_LOCATION, [Snap, Desc, Out]()
+	{
+		FAerosCloudVolume::Build(*Snap, Desc, *Out);
+	});
+}
+
+void UAerosCloudManager::DumpVolumeSlices(const FString& Prefix) const
+{
+	if (!CurVolumeData.IsValid()) return;
+	const FAerosCloudVolumeDesc& D = VolumeDescs[CurVolume];
+	const TArray<uint8>& G = *CurVolumeData;
+	auto Save = [&Prefix](const TCHAR* Name, int32 W, int32 H, const TArray<FColor>& Pixels)
+	{
+		TArray64<uint8> Png;
+		FImageUtils::PNGCompressImageArray(W, H, Pixels, Png);
+		FFileHelper::SaveArrayToFile(Png, *(FPaths::ProjectSavedDir() / TEXT("AerosDebug") / (Prefix + TEXT("_vox_") + Name + TEXT(".png"))));
+	};
+	auto Voxel = [&G, &D](int32 X, int32 Y, int32 Z) { return G[2 * (X + Y * D.NX + Z * D.NX * D.NY)]; };
+	for (const float AltKm : { 2.f, 10.f })
+	{
+		const int32 Z = FMath::Clamp(int32(AltKm / D.VoxelKmZ()), 0, D.NZ - 1);
+		TArray<FColor> Pixels;
+		Pixels.SetNumUninitialized(D.NX * D.NY);
+		for (int32 Y = 0; Y < D.NY; ++Y)
+			for (int32 X = 0; X < D.NX; ++X) { const uint8 V = Voxel(X, Y, Z); Pixels[X + Y * D.NX] = FColor(V, V, V, 255); }
+		Save(AltKm < 5.f ? TEXT("h2km") : TEXT("h10km"), D.NX, D.NY, Pixels);
+	}
+	TArray<FColor> Side;
+	Side.SetNumUninitialized(D.NX * D.NZ);
+	for (int32 Z = 0; Z < D.NZ; ++Z)
+		for (int32 X = 0; X < D.NX; ++X) { const uint8 V = Voxel(X, D.NY / 2, Z); Side[X + (D.NZ - 1 - Z) * D.NX] = FColor(V, V, V, 255); }
+	Save(TEXT("side"), D.NX, D.NZ, Side);
 }
 
 void UAerosCloudManager::UpdateTextures()
