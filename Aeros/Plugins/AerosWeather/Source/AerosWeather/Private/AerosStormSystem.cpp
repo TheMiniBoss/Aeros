@@ -181,7 +181,15 @@ void AAerosStormSystem::UpdateRainShaft(float DeltaSeconds)
 {
 	if (!ShaftMID) return;
 	// Heavier rain = darker, denser curtain; hail turns it whitish. Fades in and out smoothly.
-	const float Target = StormData.MaxRainRate > 2.f ? FMath::Clamp(StormData.MaxRainRate / 80.f, 0.15f, 0.65f) : 0.f;
+	float Target = StormData.MaxRainRate > 2.f ? FMath::Clamp(StormData.MaxRainRate / 80.f, 0.15f, 0.65f) : 0.f;
+	// Translucent meshes draw over the volumetric clouds (no depth test against them): seen from above
+	// the cloud base, the curtain showed through the storm as a flat ellipse. Up there the real rain is
+	// hidden by the cloud anyway.
+	if (const UAerosWeatherSubsystem* Sub = UAerosWeatherSubsystem::Get(this))
+	{
+		const double ViewerAboveBase = Sub->GetViewerLocation().Z - GetActorLocation().Z;
+		Target *= 1.f - FMath::Clamp(float(ViewerAboveBase) / 100000.f, 0.f, 1.f); // gone 1 km above the base
+	}
 	ShaftOpacity = FMath::FInterpTo(ShaftOpacity, Target, DeltaSeconds, 0.5f);
 	const bool bVisible = ShaftOpacity > 0.01f;
 	RainShaft->SetVisibility(bVisible);

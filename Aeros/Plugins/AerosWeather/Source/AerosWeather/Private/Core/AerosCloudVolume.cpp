@@ -88,6 +88,14 @@ float FAerosCloudVolume::GustFront(const FAerosSnapshot& Snap, int32 I, int32 J)
 	return FMath::Clamp(-Div * 1500.f, 0.f, 1.f) * FMath::Clamp(RainNear / 15.f, 0.f, 1.f) * (Here < 20.f ? 1.f : 0.3f);
 }
 
+void FAerosCloudVolume::AnvilBend(const FVector& WorldCm, float& OutAngle0, float& OutTurn)
+{
+	using namespace AerosCloudVolumeInternal;
+	const float WX = float(WorldCm.X / CmPerKm), WY = float(WorldCm.Y / CmPerKm);
+	OutAngle0 = (ValueNoise(WX, WY, 40.f, 21u) - 0.5f) * 2.f * FMath::DegreesToRadians(10.f);
+	OutTurn = (ValueNoise(WX, WY, 40.f, 22u) - 0.5f) * 2.f * FMath::DegreesToRadians(25.f);
+}
+
 void FAerosCloudVolume::Build(const FAerosSnapshot& Snap, const FAerosCloudVolumeDesc& Desc, TArray<uint8>& OutRG8)
 {
 	using namespace AerosCloudVolumeInternal;
@@ -147,11 +155,24 @@ void FAerosCloudVolume::Build(const FAerosSnapshot& Snap, const FAerosCloudVolum
 		const float Strength = 0.5f + 0.5f * FMath::Clamp((S.CloudTop - 9000.f) / 4000.f, 0.f, 1.f);
 		const float LengthKm = 15.f + 35.f * Strength + 0.8f * FMath::Min(Upper, 20.f);
 		const float AX = Sh.UX + DX5 * Lean, AY = Sh.UY + DY5 * Lean; // starts from the leaning top
+		// Fans out and curves (AnvilBend, simulation frame counter-clockwise = world frame clockwise: Y is flipped)
+		float Angle0 = 0.f, Turn = 0.f;
+		FAerosCloudVolume::AnvilBend(S.UpdraftLocation, Angle0, Turn);
+		const float BaseAngle = FMath::Atan2(DY5, DX5);
+		float PathX = AX, PathY = AY;
 		for (float Along = -2.f; Along <= LengthKm; Along += VXY)
 		{
 			const float Fade = Along < 0.f ? 0.6f : FMath::Sqrt(FMath::Max(1.f - Along / LengthKm, 0.f));
 			const float Radius = 3.f + 0.18f * FMath::Max(Along, 0.f);
-			const float CX = AX + DX5 * Along, CY = AY + DY5 * Along;
+			const float Ang = BaseAngle - (Angle0 + Turn * FMath::Max(Along, 0.f) / LengthKm);
+			float CX = AX + FMath::Cos(Ang) * Along, CY = AY + FMath::Sin(Ang) * Along;
+			if (Along >= 0.f)
+			{
+				CX = PathX;
+				CY = PathY;
+				PathX += FMath::Cos(Ang) * VXY;
+				PathY += FMath::Sin(Ang) * VXY;
+			}
 			const int32 X0 = FMath::FloorToInt((CX - Radius + HalfKm) / VXY), X1 = FMath::CeilToInt((CX + Radius + HalfKm) / VXY);
 			const int32 Y0 = FMath::FloorToInt((CY - Radius + HalfKm) / VXY), Y1 = FMath::CeilToInt((CY + Radius + HalfKm) / VXY);
 			for (int32 Y = FMath::Max(Y0, 0); Y <= FMath::Min(Y1, NY - 1); ++Y)

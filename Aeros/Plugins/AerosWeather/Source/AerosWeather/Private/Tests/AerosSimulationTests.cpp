@@ -205,7 +205,11 @@ bool FAerosCloudVolumeTest::RunTest(const FString& Parameters)
 
 	const float ELkm = St.CloudTop * 0.001f, LCLkm = FMath::Max(St.LCL, 300.f) * 0.001f;
 	const FVector Dir500 = FAerosSnapshot::SimToWorldDir(Snap.Synoptic.Wind500.X, Snap.Synoptic.Wind500.Y).GetSafeNormal2D();
-	const FVector Downwind = St.UpdraftLocation + Dir500 * 2500000.0;
+	// Anvils leave along the 500 hPa wind turned by AnvilBend (sim frame counter-clockwise = world clockwise)
+	float Bend0 = 0.f, BendTurn = 0.f;
+	FAerosCloudVolume::AnvilBend(St.UpdraftLocation, Bend0, BendTurn);
+	const double BendAng = FMath::Atan2(Dir500.Y, Dir500.X) - (Bend0 + 0.2f * BendTurn);
+	const FVector Downwind = St.UpdraftLocation + FVector(FMath::Cos(BendAng), FMath::Sin(BendAng), 0.0) * 2500000.0;
 	const FVector Upwind = St.UpdraftLocation - Dir500 * 3500000.0;
 	TestTrue(TEXT("Tower is dense at mid height"), FAerosCloudVolume::SampleDensity(Grid, Desc, St.UpdraftLocation, 0.5f * (LCLkm + ELkm)) > 0.5f);
 	TestTrue(TEXT("Nothing 2.5 km above the EL"), FAerosCloudVolume::SampleDensity(Grid, Desc, St.UpdraftLocation, ELkm + 2.5f) < 0.05f);
@@ -248,6 +252,25 @@ bool FAerosCloudVolumeTest::RunTest(const FString& Parameters)
 			Prev = Top;
 		}
 		TestTrue(TEXT("Overlapping anvils: top has no step (< 0.7 km between columns 300 m apart)"), MaxStep < 0.7f);
+	}
+
+	// --- Anvil bend: within +-10 deg / +-25 deg, smooth (two cells of one storm agree), varied (storms differ)
+	{
+		float A0 = 0.f, T0 = 0.f, A1 = 0.f, T1 = 0.f, MaxA = 0.f, MinA = 0.f;
+		bool bInRange = true;
+		for (int32 K = 0; K < 64; ++K)
+		{
+			const FVector P(K * 3700000.0, K * -2300000.0, 0.0);
+			FAerosCloudVolume::AnvilBend(P, A0, T0);
+			bInRange &= FMath::Abs(A0) <= FMath::DegreesToRadians(10.01f) && FMath::Abs(T0) <= FMath::DegreesToRadians(25.01f);
+			MaxA = FMath::Max(MaxA, A0);
+			MinA = FMath::Min(MinA, A0);
+		}
+		TestTrue(TEXT("Anvil bend within range"), bInRange);
+		TestTrue(TEXT("Anvil bend varies between storms (> 8 deg spread)"), MaxA - MinA > FMath::DegreesToRadians(8.f));
+		FAerosCloudVolume::AnvilBend(FVector(5000000.0, 3000000.0, 0.0), A0, T0);
+		FAerosCloudVolume::AnvilBend(FVector(5200000.0, 3000000.0, 0.0), A1, T1);
+		TestTrue(TEXT("Anvil bend smooth over 2 km (< 2 deg)"), FMath::Abs(A1 - A0) < FMath::DegreesToRadians(2.f));
 	}
 
 	// --- Storm outside the grid: nothing drawn, no wrap-around

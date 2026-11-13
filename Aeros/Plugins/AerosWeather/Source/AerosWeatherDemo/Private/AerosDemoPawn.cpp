@@ -516,8 +516,22 @@ void AAerosDemoPawn::BuildTour()
 		Wind = Wind.GetSafeNormal2D();
 		if (Wind.IsNearlyZero()) Wind = FVector(1, 0, 0);
 		const FVector Side(-Wind.Y, Wind.X, 0.0);
-		// 25 km: well inside the voxel grid around the camera (it fades out from 35 km)
-		TeleportLookAt(Storm.UpdraftLocation + Side * 2500000.0 + FVector(0, 0, 400000.0), Storm.UpdraftLocation + FVector(0, 0, 600000.0)); // 4 km: above the fair-weather cumulus tops, which hide the tower from the ground
+		// 25 km: well inside the voxel grid around the camera (it fades out from 44 km);
+		// 4 km up: above the fair-weather cumulus tops, which hide the tower from the ground
+		double DistKm = 25.0, AltKm = 4.0, LookAltKm = 6.0, LookAlongKm = 0.0;
+		// Debug framing: -AerosSupercellCam=Dist,Alt,LookAlt,LookAlong (km; LookAlong = downwind offset of the target)
+		FString Cam;
+		if (FParse::Value(FCommandLine::Get(), TEXT("AerosSupercellCam="), Cam, false))
+		{
+			TArray<FString> Parts;
+			Cam.ParseIntoArray(Parts, TEXT(","));
+			if (Parts.Num() > 0) DistKm = FCString::Atod(*Parts[0]);
+			if (Parts.Num() > 1) AltKm = FCString::Atod(*Parts[1]);
+			if (Parts.Num() > 2) LookAltKm = FCString::Atod(*Parts[2]);
+			if (Parts.Num() > 3) LookAlongKm = FCString::Atod(*Parts[3]);
+		}
+		TeleportLookAt(Storm.UpdraftLocation + Side * DistKm * 100000.0 + FVector(0, 0, AltKm * 100000.0),
+			Storm.UpdraftLocation + Wind * LookAlongKm * 100000.0 + FVector(0, 0, LookAltKm * 100000.0));
 	};
 	Tour.Add(S);
 

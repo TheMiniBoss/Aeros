@@ -293,13 +293,26 @@ void UAerosCloudManager::UpdateShapeMap(const FAerosSnapshot& Snap)
 			// Stronger upper wind and stronger storms = longer anvils (15-70 km)
 			const float LengthKm = 15.f + 35.f * Strength + 0.8f * FMath::Min(Upper, 20.f);
 			const int32 Steps = FMath::Max(2, int32(LengthKm / CellKm));
+			// Fans out and curves like the voxel anvils (same AnvilBend): no parallel straight bands
+			float Angle0 = 0.f, Turn = 0.f;
+			FAerosCloudVolume::AnvilBend(Snap.GridToWorld(I + 0.5f, J + 0.5f), Angle0, Turn);
+			const float BaseAngle = FMath::Atan2(float(Dir.Y), float(Dir.X));
+			float PathX = I + 0.5f, PathY = J + 0.5f;
 			for (int32 Step = -2; Step <= Steps; ++Step)
 			{
 				const float Along = float(Step) * CellKm;
 				const float Fade = Step < 0 ? 0.6f : FMath::Sqrt(1.f - float(Step) / float(Steps + 1));
 				const float RadiusCells = (3.f + 0.18f * FMath::Max(Along, 0.f)) / CellKm;
-				const float CX = I + 0.5f + float(Dir.X) * Along / CellKm;
-				const float CY = J + 0.5f + float(Dir.Y) * Along / CellKm;
+				const float Ang = BaseAngle + Angle0 + Turn * FMath::Max(Along, 0.f) / LengthKm;
+				float CX = I + 0.5f + FMath::Cos(Ang) * Along / CellKm;
+				float CY = J + 0.5f + FMath::Sin(Ang) * Along / CellKm;
+				if (Step >= 0)
+				{
+					CX = PathX;
+					CY = PathY;
+					PathX += FMath::Cos(Ang);
+					PathY += FMath::Sin(Ang);
+				}
 				const int32 R = FMath::CeilToInt(RadiusCells);
 				for (int32 DY = -R; DY <= R; ++DY)
 				{

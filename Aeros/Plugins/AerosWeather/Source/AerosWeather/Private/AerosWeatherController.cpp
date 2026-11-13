@@ -73,8 +73,10 @@ void AAerosWeatherController::BindCloudMaterial()
 	// with more samples so the longer rays keep their detail
 	Cloud->SetTracingMaxDistance(180.f);
 	Cloud->SetViewSampleCountScale(CloudSampleScale);
-	// Self-shadowing through a whole 12-15 km tower (default 15 km): dark storm bases
-	Cloud->SetShadowTracingDistance(25.f);
+	// Self-shadowing: 15 km covers a whole tower (dark storm bases); 2x the 10 default samples keeps
+	// the step near 750 m so the lumps of an anvil top shade each other (25 km / 10 samples left it flat white)
+	Cloud->SetShadowTracingDistance(15.f);
+	Cloud->SetShadowViewSampleCountScale(2.f);
 	Cloud->SetSkyLightCloudBottomOcclusion(0.75f);
 	// Default (quarter-res tracing + temporal) turns into grain when the time scale makes clouds
 	// move fast: the history no longer matches. Half-res tracing keeps the edges sharp.

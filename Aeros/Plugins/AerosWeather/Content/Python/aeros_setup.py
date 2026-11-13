@@ -149,7 +149,8 @@ def create_default_texture():
 #   N   3D Perlin-Worley shape noise (engine volume texture, single channel, 6 km tiles: km-scale lobes)
 #   N2  same shape noise at 3 km tiles: 150-600 m bubbles (cauliflower turrets); N and N2 read at mip 1
 #   E   3D Worley erosion noise (4 km tiles; smaller tiles alias into grain at a few km)
-#   F   same erosion noise stretched (16 km x 16 km x 1.5 km tiles): fibrous ice in anvils
+#   F   same erosion noise stretched (16 km x 16 km x 3 km tiles): fibrous ice in anvils
+#   N2, E, F are read at a mip chosen by the distance to the camera (1 + log2(d / 4 km), 1-4)
 # Placement: a cellular cumulus field (1.1 km cells, one puff per cell with probability = cover), shallow
 # in fair weather, growing into towers where the column is convective. In the spirit of Horizon / Nubis, 3D noises then
 # erode the edges (billowy cauliflower at the top, wispy at the base), flat dark bases. Extra layers: anvils near the tropopause
@@ -214,7 +215,8 @@ cloud = saturate(cloud * 3.0);
 // --- Anvil: flat sharp top at the tropopause, ragged base, thinner where the anvil cover fades
 float anvilBase = 12.4 - (0.5 + 2.0 * anvilCv) * (0.75 + 0.5 * lowFbm);
 float anvilBand = saturate((AltKm - anvilBase) / 0.6) * saturate((12.4 - AltKm) / 0.25);
-float anvil     = anvilBand * saturate((anvilCv * 1.3 - (1.0 - lowFbm) * 0.3 - (1.0 - fib) * 0.2) * 2.0);
+// Ragged edges: the noise eats the thin parts first (distant anvils were flat glass plates)
+float anvil     = anvilBand * saturate((anvilCv * 1.5 - (1.0 - lowFbm) * 0.6 - (1.0 - fib) * 0.35) * 2.0);
 
 // --- Shelf cloud: layered wedge between 0.4 and 1.9 km along the gust front
 float shelfBand = saturate((AltKm - 0.45) / 0.08) * saturate((1.9 - AltKm) / 0.6);
@@ -234,7 +236,7 @@ float iceK    = smoothstep(9.0, 11.5, AltKm);
 float voxCv   = saturate(voxRaw * 2.0);   // a narrow carved rim, solid core
 float voxCu   = saturate((bubbles - (1.0 - voxCv)) / max(voxCv, 0.05));   // turrets
 voxCu = saturate(saturate((voxCu - highMod * 0.15) / 0.85) * 2.5);
-float voxIce  = saturate((voxRaw - (1.0 - lowFbm) * 0.2 - (1.0 - fib) * 0.2) * 3.0);
+float voxIce  = saturate((voxRaw - (1.0 - lowFbm) * 0.2 - (1.0 - fib) * 0.12) * 2.5);
 float vox     = lerp(voxCu, voxIce, iceK);
 
 float full2D      = max(cloud, max(anvil, shelf * 0.9));
@@ -286,23 +288,47 @@ def create_cloud_material(default_tex):
     uvw_shape = binop(mat, unreal.MaterialExpressionMultiply, pos, const(mat, 1.0 / 6.0, -1800, 650), -1600, 550)
     uvw_erosion = binop(mat, unreal.MaterialExpressionMultiply, pos, const(mat, 1.0 / 4.0, -1800, 750), -1600, 700)
     uvw_bubbles = binop(mat, unreal.MaterialExpressionMultiply, pos, const(mat, 1.0 / 3.0, -1800, 1300), -1600, 1300)
-    # Mip 1 for the shape noises: their 1-2 texel detail is sub-pixel a few km away and sparkles
+    # Mip 1 for the shape noises: their 1-2 texel detail is sub-pixel a few km away and sparkles.
+    # The detail noises (bubbles, erosion, fibres) go further: mip = 1 + log2(distance / 4 km), 1-4,
+    # a real LOD (at 20+ km even mip 1 detail was sub-pixel speckle on anvils and towers).
     mip1 = dict(mip_value_mode=unreal.TextureMipValueMode.TMVM_MIP_LEVEL, const_mip_value=1)
+    cam_dist = node(mat, unreal.MaterialExpressionDistance, -2200, 1700)
+    link(wp, "", cam_dist, "A")
+    link(node(mat, unreal.MaterialExpressionCameraPositionWS, -2350, 1750), "", cam_dist, "B")
+    lod = binop(mat, unreal.MaterialExpressionDivide, cam_dist, const(mat, 400000.0, -2100, 1800), -2000, 1700)
+    lod = binop(mat, unreal.MaterialExpressionMax, lod, const(mat, 1.0, -2000, 1800), -1900, 1700)
+    lod_log = node(mat, unreal.MaterialExpressionLogarithm2, -1800, 1700)
+    link(lod, "", lod_log, "")
+    lod = binop(mat, unreal.MaterialExpressionAdd, lod_log, const(mat, 1.0, -1800, 1800), -1700, 1700)
+    lod = binop(mat, unreal.MaterialExpressionMin, lod, const(mat, 4.0, -1700, 1800), -1600, 1700)
+    mip_lod = dict(mip_value_mode=unreal.TextureMipValueMode.TMVM_MIP_LEVEL)
+
+    def link_mip(sample):
+        for pin in ["Level", "MipLevel"]:   # the pin is named "Level" in MipLevel mode
+            try:
+                if mel.connect_material_expressions(lod, "", sample, pin):
+                    return
+            except Exception:
+                pass
+        unreal.log_warning("[Aeros] cloud material: could not connect the LOD mip input")
     noise_shape = node(mat, unreal.MaterialExpressionTextureSample, -1300, 800, **mip1,
                        texture=unreal.load_asset("/Engine/EngineSky/VolumetricClouds/T_VolumeNoiseShape128"))
     link(uvw_shape, "", noise_shape, "UVs")
-    noise_erosion = node(mat, unreal.MaterialExpressionTextureSample, -1300, 1050,
+    noise_erosion = node(mat, unreal.MaterialExpressionTextureSample, -1300, 1050, **mip_lod,
                          texture=unreal.load_asset("/Engine/EngineSky/VolumetricClouds/T_VolumeNoiseErosion32"))
     link(uvw_erosion, "", noise_erosion, "UVs")
+    link_mip(noise_erosion)
     uvw_fib = binop(mat, unreal.MaterialExpressionMultiply, pos,
-                    node(mat, unreal.MaterialExpressionConstant3Vector, -1800, 1550, constant=unreal.LinearColor(1.0 / 16.0, 1.0 / 16.0, 1.0 / 1.5, 1)),
+                    node(mat, unreal.MaterialExpressionConstant3Vector, -1800, 1550, constant=unreal.LinearColor(1.0 / 16.0, 1.0 / 16.0, 1.0 / 3.0, 1)),
                     -1600, 1500)
-    noise_fib = node(mat, unreal.MaterialExpressionTextureSample, -1300, 1500,
+    noise_fib = node(mat, unreal.MaterialExpressionTextureSample, -1300, 1500, **mip_lod,
                      texture=unreal.load_asset("/Engine/EngineSky/VolumetricClouds/T_VolumeNoiseErosion32"))
     link(uvw_fib, "", noise_fib, "UVs")
-    noise_bubbles = node(mat, unreal.MaterialExpressionTextureSample, -1300, 1250, **mip1,
+    link_mip(noise_fib)
+    noise_bubbles = node(mat, unreal.MaterialExpressionTextureSample, -1300, 1250, **mip_lod,
                          texture=unreal.load_asset("/Engine/EngineSky/VolumetricClouds/T_VolumeNoiseShape128"))
     link(uvw_bubbles, "", noise_bubbles, "UVs")
+    link_mip(noise_bubbles)
 
     # Voxel domain warp (+-1.2 km): the engine noise is single-channel, so take R of two samples at
     # different scales and stretch them (0.78-0.96 -> 0-1)
@@ -313,8 +339,19 @@ def create_cloud_material(default_tex):
     warp_xy = binop(mat, unreal.MaterialExpressionDivide, warp_xy, const(mat, 0.18, -1800, 1380), -1700, 1300)
     warp_sat = node(mat, unreal.MaterialExpressionSaturate, -1600, 1300)
     link(warp_xy, "", warp_sat, "")
-    warp_xy = binop(mat, unreal.MaterialExpressionSubtract, warp_sat, const(mat, 0.5, -1600, 1380), -1500, 1300)
-    warp_xy = binop(mat, unreal.MaterialExpressionMultiply, warp_xy, const(mat, 240000.0, -1500, 1380), -1400, 1300)
+    warp_c = binop(mat, unreal.MaterialExpressionSubtract, warp_sat, const(mat, 0.5, -1600, 1380), -1500, 1300)
+    warp_xy = binop(mat, unreal.MaterialExpressionMultiply, warp_c, const(mat, 240000.0, -1500, 1380), -1400, 1300)
+    # Vertical warp of the lookup (km), upper levels only (bases stay flat): +-0.5 km swells (6 km tiles)
+    # and +-0.2 km lumps (3 km tiles) -> the anvil top is no longer a flat white plate
+    z_warp = node(mat, unreal.MaterialExpressionDotProduct, -1500, 1450)
+    link(warp_c, "", z_warp, "A")
+    link(node(mat, unreal.MaterialExpressionConstant2Vector, -1600, 1500, r=1.0, g=0.4), "", z_warp, "B")
+    z_fade = binop(mat, unreal.MaterialExpressionSubtract, alt, const(mat, 6.0, -1600, 1580), -1500, 1550)
+    z_fade = binop(mat, unreal.MaterialExpressionDivide, z_fade, const(mat, 3.0, -1500, 1620), -1400, 1550)
+    z_fade_sat = node(mat, unreal.MaterialExpressionSaturate, -1300, 1550)
+    link(z_fade, "", z_fade_sat, "")
+    z_warp = binop(mat, unreal.MaterialExpressionMultiply, z_warp, z_fade_sat, -1300, 1450)
+    alt_warped = binop(mat, unreal.MaterialExpressionAdd, alt, z_warp, -1200, 1450)
 
     # Voxel grids: UVW = ((WorldXY - Rect.xy) / Rect.z + 0.5, AltKm / Rect.w), one rect per buffer
     default_volume = unreal.load_asset("/Engine/EngineSky/VolumetricClouds/T_VolumeNoiseShape64")
@@ -334,7 +371,7 @@ def create_cloud_material(default_tex):
         # Domain warp by the shape noise (+-1.2 km): breaks the voxel cylinders into bulging turrets
         warp = binop(mat, unreal.MaterialExpressionDivide, warp_xy, r_z, -1400, y + 200)
         uv_v = binop(mat, unreal.MaterialExpressionAdd, uv_v, warp, -1450, y + 40)
-        w_v = binop(mat, unreal.MaterialExpressionDivide, alt, r_w, -1550, y + 120)
+        w_v = binop(mat, unreal.MaterialExpressionDivide, alt_warped, r_w, -1550, y + 120)
         uvw_v = node(mat, unreal.MaterialExpressionAppendVector, -1400, y)
         link(uv_v, "", uvw_v, "A")
         link(w_v, "", uvw_v, "B")
@@ -610,6 +647,13 @@ def create_shaft_material():
     soft = node(mat, unreal.MaterialExpressionOneMinus, -400, 320)
     link(fresnel, "", soft, "")
     alpha = binop(mat, unreal.MaterialExpressionMultiply, opacity, soft, -200, 250)
+    # No caps: faces looking up / down fade out (from above a cylinder cap was a flat glass ellipse)
+    n_z = mask(mat, node(mat, unreal.MaterialExpressionVertexNormalWS, -600, 450), -450, 450, b=True)
+    n_abs = node(mat, unreal.MaterialExpressionAbs, -350, 450)
+    link(n_z, "", n_abs, "")
+    side = node(mat, unreal.MaterialExpressionOneMinus, -250, 450)
+    link(n_abs, "", side, "")
+    alpha = binop(mat, unreal.MaterialExpressionMultiply, alpha, side, -100, 300)
     mel.connect_material_property(alpha, "", unreal.MaterialProperty.MP_OPACITY)
     mel.recompile_material(mat)
     eal.save_loaded_asset(mat)

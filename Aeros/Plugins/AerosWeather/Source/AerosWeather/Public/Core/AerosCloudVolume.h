@@ -42,4 +42,10 @@ public:
 
 	/** Gust-front strength (0-1) of a simulation cell: surface convergence next to heavy rain (shelf clouds). */
 	static float GustFront(const FAerosSnapshot& Snap, int32 I, int32 J);
+
+	/** How an anvil leaving a storm at WorldCm departs from the 500 hPa wind: OutAngle0 = initial offset
+	 *  (rad, +-10 deg), OutTurn = extra turn reached at its far end (rad, +-25 deg); both counter-clockwise
+	 *  in the simulation frame (north up). Smooth in space (40 km noise): cells of one storm agree, distant
+	 *  storms differ, so anvils fan out and curve instead of drawing parallel straight bands. */
+	static void AnvilBend(const FVector& WorldCm, float& OutAngle0, float& OutTurn);
 };
