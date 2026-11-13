@@ -4,101 +4,212 @@
 
 #include "CoreMinimal.h"
 #include "HAL/Runnable.h"
+#include "HAL/RunnableThread.h"
 #include "HAL/ThreadSafeBool.h"
+#include "Containers/Queue.h"
+#include "WeatherBuffer.h"
 #include "WeatherTypes.h"
 
-class FRunnableThread;
-class FEvent;
+// ============================================================
+//  WEATHER SIMULATION THREAD
+//  Runs Navier-Stokes + microphysics on a background thread.
+//  Communicates with UWeatherSubsystem via thread-safe queues.
+// ============================================================
 
-// ============================================================
-// M�triques expos�es au GameThread (lecture thread-safe via GetMetrics())
-// ============================================================
-struct FWeatherThreadMetrics
+struct FSimulationState
 {
-    double LastTickDurationMs = 0.0;   // Dur�e du dernier tick de simulation
-    int32  TotalTicksComputed = 0;     // Nombre total de ticks calcul�s
-    int32  SkippedTicks = 0;     // Ticks saut�s (thread encore occup�)
-    int32  LastNewCellsCount = 0;     // Nouvelles cellules g�n�r�es au dernier shift
-    int32  LastShiftX = 0;     // Amplitude du dernier d�calage appliqu�
-    int32  LastShiftY = 0;
+    TArray<FAtmosphericCell> Cells;   // Flat [x + y*NX + z*NX*NY]
+    TArray<FAtmosphericColumn> Columns; // One per (x,y) column
+    float SimTime = 0.f;
+    int32 NX, NY, NZ;
+
+    FORCEINLINE int32 Idx(int32 x, int32 y, int32 z) const
+    {
+        // Periodic wrap in x/y for infinite world
+        x = (x % NX + NX) % NX;
+        y = (y % NY + NY) % NY;
+        z = FMath::Clamp(z, 0, NZ - 1);
+        return x + y * NX + z * NX * NY;
+    }
+
+    FAtmosphericCell& At(int32 x, int32 y, int32 z) { return Cells[Idx(x, y, z)]; }
+    const FAtmosphericCell& At(int32 x, int32 y, int32 z) const { return Cells[Idx(x, y, z)]; }
 };
 
-// ============================================================
-// Thread de simulation m�t�orologique (FRunnable)
-// Calcul asynchrone de l'advection semi-lagrangienne et de la thermodynamique.
-// Le GameThread fournit deux buffers en alternance (double-buffering).
-// ============================================================
+// Command from game thread to simulation thread
+struct FSimCommand
+{
+    enum class EType { SetConfig, InjectPerturbation, Reset } Type;
+    FWeatherSimConfig Config;
+    FVector WorldPos;
+    float   Strength;
+};
+
 class AEROS_API FWeatherSimulationThread : public FRunnable
 {
-    // --- Infra thread ---
-    FRunnableThread* Thread = nullptr;
-    FEvent* WaitEvent = nullptr;  // S�maphore manuel (AutoReset=false)
-
-    // --- �tat thread-safe ---
-    FThreadSafeBool bStopThread{ false };
-    FThreadSafeBool bIsCalculating{ false };
-
-    // --- Param�tres grille (immuables apr�s construction) ---
-    int32 GridSizeX = 0;
-    int32 GridSizeY = 0;
-    float CellSize = 0.f;  // En Unreal Units (cm)
-
-    // --- Buffers fournis par le Subsystem ---
-    // Le thread ne fait QUE lire CurrentReadGrid et �crire dans CurrentWriteGrid.
-    // EXCEPTION : ApplyGridShift modifie CurrentReadGrid en d�but de tick,
-    // ce qui est s�r car le GameThread ne touche plus � ce buffer une fois TriggerCalculation() appel�.
-    TArray<FWeatherCell>* CurrentReadGrid = nullptr;
-    TArray<FWeatherCell>* CurrentWriteGrid = nullptr;
-
-    // --- Commande de d�calage de grille (prot�g�e par mutex) ---
-    // �crit par le GameThread dans AddGridShift(), lu par le thread dans ApplyGridShift().
-    FCriticalSection ShiftLock;
-    int32 PendingShiftX = 0;
-    int32 PendingShiftY = 0;
-    int32 GlobalOffsetX = 0;  // Offset absolu de la grille (en cellules) dans le monde infini
-    int32 GlobalOffsetY = 0;
-
-    // --- M�triques (prot�g�es par mutex pour lecture externe) ---
-    FCriticalSection MetricsLock;
-    FWeatherThreadMetrics Metrics;
-
-    float SimulationTime = 0.f; // Chronom�tre interne pour animer les rafales
-
 public:
-    FWeatherSimulationThread(int32 InGridSizeX, int32 InGridSizeY, float InCellSize);
+    explicit FWeatherSimulationThread(const FWeatherSimConfig& InConfig);
     virtual ~FWeatherSimulationThread();
 
-    virtual bool Init() override;
-    virtual uint32 Run() override;
-    virtual void Stop() override;
-    virtual void Exit() override;
+    //── FRunnable interface ────────────────────────────────
+    virtual bool   Init()    override;
+    virtual uint32 Run()     override;
+    virtual void   Stop()    override;
+    virtual void   Exit()    override;
 
-    // Lance un tick de simulation asynchrone. Ignor� si le thread est encore actif.
-    void TriggerCalculation(TArray<FWeatherCell>* InReadGrid, TArray<FWeatherCell>* InWriteGrid);
-    // Enregistre un d�calage de grille � appliquer au prochain tick.
-    // Thread-safe (prot�g� par mutex).
-    void AddGridShift(int32 DeltaX, int32 DeltaY, int32 InGlobalOffsetX, int32 InGlobalOffsetY);
+    //── Public thread-safe API ─────────────────────────────
+    void SendCommand(const FSimCommand& Cmd);
 
-    bool IsCalculating() const { return bIsCalculating; }
+    float GetSimulationTime() const { return SimTime.load(); }
+    bool  IsRunning()         const { return bIsRunning; }
 
-    // Copie thread-safe des m�triques courantes.
-    FWeatherThreadMetrics GetMetrics();
+    // Lock-free render view — called every game frame, ZERO blocking
+    FWeatherDoubleBuffer::FReadView GetRenderView() const
+    {
+        return DoubleBuffer.GetReadView();
+    }
 
-    // G�n�re une cellule m�t�o proc�durale � partir de coordonn�es monde absolues.
-    FWeatherCell GenerateProceduralCell(int32 WorldCellX, int32 WorldCellY) const;
+    // Column diagnostics — updated at low rate (2s), separate lock
+    bool TryGetColumns(TArray<FAtmosphericColumn>& Out, int32& OutNX, int32& OutNY) const
+    {
+        if (!bColumnsReady.load()) return false;
+        FScopeLock Lock(&ColumnMutex);
+        Out = CachedColumns;
+        OutNX = Config.GridNX;
+        OutNY = Config.GridNY;
+        return true;
+    }
+
+    // Storm list — updated at low rate
+    bool TryGetStorms(TArray<FStormCell>& Out) const
+    {
+        if (!bStormsReady.load()) return false;
+        FScopeLock Lock(&StormMutex);
+        Out = CachedStorms;
+        return true;
+    }
 
 private:
-    // --- �tapes internes du tick (appel�es depuis le thread) ---
+    //── Initialisation ────────────────────────────────────
+    void InitialiseGrid();
+    void SetBaseStateProfile(FAtmosphericCell& Cell, float Z_m) const;
+    void ApplyRandomPerturbations();
 
-    // �tape 1 : D�cale les donn�es dans CurrentReadGrid pour centrer le joueur.
-    //           Remplit les nouvelles zones avec du bruit proc�dural.
-    void ApplyGridShift();
+    //── RK4 time integration ──────────────────────────────
+    void StepRK4(float DT);
+    void ComputeTendencies(const FSimulationState& State,
+                           TArray<FAtmosphericCell>& Tend,
+                           float DT);
 
-    // �tape 2 (par cellule) : Advection semi-lagrangienne (transport par le vent).
-    void ComputeAdvection(int32 x, int32 y, int32 Index);
+    //── Dynamic core tendencies ───────────────────────────
+    void Tend_Momentum(const FSimulationState& S, TArray<FAtmosphericCell>& T, float DT);
+    void Tend_Continuity(const FSimulationState& S, TArray<FAtmosphericCell>& T);
+    void Tend_Thermodynamic(const FSimulationState& S, TArray<FAtmosphericCell>& T);
+    void Tend_Coriolis(const FSimulationState& S, TArray<FAtmosphericCell>& T);
 
-    // �tape 3 (par cellule) : Thermodynamique (�vaporation, CAPE, pr�cipitations, gr�le).
-    void ComputeThermodynamics(int32 x, int32 y, int32 Index, int32 OffX, int32 OffY);
+    //── Pressure solver (anelastic Poisson) ───────────────
+    void SolvePressurePoisson(FSimulationState& S);
+    void ApplyPressureGradient(FSimulationState& S);
 
-    void PerformSimulationTick();
+    //── Turbulence (TKE 1.5-order closure) ────────────────
+    void StepTurbulence(FSimulationState& S, float DT);
+    float ComputeSmagorinskyKm(const FSimulationState& S, int32 x, int32 y, int32 z) const;
+
+    //── Microphysics ──────────────────────────────────────
+    void StepMicrophysics(FSimulationState& S, float DT);
+    void Micro_Kessler(FAtmosphericCell& Cell, float DT, float Z_m);
+    void Micro_WSM6(FAtmosphericCell& Cell, float DT, float Z_m);
+    void Micro_Morrison(FAtmosphericCell& Cell, float DT, float Z_m);
+    void Micro_Thompson(FAtmosphericCell& Cell, float DT, float Z_m);
+
+    //── Microphysics sub-processes ────────────────────────
+    float SaturationMixingRatio(float T_K, float P_Pa) const;
+    float ClaudiusClapeyron_Es(float T_K)             const;
+    void  ProcessCondensation(FAtmosphericCell& C, float DT) const;
+    void  ProcessAutoconversion(FAtmosphericCell& C, float DT) const;
+    void  ProcessAccretion(FAtmosphericCell& C, float DT) const;
+    void  ProcessEvaporation(FAtmosphericCell& C, float DT, float Z_m) const;
+    void  ProcessFreezingRiming(FAtmosphericCell& C, float DT) const;
+    void  ProcessMelting(FAtmosphericCell& C, float DT) const;
+    void  ProcessHailGrowth(FAtmosphericCell& C, float DT) const;
+    void  ProcessHailFragmentation(FAtmosphericCell& C, float DT) const;
+    void  UpdateTerminalFallSpeeds(FAtmosphericCell& C) const;
+
+    //── Sedimentation (precipitation fall) ────────────────
+    void StepSedimentation(FSimulationState& S, float DT);
+
+    //── Radiation (simplified broadband) ──────────────────
+    void StepRadiation(FSimulationState& S, float DT, float SimTime_s);
+
+    //── Column diagnostics ────────────────────────────────
+    void ComputeAllColumns(FSimulationState& S);
+    void ComputeColumnCAPE_CIN(const FSimulationState& S,
+                               int32 Cx, int32 Cy,
+                               FAtmosphericColumn& Col) const;
+    void ComputeColumnSRH(const FSimulationState& S,
+                          int32 Cx, int32 Cy,
+                          FAtmosphericColumn& Col) const;
+    void ComputeShearParams(const FSimulationState& S,
+                            int32 Cx, int32 Cy,
+                            FAtmosphericColumn& Col) const;
+    FVector BunkerStormMotion(const FSimulationState& S, int32 Cx, int32 Cy) const;
+
+    //── Reflectivity for radar ────────────────────────────
+    void ComputeReflectivity(FSimulationState& S);
+    float Z_from_RainMR(float Qr, float Rho) const;
+    float Z_from_SnowMR(float Qs, float Rho) const;
+    float Z_from_HailMR(float Qg, float Rho) const;
+
+    //── Advection helpers ─────────────────────────────────
+    float Advect5thOrder(const FSimulationState& S, int32 x, int32 y, int32 z,
+                         float U, float V, float W,
+                         const TFunctionRef<float(int32, int32, int32)>& GetVal,
+                         float Inv_DX, float Inv_DZ) const;
+
+    //── Helpers ───────────────────────────────────────────
+    FVector CellToWorld(int32 x, int32 y, int32 z) const;
+    bool    WorldToCell(const FVector& Pos, int32& Cx, int32& Cy, int32& Cz) const;
+    float   GetAltitude(int32 z) const;
+
+    //── Optimisation ──────────────────────────────────────
+    void PublishRenderGrid();
+    TArray<FStormCell> DetectStormsInternal(const FSimulationState& State);
+    void TrackStormCellsInternal(TArray<FStormCell>& NewCells);
+
+    //── State ─────────────────────────────────────────────
+    FWeatherSimConfig    Config;
+    FSimulationState     CurrentState;
+    FSimulationState     TempStateA;   // RK4 buffer
+    FSimulationState     TempStateB;
+    TArray<FAtmosphericCell> K1, K2, K3, K4; // RK4 tendencies
+
+    // Render Data Double Buffering
+    FWeatherDoubleBuffer DoubleBuffer;
+
+    // Column cache — updated every ~2s on sim thread
+    mutable FCriticalSection    ColumnMutex;
+    TArray<FAtmosphericColumn>  CachedColumns;
+    std::atomic<bool>           bColumnsReady{ false };
+    float                       LastColumnUpdate = -999.f;
+
+    // Storm cache — updated every ~5s on sim thread
+    mutable FCriticalSection    StormMutex;
+    TArray<FStormCell>          CachedStorms;
+    std::atomic<bool>           bStormsReady{ false };
+    float                       LastStormUpdate = -999.f;
+
+    // Internal Storm tracking
+    TArray<FStormCell>          InternalTrackedStorms;
+    int32                       NextTrackID = 0;
+
+    TQueue<FSimCommand, EQueueMode::Mpsc> CommandQueue;
+
+    std::atomic<float> SimTime{ 0.f };
+    FThreadSafeBool    bIsRunning;
+    FThreadSafeBool    bShouldStop;
+
+    FRunnableThread* Thread = nullptr;
+
+    // Cached inverse spacings
+    float InvDX = 0.f, InvDY = 0.f, InvDZ = 0.f;
 };

@@ -6,134 +6,210 @@
 #include "Subsystems/WorldSubsystem.h"
 #include "WeatherTypes.h"
 #include "WeatherSimulationThread.h"
+#include "WeatherBuffer.h"
+#include "WeatherRadar.h"
 #include "Engine/Texture2D.h"
 #include "WeatherSubsystem.generated.h"
 
-DECLARE_LOG_CATEGORY_EXTERN(LogWeather, Log, All);
+// ============================================================
+//  DELEGATES
+// ============================================================
+
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnWeatherPhenomenonChanged,
+                                            EWeatherPhenomenon, NewPhenomenon);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnStormCellDetected,
+                                             FStormCell, StormCell, bool, bIsNew);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnRadarScanComplete,
+                                            const FRadarVolumeScan&, VolumeScan);
 
 // ============================================================
-// UWeatherSubsystem — Cerveau principal du système Aeros
-//
-// Gère :
-//   - La grille atmosphérique (double buffer, 128x128 cellules)
-//   - Le thread de simulation asynchrone
-//   - Le scroll infini centré sur le joueur
-//   - La texture radar encodée (R=Temp, G=Humidité, B=Pluie, A=CAPE)
-//   - Le debug visuel (écran + lignes)
+//  CHUNK KEY — infinite world chunking
 // ============================================================
+
+USTRUCT()
+struct FWeatherChunkKey
+{
+    GENERATED_BODY()
+
+    int32 ChunkX = 0, ChunkY = 0;
+
+    bool operator==(const FWeatherChunkKey& O) const
+    {
+        return ChunkX == O.ChunkX && ChunkY == O.ChunkY;
+    }
+};
+
+FORCEINLINE uint32 GetTypeHash(const FWeatherChunkKey& K)
+{
+    return HashCombine(GetTypeHash(K.ChunkX), GetTypeHash(K.ChunkY));
+}
+
+// ============================================================
+//  WEATHER SUBSYSTEM
+// ============================================================
+
 UCLASS()
 class AEROS_API UWeatherSubsystem : public UWorldSubsystem
 {
-	GENERATED_BODY()
-
-	// === Paramètres de grille ===
-	int32 GridSizeX = 128;
-	int32 GridSizeY = 128;
-
-	// CellSize en Unreal Units (cm). 1000 = 10 mètres par cellule.
-	// La grille couvre 128 * 10m = 1.28 km.
-	// Le vent est calibré en m/s de façon à ce que 1 m/s = 1 cellule/seconde visuellement.
-	float CellSize = 1000.f;
-
-	// === Double buffering ===
-	// Invariant : bDisplayBufferIsA=true → on AFFICHE A, le thread ÉCRIT dans B.
-	// Le flip se fait en DÉBUT de OnWeatherTick (après vérification que le thread est libre).
-	TArray<FWeatherCell> GridBufferA;
-	TArray<FWeatherCell> GridBufferB;
-	bool bDisplayBufferIsA = true;
-
-	// === Suivi de position (scroll infini) ===
-	FIntPoint LastPlayerGridPos = FIntPoint(0, 0);
-
-	// GlobalGridOffset : coordonnées monde (en cellules) du coin (0,0) de la grille locale.
-	// Invariant : la cellule locale (x,y) représente la cellule monde (x + Offset.X, y + Offset.Y).
-	FIntPoint GlobalGridOffset = FIntPoint(0, 0);
-
-	bool bIsFirstTick = true;
-
-	// === Thread de simulation ===
-	FWeatherSimulationThread* SimulationThread = nullptr;
-
-	// Timer du tick météo (1 seconde par défaut)
-	FTimerHandle WeatherTickHandle;
-
-	// Cache pré-alloué pour la mise à jour de texture (évite le malloc chaque tick)
-	TArray<FColor> RadarPixelCache;
-
-	// Résolution fixe de l'écran radar UI (ex: 256x256 pixels)
-	int32 UIRadarResolution = 128;
-	TArray<FColor> UIRadarPixelCache;
+    GENERATED_BODY()
 
 public:
-	// La texture HAUTE RÉSOLUTION dédiée à l'affichage UI
-	UPROPERTY(BlueprintReadOnly, Category = "Weather|RadarUI")
-	UTexture2D* UIRadarTexture = nullptr;
+    // ── USubsystem interface ──────────────────────────────
+    virtual void Initialize(FSubsystemCollectionBase& Collection) override;
+    bool TickWrapper(float DeltaTime);
+    virtual void Deinitialize() override;
+    virtual void OnWorldBeginPlay(UWorld& InWorld) override;
 
-	// Le niveau de zoom (1.0 = normal, < 1.0 = zoom in, > 1.0 = zoom out)
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Weather|RadarUI")
-	float RadarZoom = 1.0f;
+    // ── Tick via custom tickable ──────────────────────────
+    void Tick(float DeltaTime);
 
+    // ── Configuration ────────────────────────────────────
+    UFUNCTION(BlueprintCallable, Category = "Weather|Config")
+    void SetConfiguration(const FWeatherSimConfig& NewConfig);
 
-	// === Texture Radar (Blueprint accessible) ===
-	// Encodage : R=Température, G=Humidité, B=Précipitations, A=CAPE normalisé
-	UPROPERTY(BlueprintReadOnly, Category = "Weather|Radar")
-	UTexture2D* RadarTexture = nullptr;
+    UFUNCTION(BlueprintCallable, Category = "Weather|Config")
+    FWeatherSimConfig GetConfiguration() const { return ActiveConfig; }
 
-	// Position monde (cm) du coin (0,0) de la texture radar.
-	// Permet au Material de faire correspondre UV ↔ monde.
-	UPROPERTY(BlueprintReadOnly, Category = "Weather|Radar")
-	FVector2D RadarWorldOrigin = FVector2D::ZeroVector;
+    UFUNCTION(BlueprintCallable, Category = "Weather|Config")
+    void SetMicrophysicsScheme(EMicrophysicsScheme Scheme);
 
-	// === Debug ===
-	// Active/désactive le panneau de debug à l'écran (GEngine->AddOnScreenDebugMessage)
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Weather|Debug")
-	bool bShowDebugHUD = true;
+    UFUNCTION(BlueprintCallable, Category = "Weather|Config")
+    void SetConvectionScheme(EConvectionScheme Scheme);
 
-	// Dessine des marqueurs de debug sur la cellule sous le joueur
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Weather|Debug")
-	bool bShowDebugCell = false;
+    // ── Queries (Blueprint-callable, thread-safe) ─────────
+    UFUNCTION(BlueprintCallable, Category = "Weather|Query")
+    bool GetAtmosphereAtLocation(const FVector& WorldPos,
+                                 FAtmosphericCell& OutCell) const;
 
-	// Nombre de cellules de grille à visualiser autour du joueur (0 = désactivé)
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Weather|Debug")
-	int32 DebugGridRadius = 0;
+    UFUNCTION(BlueprintCallable, Category = "Weather|Query")
+    bool GetColumnDiagnostics(const FVector& WorldPos,
+                              FAtmosphericColumn& OutColumn) const;
 
-	// Mode d'affichage actuel du Radar
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Weather|RadarUI")
-	ERadarMode CurrentRadarMode = ERadarMode::Reflectivity;
+    UFUNCTION(BlueprintCallable, Category = "Weather|Query")
+    FVector GetWindAtLocation(const FVector& WorldPos) const;
 
-public:
-	virtual void Initialize(FSubsystemCollectionBase& Collection) override;
-	virtual void Deinitialize() override;
+    UFUNCTION(BlueprintCallable, Category = "Weather|Query")
+    float GetTemperatureAtLocation(const FVector& WorldPos) const;
 
-	// === API publique ===
+    UFUNCTION(BlueprintCallable, Category = "Weather|Query")
+    float GetPressureAtLocation(const FVector& WorldPos) const;
 
-	// Retourne les données météo à une position monde. Prend en compte le GlobalGridOffset.
-	// Retourne false si la position est hors de la grille.
-	UFUNCTION(BlueprintCallable, Category = "Weather|Query")
-	bool GetWeatherAtLocation(FVector WorldLocation, FWeatherCell& OutCell) const;
+    UFUNCTION(BlueprintCallable, Category = "Weather|Query")
+    float GetRelativeHumidityAtLocation(const FVector& WorldPos) const;
 
-	// Convertit une position monde (cm) en coordonnées de cellule locales (peut être hors grille).
-	UFUNCTION(BlueprintCallable, Category = "Weather|Query")
-	FIntPoint WorldToLocalCell(FVector WorldLocation) const;
+    UFUNCTION(BlueprintCallable, Category = "Weather|Query")
+    float GetPrecipitationRateAtLocation(const FVector& WorldPos) const; // mm/hr
 
-	// Convertit une cellule locale en position monde (coin bas-gauche de la cellule, cm).
-	UFUNCTION(BlueprintCallable, Category = "Weather|Query")
-	FVector LocalCellToWorld(FIntPoint LocalCell) const;
+    UFUNCTION(BlueprintCallable, Category = "Weather|Query")
+    bool IsHailPossibleAtLocation(const FVector& WorldPos) const;
 
-	// Accès en lecture seule à l'offset global
-	FIntPoint GetGlobalGridOffset() const { return GlobalGridOffset; }
-	float     GetCellSize() const { return CellSize; }
+    UFUNCTION(BlueprintCallable, Category = "Weather|Query")
+    EWeatherPhenomenon GetCurrentPhenomenon(const FVector& WorldPos) const;
+
+    // ── Storm queries ─────────────────────────────────────
+    UFUNCTION(BlueprintCallable, Category = "Weather|Storms")
+    TArray<FStormCell> GetAllDetectedStorms() const;
+
+    UFUNCTION(BlueprintCallable, Category = "Weather|Storms")
+    bool GetNearestStorm(const FVector& WorldPos, FStormCell& OutStorm,
+                         float MaxRadius_cm = 500000.f) const;
+
+    UFUNCTION(BlueprintCallable, Category = "Weather|Storms")
+    int32 GetMesocycloneCount() const;
+
+    // ── Interventions ────────────────────────────────────
+    UFUNCTION(BlueprintCallable, Category = "Weather|Inject")
+    void InjectThermalBubble(const FVector& WorldPos, float Strength = 2.f);
+
+    UFUNCTION(BlueprintCallable, Category = "Weather|Inject")
+    void InjectMoistureAnomaly(const FVector& WorldPos, float DeltaQv = 0.005f);
+
+    UFUNCTION(BlueprintCallable, Category = "Weather|Inject")
+    void InjectVorticity(const FVector& WorldPos, float Strength = 5.f);
+
+    UFUNCTION(BlueprintCallable, Category = "Weather|Inject")
+    void ResetSimulation();
+
+    // ── Radar access ─────────────────────────────────────
+    UFUNCTION(BlueprintCallable, Category = "Weather|Radar")
+    UWeatherRadar* GetRadar() const { return Radar; }
+
+    UFUNCTION(BlueprintCallable, Category = "Weather|Radar")
+    void SetRadarLocation(const FVector& WorldPos);
+
+    UFUNCTION(BlueprintCallable, Category = "Weather|Radar")
+    FRadarVolumeScan GetLatestVolumeScan() const;
+
+    // ── Infinite world integration ────────────────────────
+    UFUNCTION(BlueprintCallable, Category = "Weather|World")
+    void UpdatePlayerLocation(const FVector& PlayerWorldPos);
+
+    UFUNCTION(BlueprintCallable, Category = "Weather|World")
+    FVector GetDomainOrigin() const { return DomainOrigin; }
+
+    // ── Rendering helpers (polled by Weather Actors) ──────
+    UFUNCTION(BlueprintCallable, Category = "Weather|Render")
+    float GetCloudCoverFraction(const FVector& WorldPos) const;
+
+    UFUNCTION(BlueprintCallable, Category = "Weather|Render")
+    float GetReflectivity_dBZ(const FVector& WorldPos) const;
+
+    UFUNCTION(BlueprintCallable, Category = "Weather|Render")
+    float GetTKE(const FVector& WorldPos) const;
+
+    // ── Events ───────────────────────────────────────────
+    UPROPERTY(BlueprintAssignable, Category = "Weather|Events")
+    FOnWeatherPhenomenonChanged OnPhenomenonChanged;
+
+    UPROPERTY(BlueprintAssignable, Category = "Weather|Events")
+    FOnStormCellDetected OnStormCellDetected;
+
+    UPROPERTY(BlueprintAssignable, Category = "Weather|Events")
+    FOnRadarScanComplete OnRadarScanComplete;
+
+    // ── Simulation time ───────────────────────────────────
+    UFUNCTION(BlueprintCallable, Category = "Weather|Time")
+    float GetSimulationTime() const;
+
+    UFUNCTION(BlueprintCallable, Category = "Weather|Time")
+    float GetSimulationSpeed() const { return SimulationSpeed; }
+
+    UFUNCTION(BlueprintCallable, Category = "Weather|Time")
+    void  SetSimulationSpeed(float Speed) { SimulationSpeed = FMath::Clamp(Speed, 0.f, 100.f); }
 
 private:
-	void OnWeatherTick();
-	void UpdateRadarTexture(const TArray<FWeatherCell>& DisplayGrid);
-	void InitializeGridWithProcedural();
-	void DrawDebugInfo(const FWeatherCell& PlayerCell);
-	void UpdateUIRadarTexture();
-	FColor GetReflectivityColor(float RainIntensity, float Hail);
-	FColor GetVelocityColor(FVector2D WindVector, FVector2D DirFromRadar);
-	FColor GetInstabilityColor(float CAPE);
+    void CreateSimThread(const FWeatherSimConfig& Cfg);
+    void DestroySimThread();
+    void UpdateDomainOrigin(const FVector& PlayerPos);
 
-	// Vérifie qu'un couple (LocalX, LocalY) est dans les bornes de la grille
-	bool IsValidIndex(int32 LocalX, int32 LocalY) const;
+    FWeatherSimConfig           ActiveConfig;
+    TUniquePtr<FWeatherSimulationThread> SimThread;
+
+    UPROPERTY()
+    UWeatherRadar* Radar = nullptr;
+
+    // Render / Snapshot optimizations
+    FWeatherDoubleBuffer::FReadView  CachedRenderView;
+    TArray<FAtmosphericColumn>       ColumnCache;
+    mutable FCriticalSection         ColumnCacheLock;
+    int32                            ColumnCacheNX = 0;
+    int32                            ColumnCacheNY = 0;
+
+    // Storm tracking
+    mutable FCriticalSection    StormLock;
+    TArray<FStormCell>          TrackedStorms;
+
+    // Infinite world domain management
+    FVector                     DomainOrigin = FVector::ZeroVector;
+    FVector                     LastPlayerPos = FVector::ZeroVector;
+    float                       DomainShiftThreshold_cm = 0.f;
+
+    // Timing
+    float                       SimulationSpeed = 1.f;
+    float                       AccumTime = 0.f;
+    float                       LastPhenomenonCheck = 0.f;
+
+    EWeatherPhenomenon          LastBroadcastPhenomenon = EWeatherPhenomenon::Clear;
+
+    FTSTicker::FDelegateHandle  TickHandle;
 };
