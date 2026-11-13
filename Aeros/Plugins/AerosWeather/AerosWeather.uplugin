@@ -1,0 +1,36 @@
+{
+	"FileVersion": 3,
+	"Version": 3,
+	"VersionName": "0.3.0",
+	"FriendlyName": "Aeros Weather",
+	"Description": "Realistic, optimised weather and natural disaster system: a thermodynamic 2.5D atmosphere (CAPE, helicity, cold pools, hail growth, tropical cyclones) on a worker thread, driving clouds, precipitation, storms, tornadoes, lightning, radar and Chaos destruction.",
+	"Category": "Simulation",
+	"CreatedBy": "Aeros",
+	"CreatedByURL": "",
+	"DocsURL": "",
+	"MarketplaceURL": "",
+	"SupportURL": "",
+	"EngineVersion": "5.8.0",
+	"CanContainContent": true,
+	"IsBetaVersion": true,
+	"IsExperimentalVersion": false,
+	"Installed": false,
+	"Modules": [
+		{
+			"Name": "AerosWeather",
+			"Type": "Runtime",
+			"LoadingPhase": "Default"
+		},
+		{
+			"Name": "AerosWeatherDemo",
+			"Type": "Runtime",
+			"LoadingPhase": "Default"
+		}
+	],
+	"Plugins": [
+		{
+			"Name": "Niagara",
+			"Enabled": true
+		}
+	]
+}

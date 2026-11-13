@@ -1,0 +1,60 @@
+// Copyright Aeros. All Rights Reserved.
+//
+// UAerosCloudManager — roadmap "UCloudManager": turns the grid into GPU data.
+//  * Weather map (RGBA8, one texel per cell): R cloud cover, G cloud base (0-5 km),
+//    B cloud top (0-16 km), A precipitation (sqrt-scaled 0-100 mm/h).
+//    Sample it in a Volumetric Cloud material with:
+//      UV = (WorldXY - DomainCenter) / DomainSize + 0.5
+//  * Surface map (RGBA8): R wetness, G snow depth (0-50 cm), B hail cover, A temperature (-40..50 C).
+//  * Material Parameter Collection (optional): local values at the viewer for wet / snowy /
+//    hail-covered materials, wind, lightning flashes. See README for the parameter names.
+// Both textures are blended in time between two snapshots, so clouds move smoothly.
+
+#pragma once
+
+#include "CoreMinimal.h"
+#include "UObject/Object.h"
+#include "AerosCloudManager.generated.h"
+
+class UAerosWeatherSubsystem;
+class UTexture2D;
+class UMaterialParameterCollection;
+
+UCLASS()
+class AEROSWEATHER_API UAerosCloudManager : public UObject
+{
+	GENERATED_BODY()
+
+public:
+	void Initialize(UAerosWeatherSubsystem* InOwner);
+	void Shutdown();
+	void Tick(float DeltaTime);
+
+	UTexture2D* GetWeatherMap() const { return WeatherMap; }
+	UTexture2D* GetSurfaceMap() const { return SurfaceMap; }
+
+	/** Current lightning flash brightness at the viewer (0-1). */
+	float GetLightningFlash() const { return Flash; }
+
+	/** Textures refresh rate (Hz). */
+	UPROPERTY(EditAnywhere, Category = "Aeros")
+	float TextureUpdateRate = 20.f;
+
+private:
+	void EnsureTextures(int32 NX, int32 NY);
+	void UpdateTextures();
+	void UpdateParameterCollection(float DeltaTime);
+	static void Upload(UTexture2D* Texture, const TArray<FColor>& Pixels, int32 W, int32 H);
+
+	UPROPERTY(Transient) TObjectPtr<UAerosWeatherSubsystem> Owner;
+	UPROPERTY(Transient) TObjectPtr<UTexture2D> WeatherMap;
+	UPROPERTY(Transient) TObjectPtr<UTexture2D> SurfaceMap;
+	UPROPERTY(Transient) TObjectPtr<UMaterialParameterCollection> Collection;
+
+	TArray<FColor> WeatherPixels;
+	TArray<FColor> SurfacePixels;
+	int32 TexW = 0, TexH = 0;
+	float Timer = 0.f;
+	float Flash = 0.f;
+	int32 LastStrikeSeq = 0;
+};

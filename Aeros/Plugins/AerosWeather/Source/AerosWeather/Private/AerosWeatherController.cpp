@@ -1,0 +1,115 @@
+// Copyright Aeros. All Rights Reserved.
+
+#include "AerosWeatherController.h"
+#include "AerosWeatherSubsystem.h"
+#include "AerosCloudManager.h"
+#include "Engine/DirectionalLight.h"
+#include "Engine/ExponentialHeightFog.h"
+#include "Engine/SkyLight.h"
+#include "Components/DirectionalLightComponent.h"
+#include "Components/ExponentialHeightFogComponent.h"
+#include "Components/SkyLightComponent.h"
+#include "Components/VolumetricCloudComponent.h"
+#include "Materials/MaterialInstanceDynamic.h"
+#include "Engine/Texture2D.h"
+#include "EngineUtils.h"
+
+AAerosWeatherController::AAerosWeatherController()
+{
+	PrimaryActorTick.bCanEverTick = true;
+	PrimaryActorTick.TickGroup = TG_PostUpdateWork;
+	RootComponent = CreateDefaultSubobject<USceneComponent>(TEXT("Root"));
+	bReplicates = false; // the simulation is synchronised by AAerosWeatherNetState
+}
+
+void AAerosWeatherController::FindSceneActors()
+{
+	UWorld* World = GetWorld();
+	if (!World) return;
+	if (!SunLight) { for (TActorIterator<ADirectionalLight> It(World); It; ++It) { SunLight = *It; break; } }
+	if (!HeightFog) { for (TActorIterator<AExponentialHeightFog> It(World); It; ++It) { HeightFog = *It; break; } }
+	if (!SkyLight) { for (TActorIterator<ASkyLight> It(World); It; ++It) { SkyLight = *It; break; } }
+	if (!VolumetricCloud)
+	{
+		for (TActorIterator<AActor> It(World); It; ++It)
+		{
+			if (It->FindComponentByClass<UVolumetricCloudComponent>()) { VolumetricCloud = *It; break; }
+		}
+	}
+}
+
+void AAerosWeatherController::BeginPlay()
+{
+	Super::BeginPlay();
+	FindSceneActors();
+
+	UAerosWeatherSubsystem* Sub = UAerosWeatherSubsystem::Get(this);
+	if (Sub && bStartOnBeginPlay && Sub->HasAuthority())
+	{
+		FAerosSimulationSettings S = Settings;
+		if (bCenterOnActor && S.DomainCenter.IsNearlyZero()) S.DomainCenter = FVector(GetActorLocation().X, GetActorLocation().Y, 0.0);
+		Sub->StartSimulation(S);
+	}
+	if (SunLight)
+	{
+		SunLight->GetLightComponent()->SetMobility(EComponentMobility::Movable);
+	}
+	if (HeightFog && HeightFog->GetComponent()) BaseFogDensity = FMath::Max(BaseFogDensity, HeightFog->GetComponent()->FogDensity);
+	BindCloudMaterial();
+}
+
+void AAerosWeatherController::BindCloudMaterial()
+{
+	if (!CloudMaterial || !VolumetricCloud) return;
+	UVolumetricCloudComponent* Cloud = VolumetricCloud->FindComponentByClass<UVolumetricCloudComponent>();
+	if (!Cloud) return;
+	CloudMID = UMaterialInstanceDynamic::Create(CloudMaterial, this);
+	Cloud->SetMaterial(CloudMID);
+	Cloud->SetLayerBottomAltitude(0.3f);
+	Cloud->SetLayerHeight(15.f);
+}
+
+void AAerosWeatherController::Tick(float DeltaSeconds)
+{
+	Super::Tick(DeltaSeconds);
+	UAerosWeatherSubsystem* Sub = UAerosWeatherSubsystem::Get(this);
+	if (!Sub || !Sub->IsSimulationRunning()) return;
+
+	// Sun: astronomical position from latitude, day of year, hour
+	if (bDriveSun && SunLight)
+	{
+		const FAerosDateTime Clock = Sub->GetDateTime();
+		SunLight->GetLightComponent()->SetWorldRotation((-Clock.SunDirection).Rotation());
+	}
+
+	const FAerosWeatherSample Local = Sub->GetWeatherAtLocation(Sub->GetViewerLocation());
+
+	// Fog: visibility (fog, precipitation) + humidity haze
+	if (bDriveFog && HeightFog && HeightFog->GetComponent())
+	{
+		const float Thick = FMath::Clamp(1.f - Local.Visibility / 20000.f, 0.f, 1.f);
+		const float Haze = FMath::Clamp((Local.RelativeHumidity - 0.6f) / 0.4f, 0.f, 1.f) * 0.5f;
+		const float Target = BaseFogDensity * (1.f + Haze + 25.f * Thick * Thick);
+		SmoothedFog = FMath::FInterpTo(SmoothedFog > 0.f ? SmoothedFog : Target, Target, DeltaSeconds, 0.5f);
+		HeightFog->GetComponent()->SetFogDensity(SmoothedFog);
+	}
+
+	// Cloud material: weather map + domain mapping
+	if (CloudMID && Sub->GetWeatherMapTexture())
+	{
+		CloudMID->SetTextureParameterValue(TEXT("AerosWeatherMap"), Sub->GetWeatherMapTexture());
+		const FVector4 D = Sub->GetDomainRect();
+		CloudMID->SetVectorParameterValue(TEXT("AerosDomain"), FLinearColor(float(D.X), float(D.Y), float(D.Z), float(D.W)));
+		CloudMID->SetScalarParameterValue(TEXT("AerosLightningFlash"), Sub->GetCloudManager() ? Sub->GetCloudManager()->GetLightningFlash() : 0.f);
+	}
+
+	if (SkyRecaptureInterval > 0.f && SkyLight && SkyLight->GetLightComponent())
+	{
+		SkyTimer += DeltaSeconds;
+		if (SkyTimer >= SkyRecaptureInterval)
+		{
+			SkyTimer = 0.f;
+			SkyLight->GetLightComponent()->RecaptureSky();
+		}
+	}
+}

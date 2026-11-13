@@ -76,3 +76,10 @@ DerivedDataCache/*
 /Aeros/Intermediate
 /Aeros/DerivedDataCache
 /Aeros/Saved/Logs
+
+# Aeros: per-project generated folders (crash dumps, logs, autosaves)
+**/Saved/
+**/Intermediate/
+**/Binaries/
+**/DerivedDataCache/
+Docs/**/.obsidian/workspace.json
