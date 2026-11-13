@@ -534,6 +534,7 @@ void AAerosDemoPawn::BuildTour()
 	S.Duration = 10.f;
 	S.Enter = [this, Sub]()
 	{
+		Sub->SetTimeScale(60.f);
 		if (AAerosTornado* T = Sub->ForceTornado(-1))
 		{
 			const FVector At = T->GetActorLocation();

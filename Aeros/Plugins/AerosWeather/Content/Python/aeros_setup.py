@@ -11,6 +11,7 @@
 #   Materials/M_AerosEmissive           unlit glow (lightning bolts, lava)
 #   Materials/M_AerosShaft              soft translucent volume (rain shafts, tornado funnel)
 #   Materials/M_AerosLightning          lightning channel glow, per-segment brightness (instance custom data 0)
+#   Materials/M_AerosTornadoFunnel      tornado condensation funnel: rotating striations, soft edges, vertex alpha
 #   Maps/L_AerosDemo                    demo level, GameMode Override = AerosDemoGameMode
 #
 # Each step is independent: if one fails, the others still run, and a summary is
@@ -424,6 +425,70 @@ def create_lightning_material():
     return mat
 
 
+def create_tornado_material():
+    """Tornado funnel on a procedural tube (UV: U = around, V = height; vertex alpha = fade).
+    Rotating striations: 3D noise sampled on a cylinder whose angle advances with SpinTurns (turns/s)."""
+    mat = get_or_create("M_AerosTornadoFunnel", MAT_DIR, unreal.Material, unreal.MaterialFactoryNew())
+    mel.delete_all_material_expressions(mat)
+    mat.set_editor_property("blend_mode", unreal.BlendMode.BLEND_TRANSLUCENT)
+    mat.set_editor_property("shading_model", unreal.MaterialShadingModel.MSM_DEFAULT_LIT)
+    mat.set_editor_property("translucency_lighting_mode", unreal.TranslucencyLightingMode.TLM_VOLUMETRIC_NON_DIRECTIONAL)
+    mat.set_editor_property("two_sided", True)
+
+    uv = node(mat, unreal.MaterialExpressionTextureCoordinate, -1400, 0)
+    u = mask(mat, uv, -1250, 0, r=True)
+    v = mask(mat, uv, -1250, 100, g=True)
+    spin = node(mat, unreal.MaterialExpressionScalarParameter, -1400, 200, parameter_name="SpinTurns", default_value=0.1)
+    t = node(mat, unreal.MaterialExpressionTime, -1400, 300)
+    turn = binop(mat, unreal.MaterialExpressionMultiply, t, spin, -1250, 250)
+    # Vertical shear of the spin: the top turns a bit later than the base, the streaks spiral
+    lag = binop(mat, unreal.MaterialExpressionMultiply, v, const(mat, 0.35, -1250, 350), -1100, 330)
+    angle = binop(mat, unreal.MaterialExpressionAdd, u, turn, -1100, 100)
+    angle = binop(mat, unreal.MaterialExpressionAdd, angle, lag, -950, 150)
+    cos_a = node(mat, unreal.MaterialExpressionCosine, -800, 100, period=1.0)
+    link(angle, "", cos_a, "")
+    sin_a = node(mat, unreal.MaterialExpressionSine, -800, 200, period=1.0)
+    link(angle, "", sin_a, "")
+    cx = binop(mat, unreal.MaterialExpressionMultiply, cos_a, const(mat, 2.5, -800, 300), -650, 100)
+    cy = binop(mat, unreal.MaterialExpressionMultiply, sin_a, const(mat, 2.5, -800, 350), -650, 200)
+    cz = binop(mat, unreal.MaterialExpressionMultiply, v, const(mat, 14.0, -800, 450), -650, 300)
+    xy = node(mat, unreal.MaterialExpressionAppendVector, -500, 150)
+    link(cx, "", xy, "A")
+    link(cy, "", xy, "B")
+    xyz = node(mat, unreal.MaterialExpressionAppendVector, -380, 200)
+    link(xy, "", xyz, "A")
+    link(cz, "", xyz, "B")
+    noise = node(mat, unreal.MaterialExpressionNoise, -250, 200, scale=1.0, levels=4, output_min=0.0, output_max=1.0)
+    link(xyz, "", noise, "Position")
+
+    streaks = node(mat, unreal.MaterialExpressionScalarParameter, -250, 400, parameter_name="Streaks", default_value=0.6)
+    streak = node(mat, unreal.MaterialExpressionLinearInterpolate, -50, 300)
+    link(const(mat, 1.0, -150, 300), "", streak, "A")
+    link(noise, "", streak, "B")
+    link(streaks, "", streak, "Alpha")
+
+    color = node(mat, unreal.MaterialExpressionVectorParameter, -250, -150, parameter_name="Color",
+                 default_value=unreal.LinearColor(0.45, 0.46, 0.48, 1.0))
+    shade = binop(mat, unreal.MaterialExpressionMultiply, color, streak, 100, -100)
+    mel.connect_material_property(shade, "", unreal.MaterialProperty.MP_BASE_COLOR)
+    mel.connect_material_property(const(mat, 0.9, 100, 0), "", unreal.MaterialProperty.MP_ROUGHNESS)
+
+    opacity = node(mat, unreal.MaterialExpressionScalarParameter, -250, 550, parameter_name="Opacity", default_value=0.8)
+    fresnel = node(mat, unreal.MaterialExpressionFresnel, -250, 650, exponent=2.5)
+    soft = node(mat, unreal.MaterialExpressionOneMinus, -100, 650)
+    link(fresnel, "", soft, "")
+    vcol = node(mat, unreal.MaterialExpressionVertexColor, -250, 750)
+    alpha = binop(mat, unreal.MaterialExpressionMultiply, opacity, streak, 50, 500)
+    alpha = binop(mat, unreal.MaterialExpressionMultiply, alpha, soft, 200, 550)
+    alpha = binop(mat, unreal.MaterialExpressionMultiply, alpha, vcol, 350, 600, b_out="A")
+    mel.connect_material_property(alpha, "", unreal.MaterialProperty.MP_OPACITY)
+
+    mel.recompile_material(mat)
+    eal.save_loaded_asset(mat)
+    log("Tornado material ready: " + mat.get_path_name())
+    return mat
+
+
 def create_shaft_material():
     """Soft translucent volume (rain shafts, tornado funnel, dust walls): edges fade out."""
     mat = get_or_create("M_AerosShaft", MAT_DIR, unreal.Material, unreal.MaterialFactoryNew())
@@ -527,6 +592,7 @@ def main():
     step("Emissive mat.", create_emissive_material)
     step("Shaft material", create_shaft_material)
     step("Lightning mat.", create_lightning_material)
+    step("Tornado mat.", create_tornado_material)
     step("Demo map", create_demo_map, assets.get("Cloud material"), assets.get("Ground material"))
 
     log("SUMMARY")

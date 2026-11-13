@@ -28,6 +28,7 @@ public class AerosWeather : ModuleRules
 			"PhysicsCore",
 			"NetCore",
 			"Json",
+			"ProceduralMeshComponent", // deformable tornado funnel
 		});
 	}
 }

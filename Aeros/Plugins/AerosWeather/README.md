@@ -24,6 +24,7 @@ Les matériaux et les cartes sont des fichiers binaires (`.uasset`, `.umap`) que
 | `Materials/M_AerosGround` | sol qui se mouille, s'enneige, blanchit sous la grêle, grisit sous la cendre |
 | `Materials/M_AerosWater` | eau translucide des crues, ondes de tempête et tsunamis |
 | `Materials/M_AerosEmissive` | lueur sans éclairage (secours) |
+| `Materials/M_AerosTornadoFunnel` | entonnoir de tornade : stries en rotation, bords doux, fondu par couleur de sommet |
 | `Materials/M_AerosLightning` | canal d'éclair : lueur × luminosité par segment (custom data d'instance) |
 | `Materials/M_AerosShaft` | volume translucide doux : rideau de pluie / grêle sous les orages |
 | `Maps/L_AerosDemo` | carte démo avec *GameMode Override* = `AerosDemoGameMode` |
@@ -61,7 +62,7 @@ Les chiffres QWERTY (1-0) marchent aussi pour les scénarios.
 * **Marqueurs** : un losange au-dessus de chaque orage, tornade, ouragan, volcan et épicentre, avec type et distance. Hors de l'écran, une flèche au bord donne la direction.
 * **Journal d'événements** (en bas à droite) : formation d'orage, tornade, séisme, tsunami, éruption, changement de temps ici.
 * **HUD expert** : tous les chiffres (sondage, CAPE, SRH, STP…).
-* **Visite guidée** (F2) : chaque étape place la caméra, déclenche le phénomène, l'explique et enregistre une capture dans `Saved/Screenshots/<plateforme>/AerosTour/`. En ligne de commande : `-AerosTour` (ou `-AerosTourQuit` pour quitter à la fin, utile pour des captures automatiques) ; `-AerosTourOnly=1,2,3` ne joue que ces étapes ; `-AerosDumpMaps` enregistre aussi les cartes nuages en PNG (`Saved/AerosDebug`). La visite (et la météo) se met en pause tant que des shaders compilent. L'étape « éclairs » prend sa capture au moment où un éclair brille.
+* **Visite guidée** (F2) : chaque étape place la caméra, déclenche le phénomène, l'explique et enregistre une capture dans `Saved/Screenshots/<plateforme>/AerosTour/`. En ligne de commande : `-AerosTour` (ou `-AerosTourQuit` pour quitter à la fin, utile pour des captures automatiques) ; `-AerosTourOnly=1,2,3` ne joue que ces étapes ; `-AerosTornadoShape=0..7` impose la forme des tornades (corde, aiguille, cône, cylindre, concave, sablier, wedge, multi-vortex) et `-AerosTornadoAge=0.4` les fait démarrer à 40 % de leur vie ; `-AerosDumpMaps` enregistre aussi les cartes nuages en PNG (`Saved/AerosDebug`). La visite (et la météo) se met en pause tant que des shaders compilent. L'étape « éclairs » prend sa capture au moment où un éclair brille.
 
 Console : `aeros.Scenario 0-10`, `aeros.TimeScale X`, `aeros.Time jour heure`, `aeros.Quake M km`, `aeros.Tsunami M`, `aeros.Flood mm`, `aeros.Haboob`, `aeros.Eruption VEI`, `aeros.Live lat lon nom`, `aeros.Bubble`, `aeros.Hurricane`, `aeros.Tornado`, `aeros.Debug 0-2`, `stat Aeros`.
 
@@ -124,7 +125,7 @@ AAerosWeatherNetState     (réseau : seed + horloge + commandes datées)
 | `UAerosStormManager` | détection → acteurs, genèse des tornades (tirage déterministe), foudre |
 | `UAerosCloudManager` | `WeatherMap` / `SurfaceMap` (une texel par cellule) + MPC |
 | `AAerosStormSystem` | macro-état répliqué, dégâts de grêle > 30 mm (Chaos + dégâts radiaux) |
-| `AAerosTornado` | vent, aspiration des objets physiques, dégâts, fractures Chaos |
+| `AAerosTornado` | vent, aspiration des objets physiques, dégâts, fractures Chaos ; entonnoir déformable (tube procédural) : formes corde, aiguille, cône, cylindre, concave, sablier, wedge, multi-vortex choisies selon l'EF ; cycle de vie (descente, maturité, « rope out ») ; inclinaison et ondulation ; stries qui tournent à la vitesse du vortex |
 | `AAerosWeatherRadar` | dBZ → couleurs NWS, magenta = grêle / tornade |
 
 ## Physique simulée

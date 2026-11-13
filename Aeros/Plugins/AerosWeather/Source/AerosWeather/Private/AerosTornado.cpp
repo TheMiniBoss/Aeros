@@ -25,6 +25,8 @@
 #include "Net/UnrealNetwork.h"
 #include "Sound/SoundBase.h"
 #include "UObject/ConstructorHelpers.h"
+#include "ProceduralMeshComponent.h"
+#include "Misc/CommandLine.h"
 
 AAerosTornado::AAerosTornado()
 {
@@ -64,6 +66,12 @@ AAerosTornado::AAerosTornado()
 	FallbackDebris->SetCastShadow(false);
 	FallbackDebris->SetVisibility(false);
 	if (CubeMesh.Succeeded()) FallbackDebris->SetStaticMesh(CubeMesh.Object);
+
+	FunnelMesh = CreateDefaultSubobject<UProceduralMeshComponent>(TEXT("FunnelMesh"));
+	FunnelMesh->SetupAttachment(RootComponent);
+	FunnelMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+	FunnelMesh->SetCastShadow(false);
+	FunnelMesh->SetVisibility(false);
 
 	FallbackWallCloud = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("FallbackWallCloud"));
 	FallbackDustCloud = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("FallbackDustCloud"));
@@ -133,6 +141,21 @@ void AAerosTornado::BeginPlay()
 		if (FunnelMID) FunnelMID->SetVectorParameterValue(TEXT("Color"), FLinearColor(0.18f, 0.17f, 0.16f));
 		if (WallCloudMID) WallCloudMID->SetVectorParameterValue(TEXT("Color"), FLinearColor(0.1f, 0.11f, 0.13f));
 		if (DustCloudMID) DustCloudMID->SetVectorParameterValue(TEXT("Color"), FLinearColor(0.3f, 0.24f, 0.17f));
+
+		// Deformable funnel (replaces the rigid cone when its material exists)
+		int32 ForcedShape = ShapeOverride;
+		FParse::Value(FCommandLine::Get(), TEXT("AerosTornadoShape="), ForcedShape);
+		Shape = ForcedShape >= 0 && ForcedShape <= int32(EAerosTornadoShape::Multivortex) ? static_cast<EAerosTornadoShape>(ForcedShape) : PickShape(EFRating, Seed);
+		NumSubVortices = Shape == EAerosTornadoShape::Multivortex ? 3 + int32(uint32(Seed) % 3u) : 0;
+		if (UMaterialInterface* TubeMat = Aeros::LoadOptional(TSoftObjectPtr<UMaterialInterface>(FSoftObjectPath(TEXT("/AerosWeather/Materials/M_AerosTornadoFunnel.M_AerosTornadoFunnel")))))
+		{
+			TubeMID = UMaterialInstanceDynamic::Create(TubeMat, this);
+			SubTubeMID = UMaterialInstanceDynamic::Create(TubeMat, this);
+			FunnelMesh->SetVisibility(true);
+			FallbackFunnel->SetVisibility(false);
+		}
+		float StartAge = -1.f; // debug: -AerosTornadoAge=0.5 starts half way through the life cycle
+		if (HasAuthority() && FParse::Value(FCommandLine::Get(), TEXT("AerosTornadoAge="), StartAge)) Age = FMath::Clamp(StartAge, 0.f, 0.99f) * Lifetime;
 
 		FRandomStream Rand(Seed);
 		const int32 Count = 180;
@@ -405,4 +428,191 @@ void AAerosTornado::UpdateFallbackVisuals(float DeltaSeconds)
 		DebrisTransforms[K] = FTransform(FRotator(D.Phase * 57.f, D.Phase * 31.f, 0.f), P, FVector(S));
 	}
 	FallbackDebris->BatchUpdateInstancesTransforms(0, DebrisTransforms, true, true, true);
+	if (FunnelMesh->IsVisible()) UpdateFunnelMesh(DeltaSeconds); // last: it also places the wall cloud
+}
+
+// =====================================================================
+//  Deformable funnel (procedural tube)
+// =====================================================================
+
+EAerosTornadoShape AAerosTornado::PickShape(int32 InEFRating, int32 InSeed)
+{
+	// Spotter statistics: weak tornadoes are ropes / needles / cones, violent ones wedges / stovepipes
+	const float U = Aeros::Phys::Hash01(uint32(InSeed), 0x5Au, 0x7Eu, 3u);
+	if (InEFRating <= 1) return U < 0.3f ? EAerosTornadoShape::Rope : (U < 0.65f ? EAerosTornadoShape::Needle : EAerosTornadoShape::Cone);
+	if (InEFRating <= 3)
+	{
+		if (U < 0.35f) return EAerosTornadoShape::Cone;
+		if (U < 0.6f) return EAerosTornadoShape::Stovepipe;
+		if (U < 0.75f) return EAerosTornadoShape::Concave;
+		if (U < 0.85f) return EAerosTornadoShape::Hourglass;
+		return EAerosTornadoShape::Wedge;
+	}
+	return U < 0.45f ? EAerosTornadoShape::Wedge : (U < 0.7f ? EAerosTornadoShape::Stovepipe : EAerosTornadoShape::Multivortex);
+}
+
+float AAerosTornado::ShapeProfile(EAerosTornadoShape InShape, float T) const
+{
+	// Relative radius from the ground (T = 0) to the cloud base (T = 1)
+	switch (InShape)
+	{
+	case EAerosTornadoShape::Rope:        return 0.12f + 0.05f * T;
+	case EAerosTornadoShape::Needle:      return 0.14f + 0.36f * FMath::Pow(T, 1.5f);
+	case EAerosTornadoShape::Cone:        return 0.18f + 0.82f * FMath::Pow(T, 1.2f);
+	case EAerosTornadoShape::Stovepipe:   return 0.85f + 0.15f * T * T * T;
+	case EAerosTornadoShape::Concave:     return 0.14f + 0.86f * T * T * T;
+	case EAerosTornadoShape::Hourglass:   return 0.4f + 0.6f * FMath::Pow(FMath::Abs(T - 0.45f) / 0.55f, 1.3f);
+	case EAerosTornadoShape::Wedge:       return 0.9f + 0.25f * T;
+	case EAerosTornadoShape::Multivortex: return 0.95f + 0.2f * T;
+	default:                              return 0.5f;
+	}
+}
+
+void AAerosTornado::BuildTube(int32 Section, const TArray<FVector>& Axis, const TArray<float>& Radius, const TArray<float>& Alpha, float Roughness)
+{
+	const int32 Seg = 32;
+	const int32 Rings = Axis.Num();
+	if (Rings < 2) return;
+	TubeVerts.Reset();
+	TubeNormals.Reset();
+	TubeUVs.Reset();
+	TubeColors.Reset();
+
+	for (int32 K = 0; K < Rings; ++K)
+	{
+		// Local frame around the (bent) axis
+		const FVector Tangent = (Axis[FMath::Min(K + 1, Rings - 1)] - Axis[FMath::Max(K - 1, 0)]).GetSafeNormal();
+		FVector Side = FVector::CrossProduct(Tangent, FVector::ForwardVector);
+		if (Side.SizeSquared() < 1e-4) Side = FVector::CrossProduct(Tangent, FVector::RightVector);
+		Side.Normalize();
+		const FVector Side2 = FVector::CrossProduct(Tangent, Side);
+		for (int32 S = 0; S <= Seg; ++S)
+		{
+			const float A = 2.f * PI * float(S) / float(Seg);
+			const FVector Dir = Side * FMath::Cos(A) + Side2 * FMath::Sin(A);
+			// Lumpy, turning silhouette (condensation is never a perfect cylinder)
+			const float Wobble = 1.f + Roughness * (0.6f * FMath::Sin(3.f * A + VisualTime * 1.7f + K * 0.4f) + 0.4f * FMath::Sin(7.f * A - VisualTime * 2.3f + K * 0.9f));
+			TubeVerts.Add(Axis[K] + Dir * Radius[K] * Wobble);
+			TubeNormals.Add(Dir);
+			TubeUVs.Add(FVector2D(float(S) / Seg, float(K) / (Rings - 1)));
+			TubeColors.Add(FLinearColor(1.f, 1.f, 1.f, Alpha[K]));
+		}
+	}
+
+	if (!TubeSectionsCreated.Contains(Section))
+	{
+		TubeTris.Reset();
+		for (int32 K = 0; K + 1 < Rings; ++K)
+		{
+			for (int32 S = 0; S < Seg; ++S)
+			{
+				const int32 I0 = K * (Seg + 1) + S, I1 = I0 + 1, I2 = I0 + Seg + 1, I3 = I2 + 1;
+				TubeTris.Append({ I0, I2, I1, I1, I2, I3 });
+			}
+		}
+		FunnelMesh->CreateMeshSection_LinearColor(Section, TubeVerts, TubeTris, TubeNormals, TubeUVs, TubeColors, TArray<FProcMeshTangent>(), false);
+		FunnelMesh->SetMaterial(Section, Section == 0 ? TubeMID : SubTubeMID);
+		TubeSectionsCreated.Add(Section);
+	}
+	else
+	{
+		FunnelMesh->UpdateMeshSection_LinearColor(Section, TubeVerts, TubeNormals, TubeUVs, TubeColors, TArray<FProcMeshTangent>());
+	}
+}
+
+void AAerosTornado::UpdateFunnelMesh(float DeltaSeconds)
+{
+	using Aeros::Phys::SmoothStep01;
+	const float Life = Lifetime > 0.f ? FMath::Clamp(Age / Lifetime, 0.f, 1.f) : 1.f;
+	const float Form = SmoothStep01(Life / 0.12f);           // funnel lowers from the cloud
+	const float Decay = SmoothStep01((Life - 0.65f) / 0.35f); // rope-out stage
+	const float Lift = SmoothStep01((Life - 0.93f) / 0.07f);  // the funnel lifts and dissipates
+	const float Strength = GetStrength();
+
+	const float HeightCm = (1000.f + float(uint32(Seed) % 500u)) * 100.f;
+	const bool bWide = Shape == EAerosTornadoShape::Wedge || Shape == EAerosTornadoShape::Multivortex;
+	const float R0 = FMath::Max(CoreRadius, 20.f) * 100.f * (bWide ? 2.6f : (Shape == EAerosTornadoShape::Stovepipe ? 1.4f : 1.2f));
+
+	// Axis: the top follows the mesocyclone (ahead along the storm motion), the base drags behind:
+	// the funnel leans, more and more as it ropes out. Slow sinuous bending, much stronger for ropes.
+	FVector Motion = TrackVelocity.GetSafeNormal2D();
+	if (Motion.IsNearlyZero()) Motion = FVector(1, 0, 0);
+	const FVector Perp(-Motion.Y, Motion.X, 0.0);
+	const float Phase = float(uint32(Seed) % 1000u) * 0.01f;
+	const FVector Top = FVector(0, 0, HeightCm) + Motion * HeightCm * (0.1f + 0.55f * Decay)
+		+ Perp * HeightCm * 0.06f * FMath::Sin(VisualTime * 0.07f + Phase);
+	const bool bRope = Shape == EAerosTornadoShape::Rope || Shape == EAerosTornadoShape::Needle;
+	// Thin funnels snake around, wide ones (wedge, stovepipe) stay almost straight until they rope out
+	const float Bend = (bWide || Shape == EAerosTornadoShape::Stovepipe ? R0 * 0.08f : R0 * 0.35f) + HeightCm * ((bRope ? 0.08f : (bWide ? 0.008f : 0.025f)) + 0.16f * Decay);
+
+	const int32 Rings = 40;
+	TArray<FVector> Axis;
+	TArray<float> Radius, Alpha;
+	Axis.SetNum(Rings);
+	Radius.SetNum(Rings);
+	Alpha.SetNum(Rings);
+	const float Extent = FMath::Lerp(0.3f, 1.f, Form) * (1.f - 0.65f * Lift); // visible fraction from the cloud down
+	const float VisibleFrom = 1.f - Extent;
+	for (int32 K = 0; K < Rings; ++K)
+	{
+		const float T = float(K) / float(Rings - 1);
+		const float U = 1.f - T;
+		// Cubic Bezier with vertical tangents at both ends
+		const FVector P1 = FVector(0, 0, HeightCm * 0.4f), P2 = Top - FVector(0, 0, HeightCm * 0.4f);
+		const FVector C = 3.f * U * U * T * P1 + 3.f * U * T * T * P2 + T * T * T * Top;
+		const FVector Sway = FMath::Sin(PI * T) * (Perp * Bend * FMath::Sin(2.f * PI * 1.3f * T + Phase + VisualTime * 0.35f)
+			+ Motion * Bend * 0.6f * FMath::Sin(2.f * PI * 2.1f * T + Phase * 1.7f + VisualTime * 0.27f));
+		Axis[K] = C + Sway;
+		const float Profile = FMath::Lerp(ShapeProfile(Shape, T), ShapeProfile(EAerosTornadoShape::Rope, T), Decay);
+		Radius[K] = FMath::Max(R0 * Profile * (0.55f + 0.45f * Form), 800.f);
+		Alpha[K] = FMath::SmoothStep(VisibleFrom, VisibleFrom + 0.1f, T) * (1.f - 0.45f * FMath::SmoothStep(0.85f, 1.f, T));
+	}
+	BuildTube(0, Axis, Radius, Alpha, bRope ? 0.04f : 0.09f);
+
+	// The wall cloud sits on top of the (leaning) funnel, a lowered rotating part of the storm base
+	const float WallCm = FMath::Max(R0 * 3.5f, 60000.f);
+	FallbackWallCloud->SetRelativeLocation(Top + FVector(0, 0, 15000.0));
+	FallbackWallCloud->SetRelativeScale3D(FVector(WallCm * 2.f / 100.f, WallCm * 2.f / 100.f, 700.f));
+	if (WallCloudMID) WallCloudMID->SetScalarParameterValue(TEXT("Opacity"), 0.45f);
+
+	// Sub-vortices: thin tubes orbiting inside a multi-vortex wedge, fading as it weakens
+	const float SubFade = FMath::Clamp(1.f - Decay / 0.6f, 0.f, 1.f) * Form;
+	for (int32 V = 0; V < NumSubVortices; ++V)
+	{
+		const int32 SubRings = 20;
+		TArray<FVector> SubAxis;
+		TArray<float> SubRadius, SubAlpha;
+		SubAxis.SetNum(SubRings);
+		SubRadius.SetNum(SubRings);
+		SubAlpha.SetNum(SubRings);
+		const float Orbit = 2.f * PI * float(V) / float(NumSubVortices) + VisualTime * 0.35f;
+		for (int32 K = 0; K < SubRings; ++K)
+		{
+			const float T = 0.7f * float(K) / float(SubRings - 1);
+			const int32 MainIndex = FMath::Clamp(int32(T * (Rings - 1)), 0, Rings - 1);
+			const float Wander = 1.f + 0.2f * FMath::Sin(VisualTime * 0.9f + V * 2.1f + T * 6.f);
+			SubAxis[K] = Axis[MainIndex] + FVector(FMath::Cos(Orbit + T * 1.2f), FMath::Sin(Orbit + T * 1.2f), 0.0) * Radius[MainIndex] * 0.6f * Wander;
+			SubRadius[K] = FMath::Max(R0 * 0.11f * (1.f - 0.4f * T / 0.7f), 600.f);
+			SubAlpha[K] = SubFade * (1.f - FMath::SmoothStep(0.45f, 0.7f, T)) * FMath::SmoothStep(0.f, 0.05f, T + 0.05f);
+		}
+		BuildTube(V + 1, SubAxis, SubRadius, SubAlpha, 0.05f);
+	}
+
+	// Look: condensation (grey-white) for weak / rope tornadoes, dark debris-laden for violent ones;
+	// the streaks turn at the real angular speed of the vortex
+	if (TubeMID)
+	{
+		const float Dark = FMath::Clamp(float(EFRating) / 5.f + (bWide ? 0.3f : 0.f), 0.f, 1.f) * (1.f - 0.7f * Decay);
+		TubeMID->SetVectorParameterValue(TEXT("Color"), FMath::Lerp(FLinearColor(0.62f, 0.64f, 0.68f), FLinearColor(0.22f, 0.2f, 0.19f), Dark));
+		TubeMID->SetScalarParameterValue(TEXT("Opacity"), (Shape == EAerosTornadoShape::Multivortex ? 0.55f : (bWide ? 0.97f : 0.85f)) * FMath::Max(Strength, 0.3f));
+		TubeMID->SetScalarParameterValue(TEXT("SpinTurns"), FMath::Clamp(MaxWind * FMath::Max(Strength, 0.2f) / (2.f * PI * R0 * 0.01f), 0.02f, 1.5f));
+		TubeMID->SetScalarParameterValue(TEXT("Streaks"), bRope ? 0.35f : 0.65f);
+	}
+	if (SubTubeMID)
+	{
+		SubTubeMID->SetVectorParameterValue(TEXT("Color"), FLinearColor(0.35f, 0.34f, 0.33f));
+		SubTubeMID->SetScalarParameterValue(TEXT("Opacity"), 0.9f);
+		SubTubeMID->SetScalarParameterValue(TEXT("SpinTurns"), 1.2f);
+		SubTubeMID->SetScalarParameterValue(TEXT("Streaks"), 0.5f);
+	}
 }

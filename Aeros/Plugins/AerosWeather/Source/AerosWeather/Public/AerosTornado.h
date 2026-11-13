@@ -20,6 +20,21 @@ class UFieldSystemComponent;
 class UStaticMeshComponent;
 class UInstancedStaticMeshComponent;
 class UMaterialInstanceDynamic;
+class UProceduralMeshComponent;
+
+/** Visible shape of the condensation funnel (storm-spotter classification). */
+UENUM(BlueprintType)
+enum class EAerosTornadoShape : uint8
+{
+	Rope,         // long thin twisting tube (often the dying stage)
+	Needle,       // thin, straight, tapering
+	Cone,         // V-shaped, wide under the cloud, narrow at the ground
+	Stovepipe,    // cylinder, same width top to bottom
+	Concave,      // concave sides: flared top, thin lower half
+	Hourglass,    // pinched in the middle
+	Wedge,        // wider than tall, debris-laden (violent)
+	Multivortex,  // wedge with several sub-vortices orbiting inside
+};
 
 UCLASS(Blueprintable)
 class AEROSWEATHER_API AAerosTornado : public AActor
@@ -91,6 +106,18 @@ public:
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Aeros|Tornado")
 	TObjectPtr<UStaticMeshComponent> FallbackWallCloud;
 
+	/** Fallback: deformable funnel tube (section 0) + sub-vortices (sections 1..N), rebuilt every frame. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Aeros|Tornado")
+	TObjectPtr<UProceduralMeshComponent> FunnelMesh;
+
+	/** Shape picked from the EF rating and the seed (same on every machine). */
+	UFUNCTION(BlueprintPure, Category = "Aeros|Tornado")
+	EAerosTornadoShape GetShape() const { return Shape; }
+
+	/** Debug / art direction: force a shape (-1 = automatic). Command line: -AerosTornadoShape=0..7. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Aeros|Tornado")
+	int32 ShapeOverride = -1;
+
 	/** Fallback: dust / debris cloud swirling around the base of the funnel. */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Aeros|Tornado")
 	TObjectPtr<UStaticMeshComponent> FallbackDustCloud;
@@ -99,6 +126,10 @@ protected:
 	void ApplyPhysicalEffects(float DeltaSeconds);
 	void UpdateFallbackVisuals(float DeltaSeconds);
 	void UpdateGround();
+	void UpdateFunnelMesh(float DeltaSeconds);
+	void BuildTube(int32 Section, const TArray<FVector>& Axis, const TArray<float>& Radius, const TArray<float>& Alpha, float Roughness);
+	static EAerosTornadoShape PickShape(int32 InEFRating, int32 InSeed);
+	float ShapeProfile(EAerosTornadoShape InShape, float T) const;
 
 private:
 	struct FDebris { float RadiusFrac, Height, Phase, Speed, Scale; };
@@ -111,6 +142,20 @@ private:
 	bool bUseFallback = false;
 
 	float ParentCheckTimer = 0.f;
+	EAerosTornadoShape Shape = EAerosTornadoShape::Cone;
+	int32 NumSubVortices = 0;
+	TArray<int32> TubeSectionsCreated;
+	TArray<FVector> TubeVerts;
+	TArray<FVector> TubeNormals;
+	TArray<FVector2D> TubeUVs;
+	TArray<FLinearColor> TubeColors;
+	TArray<int32> TubeTris;
+
+	UPROPERTY(Transient)
+	TObjectPtr<UMaterialInstanceDynamic> TubeMID;
+
+	UPROPERTY(Transient)
+	TObjectPtr<UMaterialInstanceDynamic> SubTubeMID;
 
 	UPROPERTY(Transient)
 	TObjectPtr<UMaterialInstanceDynamic> FunnelMID;
