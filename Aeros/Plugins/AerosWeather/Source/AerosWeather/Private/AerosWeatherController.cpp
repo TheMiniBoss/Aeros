@@ -80,11 +80,20 @@ void AAerosWeatherController::BindCloudMaterial()
 	Cloud->SetSkyLightCloudBottomOcclusion(0.75f);
 	// Default (quarter-res tracing + temporal) turns into grain when the time scale makes clouds
 	// move fast: the history no longer matches. Half-res tracing keeps the edges sharp.
-	if (bSharpCloudTracing)
+	if (CloudUpsamplingMode >= 0)
+	{
+		if (IConsoleVariable* Up = IConsoleManager::Get().FindConsoleVariable(TEXT("r.VolumetricRenderTarget.UpsamplingMode")))
+		{
+			Up->Set(CloudUpsamplingMode, ECVF_SetByGameSetting);
+		}
+	}
+	int32 ForcedMode = -1; // debug: -AerosCloudMode=N tries another r.VolumetricRenderTarget.Mode
+	FParse::Value(FCommandLine::Get(), TEXT("AerosCloudMode="), ForcedMode);
+	if (bSharpCloudTracing || ForcedMode >= 0)
 	{
 		if (IConsoleVariable* Mode = IConsoleManager::Get().FindConsoleVariable(TEXT("r.VolumetricRenderTarget.Mode")))
 		{
-			Mode->Set(1, ECVF_SetByGameSetting);
+			Mode->Set(ForcedMode >= 0 ? ForcedMode : 1, ECVF_SetByGameSetting);
 		}
 	}
 }

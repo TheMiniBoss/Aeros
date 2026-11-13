@@ -93,6 +93,7 @@ private:
 	int32 TourStep = -1;
 	float TourTime = 0.f;
 	bool bTourShotTaken = false;
+	bool bTourShotBTaken = false; // -AerosFlickerShots: second picture 0.2 s later
 	bool bQuitAfterTour = false;
 	float AutoTourDelay = -1.f;
 	bool bPausedForShaders = false;

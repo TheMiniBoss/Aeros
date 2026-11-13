@@ -377,6 +377,7 @@ void AAerosDemoPawn::StartTour()
 	TourStep = 0;
 	TourTime = 0.f;
 	bTourShotTaken = false;
+	bTourShotBTaken = false;
 	TourTitle = Tour[0].Title;
 	TourCaption = Tour[0].Caption;
 	if (Tour[0].Enter) Tour[0].Enter();
@@ -412,6 +413,19 @@ void AAerosDemoPawn::TickTour(float DeltaSeconds)
 	}
 	TourTime += DeltaSeconds;
 	const FTourStep& Step = Tour[TourStep];
+	// -AerosTourTimeScale=N: force the time scale after the first step (which needs x600 to grow storms),
+	// e.g. 1 to judge cloud flicker at real speed
+	float ForcedScale = 0.f;
+	if (TourStep > 0 && FParse::Value(FCommandLine::Get(), TEXT("AerosTourTimeScale="), ForcedScale) && ForcedScale > 0.f)
+	{
+		if (UAerosWeatherSubsystem* ScaleSub = UAerosWeatherSubsystem::Get(this)) ScaleSub->SetTimeScale(ForcedScale);
+	}
+	// -AerosFlickerShots: a second picture 0.2 s after the first (<Shot>_b.png); their difference measures flicker
+	if (bTourShotTaken && !bTourShotBTaken && TourTime >= Step.Duration - 0.3f && FParse::Param(FCommandLine::Get(), TEXT("AerosFlickerShots")))
+	{
+		bTourShotBTaken = true;
+		FScreenshotRequest::RequestScreenshot(FPaths::ScreenShotDir() / TEXT("AerosTour") / (Step.Shot + TEXT("_b.png")), true, false);
+	}
 
 	// One screenshot near the end of each step (HUD included, so the explanation is in the picture)
 	bool bLightningNow = false;
@@ -447,6 +461,7 @@ void AAerosDemoPawn::TickTour(float DeltaSeconds)
 	++TourStep;
 	TourTime = 0.f;
 	bTourShotTaken = false;
+	bTourShotBTaken = false;
 	if (!Tour.IsValidIndex(TourStep))
 	{
 		StopTour();
