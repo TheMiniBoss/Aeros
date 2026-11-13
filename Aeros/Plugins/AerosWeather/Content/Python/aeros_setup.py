@@ -310,18 +310,25 @@ def create_demo_map(cloud_mat, ground_mat):
         def spawn(cls, loc=(0, 0, 0), rot=(0, 0, 0)):
             return actors.spawn_actor_from_class(cls, unreal.Vector(*loc), unreal.Rotator(*rot))
 
+        def try_set(obj, prop, value):
+            # Cosmetic settings: a renamed property must not abort the whole map.
+            try:
+                obj.set_editor_property(prop, value)
+            except Exception as e:
+                unreal.log_warning("[Aeros] could not set {}: {}".format(prop, e))
+
         sun = spawn(unreal.DirectionalLight, (0, 0, 100000), (0, -45, 0))
-        sun.light_component.set_editor_property("mobility", unreal.ComponentMobility.MOVABLE)
-        sun.light_component.set_editor_property("atmosphere_sun_light", True)
+        try_set(sun.light_component, "mobility", unreal.ComponentMobility.MOVABLE)
+        try_set(sun.light_component, "atmosphere_sun_light", True)
         spawn(unreal.SkyAtmosphere)
         sky = spawn(unreal.SkyLight, (0, 0, 50000))
-        sky.light_component.set_editor_property("mobility", unreal.ComponentMobility.MOVABLE)
-        sky.light_component.set_editor_property("real_time_capture", True)
+        try_set(sky.light_component, "mobility", unreal.ComponentMobility.MOVABLE)
+        try_set(sky.light_component, "real_time_capture", True)
         fog = spawn(unreal.ExponentialHeightFog)
-        fog.component.set_editor_property("volumetric_fog", True)
+        try_set(fog.component, "enable_volumetric_fog", True)
         clouds = spawn(unreal.VolumetricCloud)
         if cloud_mat:
-            clouds.volumetric_cloud_component.set_editor_property("material", cloud_mat)
+            try_set(clouds.volumetric_cloud_component, "material", cloud_mat)
 
         ground = spawn(unreal.StaticMeshActor)
         ground.static_mesh_component.set_static_mesh(unreal.load_asset("/Engine/BasicShapes/Plane"))
