@@ -161,6 +161,7 @@ Simulation : x = est, y = nord. Unreal : X = est, **−Y = nord**. Toutes les AP
 ## Tests
 
 * `Session Frontend → Automation → Aeros` : thermodynamique, scénario supercellule, déterminisme, catastrophes (crue, tsunami, haboob, cendres, blizzard).
+* Sans Unreal : `Tests/Standalone` (`./build.sh` ou `build.bat`) compile le cœur et lance les mêmes tests en quelques minutes. Voir `Tests/Standalone/README.md`.
 
 ## Suite (roadmap)
 
