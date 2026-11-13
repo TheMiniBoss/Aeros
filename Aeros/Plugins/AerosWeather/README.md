@@ -20,7 +20,7 @@ Les matériaux et les cartes sont des fichiers binaires (`.uasset`, `.umap`) que
 |---|---|
 | `Materials/MPC_AerosWeather` | Material Parameter Collection remplie par le plugin à chaque image (mouillé, neige, cendres, crue, secousse…) |
 | `Materials/T_AerosDefaultWeather` | petite texture linéaire par défaut (nécessaire au matériau nuages) |
-| `Materials/M_AerosVolumetricCloud` | nuages volumétriques pilotés par la simulation (couverture, base, sommet, orages) |
+| `Materials/M_AerosVolumetricCloud` | nuages volumétriques pilotés par la simulation : champ de cumulus cellulaire (dômes à bases plates, sommets variés), tours d'orage, enclumes, nuages en plateau, érosion par bruits 3D Perlin-Worley du moteur |
 | `Materials/M_AerosGround` | sol qui se mouille, s'enneige, blanchit sous la grêle, grisit sous la cendre |
 | `Materials/M_AerosWater` | eau translucide des crues, ondes de tempête et tsunamis |
 | `Materials/M_AerosEmissive` | lueur sans éclairage (secours) |
@@ -61,7 +61,7 @@ Les chiffres QWERTY (1-0) marchent aussi pour les scénarios.
 * **Marqueurs** : un losange au-dessus de chaque orage, tornade, ouragan, volcan et épicentre, avec type et distance. Hors de l'écran, une flèche au bord donne la direction.
 * **Journal d'événements** (en bas à droite) : formation d'orage, tornade, séisme, tsunami, éruption, changement de temps ici.
 * **HUD expert** : tous les chiffres (sondage, CAPE, SRH, STP…).
-* **Visite guidée** (F2) : chaque étape place la caméra, déclenche le phénomène, l'explique et enregistre une capture dans `Saved/Screenshots/<plateforme>/AerosTour/`. En ligne de commande : `-AerosTour` (ou `-AerosTourQuit` pour quitter à la fin, utile pour des captures automatiques) ; `-AerosTourOnly=1,2,3` ne joue que ces étapes. L'étape « éclairs » prend sa capture au moment où un éclair brille.
+* **Visite guidée** (F2) : chaque étape place la caméra, déclenche le phénomène, l'explique et enregistre une capture dans `Saved/Screenshots/<plateforme>/AerosTour/`. En ligne de commande : `-AerosTour` (ou `-AerosTourQuit` pour quitter à la fin, utile pour des captures automatiques) ; `-AerosTourOnly=1,2,3` ne joue que ces étapes ; `-AerosDumpMaps` enregistre aussi les cartes nuages en PNG (`Saved/AerosDebug`). La visite (et la météo) se met en pause tant que des shaders compilent. L'étape « éclairs » prend sa capture au moment où un éclair brille.
 
 Console : `aeros.Scenario 0-10`, `aeros.TimeScale X`, `aeros.Time jour heure`, `aeros.Quake M km`, `aeros.Tsunami M`, `aeros.Flood mm`, `aeros.Haboob`, `aeros.Eruption VEI`, `aeros.Live lat lon nom`, `aeros.Bubble`, `aeros.Hurricane`, `aeros.Tornado`, `aeros.Debug 0-2`, `stat Aeros`.
 
@@ -162,7 +162,7 @@ Blueprint : `Get Aeros Weather`, `Get Weather At`, `Describe Weather`, événeme
 
 ### Matériaux
 
-* Nuages : `UV = (WorldXY − AerosDomain.xy) / AerosDomain.zw + 0.5` dans `AerosWeatherMap` (R couverture, G base 0-5 km, B sommet 0-16 km, A précipitation).
+* Nuages : `UV = (WorldXY − AerosDomain.xy) / AerosDomain.zw + 0.5` dans `AerosWeatherMap` (R couverture, G base 0-5 km, B sommet 0-16 km, A précipitation) et `AerosCloudShapeMap` (R enclume étalée par le vent de 500 hPa, G courant ascendant, B front de rafales / nuage en plateau, A convection). Le nœud HLSL du matériau place un nuage par cellule de 1,3 km avec une probabilité égale à la couverture (dômes qui fusionnent en tours dans les orages), puis érode les bords avec `T_VolumeNoiseShape128` / `T_VolumeNoiseErosion32` ; le bruit dérive avec le vent simulé (`AerosNoiseOffset`). Portée de rendu 180 km.
 * MPC `MPC_AerosWeather` : `AerosWetness`, `AerosSnowDepth`, `AerosHailCover`, `AerosRainIntensity`, `AerosSnowIntensity`, `AerosHailIntensity`, `AerosCloudCover`, `AerosTemperature`, `AerosWindSpeed`, `AerosLightningFlash`, `AerosFogDensity`, `AerosFloodDepth`, `AerosDust`, `AerosAshDepth`, `AerosAshFall`, `AerosBlowingSnow`, `AerosShake`, `AerosSeaLevel`, vecteurs `AerosWind`, `AerosDomain`.
 
 ## Réseau

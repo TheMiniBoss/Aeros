@@ -141,95 +141,174 @@ def create_default_texture():
 
 
 # ---------------------------------------------------------------- volumetric cloud material
+# Density is computed in HLSL (Custom node) from:
+#   Wx  weather map  (R cover, G base 0-5 km, B top 0-16 km, A precipitation)
+#   Sx  shape map    (R anvil cover, G updraft, B gust front / shelf cloud, A convective activity)
+#   N   3D Perlin-Worley shape noise (engine volume texture, 6 km tiles: ~1 km cumulus cells)
+#   E   3D Worley erosion noise (0.8 km tiles)
+# Placement: a cellular cumulus field (1.6 km cells, one dome-shaped puff per cell with probability =
+# cover), merging into towers where cover is high. In the spirit of Horizon / Nubis, 3D noises then
+# erode the edges (billowy cauliflower at the top, wispy at the base), flat dark bases. Extra layers: anvils near the tropopause
+# spreading downwind, layered shelf clouds along gust fronts.
+CLOUD_HLSL = r"""
+float cover   = saturate(Wx.r);
+float baseKm  = Wx.g * 5.0;
+float topKm   = max(Wx.b * 16.0, baseKm + 0.25);
+float anvilCv = Sx.r;
+float updraft = Sx.g;
+float gust    = Sx.b;
+float conv    = Sx.a;
+float h       = saturate((AltKm - baseKm) / (topKm - baseKm));
+
+// --- Where the clouds are: a cellular cumulus field (1.6 km cells). Each cell holds a cloud with
+// probability = cover; its radius grows with cover so a 100 % sky (storms) merges into one mass.
+// Each puff is a dome: its radius shrinks toward the top (cumulus) or stays wide (towers, conv).
+float2 q = P.xy / 1.3 + (N.gb - 0.5) * 0.35;   // domain warp: no perfect circles
+float2 qi = floor(q);
+float puff = 0.0;
+for (int j = -1; j <= 1; j++)
+{
+    for (int i = -1; i <= 1; i++)
+    {
+        float2 c = qi + float2(i, j);
+        float3 r = frac(sin(float3(dot(c, float2(127.1, 311.7)), dot(c, float2(269.5, 183.3)), dot(c, float2(419.2, 371.9)))) * 43758.5453);
+        if (r.z > cover * 1.15) continue;
+        // Each cloud has its own top (50-100 % of the layer): a field of uneven cumulus
+        float topCell = baseKm + (topKm - baseKm) * (0.5 + 0.5 * frac(r.y * 7.13));
+        if (AltKm > topCell) continue;
+        float hc = saturate((AltKm - baseKm) / max(topCell - baseKm, 0.1));
+        float domeC = lerp(sqrt(saturate(1.0 - hc * hc)), 1.0 - 0.35 * hc, conv);
+        float2 center = c + 0.15 + 0.7 * r.xy;
+        float radius = (0.35 + 0.55 * cover) * (0.75 + 0.5 * r.x) * domeC + updraft * 0.4;
+        radius *= lerp(1.0, 0.75 + 0.5 * N.r, conv);   // towers: bulging turrets up the sides
+        puff = max(puff, saturate(1.0 - length(q - center) / max(radius, 0.01)));
+    }
+}
+
+// Height profile: sharp flat base (100 m), soft top (the dome does the rest)
+float profile = saturate((AltKm - baseKm) / 0.1) * saturate((topKm - AltKm) / max(0.15 * (topKm - baseKm), 0.15));
+float cloud = saturate(puff * 2.2) * profile;
+
+// --- Detail: the 3D noises only erode the edges. Billowy (inverted Worley) at the top,
+// wispy at the base, low-frequency Perlin-Worley breaks the round outline.
+float lowFbm  = N.g * 0.625 + N.b * 0.25 + N.a * 0.125;
+float highFbm = E.r * 0.625 + E.g * 0.25 + E.b * 0.125;
+float highMod = lerp(highFbm, 1.0 - highFbm, saturate(h * 3.0));
+cloud = saturate((cloud - (1.0 - lowFbm) * 0.45) / 0.55);
+cloud = saturate((cloud - highMod * 0.5) / 0.5);
+
+// --- Anvil: thin flat sheet 9.8-12.4 km, ragged fibrous edges, thinner far downwind
+float anvilBand = saturate((AltKm - 9.8) / 0.7) * saturate((12.4 - AltKm) / 0.35);
+float anvil     = anvilBand * saturate(anvilCv * 1.3 - (1.0 - lowFbm) * 0.5) * (0.5 + 0.5 * highFbm);
+
+// --- Shelf cloud: layered wedge between 0.4 and 1.9 km along the gust front
+float shelfBand = saturate((AltKm - 0.45) / 0.08) * saturate((1.9 - AltKm) / 0.6);
+float layers    = 0.6 + 0.4 * sin(AltKm * 38.0 + N.g * 5.0);
+float shelf     = gust * shelfBand * layers * saturate(lowFbm * 1.5 - 0.2);
+
+float density = max(cloud, max(anvil * 0.4, shelf * 0.9));
+float dark = saturate(Wx.a * 1.2 + conv * h * 0.3);
+return float4(density, dark, anvil, shelf);
+"""
+
+
 def create_cloud_material(default_tex):
     mat = get_or_create("M_AerosVolumetricCloud", MAT_DIR, unreal.Material, unreal.MaterialFactoryNew())
     mel.delete_all_material_expressions(mat)
     mat.set_editor_property("material_domain", unreal.MaterialDomain.MD_VOLUME)
     mat.set_editor_property("blend_mode", unreal.BlendMode.BLEND_ADDITIVE)
 
-    # UV = (WorldXY - Domain.xy) / Domain.zw + 0.5
-    wp = node(mat, unreal.MaterialExpressionWorldPosition, -1800, 0)
-    domain = node(mat, unreal.MaterialExpressionVectorParameter, -1800, 200, parameter_name="AerosDomain",
+    # UV = (WorldXY - Domain.xy) / Domain.zw + 0.5   (vector parameters: B/A come from the RGBA output)
+    wp = node(mat, unreal.MaterialExpressionWorldPosition, -2200, 0)
+    domain = node(mat, unreal.MaterialExpressionVectorParameter, -2200, 200, parameter_name="AerosDomain",
                   default_value=unreal.LinearColor(0, 0, 32000000, 32000000))
-    wp_xy = mask(mat, wp, -1600, 0, r=True, g=True)
-    # The default output of a vector parameter is RGB (3 channels): read B and A from "RGBA"
-    d_xy = mask(mat, domain, -1600, 200, r=True, g=True, src_out="RGBA")
-    d_zw = mask(mat, domain, -1600, 300, b=True, a=True, src_out="RGBA")
-    rel = binop(mat, unreal.MaterialExpressionSubtract, wp_xy, d_xy, -1400, 50)
-    uv0 = binop(mat, unreal.MaterialExpressionDivide, rel, d_zw, -1250, 100)
-    half = const(mat, 0.5, -1250, 250)
-    uv = binop(mat, unreal.MaterialExpressionAdd, uv0, half, -1100, 100)
+    wp_xy = mask(mat, wp, -2000, 0, r=True, g=True)
+    d_xy = mask(mat, domain, -2000, 200, r=True, g=True, src_out="RGBA")
+    d_zw = mask(mat, domain, -2000, 300, b=True, a=True, src_out="RGBA")
+    rel = binop(mat, unreal.MaterialExpressionSubtract, wp_xy, d_xy, -1800, 50)
+    uv0 = binop(mat, unreal.MaterialExpressionDivide, rel, d_zw, -1650, 100)
+    uv = binop(mat, unreal.MaterialExpressionAdd, uv0, const(mat, 0.5, -1650, 250), -1500, 100)
 
-    tex = node(mat, unreal.MaterialExpressionTextureSampleParameter2D, -900, 100,
-               parameter_name="AerosWeatherMap", texture=default_tex,
-               sampler_type=unreal.MaterialSamplerType.SAMPLERTYPE_LINEAR_COLOR)
-    link(uv, "", tex, "UVs")
+    weather = node(mat, unreal.MaterialExpressionTextureSampleParameter2D, -1300, 0,
+                   parameter_name="AerosWeatherMap", texture=default_tex,
+                   sampler_type=unreal.MaterialSamplerType.SAMPLERTYPE_LINEAR_COLOR)
+    link(uv, "", weather, "UVs")
+    shape_map = node(mat, unreal.MaterialExpressionTextureSampleParameter2D, -1300, 250,
+                     parameter_name="AerosCloudShapeMap", texture=default_tex,
+                     sampler_type=unreal.MaterialSamplerType.SAMPLERTYPE_LINEAR_COLOR)
+    link(uv, "", shape_map, "UVs")
 
-    cover = mask(mat, tex, -650, 0, r=True, src_out="RGBA")
-    base01 = mask(mat, tex, -650, 100, g=True, src_out="RGBA")
-    top01 = mask(mat, tex, -650, 200, b=True, src_out="RGBA")
-    precip = mask(mat, tex, -650, 300, a=True, src_out="RGBA")
+    # Altitude (km) inside the layer set by the controller: 0.3 km + 15 km * normalized height
+    attrib = node(mat, unreal.MaterialExpressionCloudSampleAttribute, -1300, 500)
+    alt = binop(mat, unreal.MaterialExpressionMultiply, attrib, const(mat, 15.0, -1300, 650), -1100, 500, a_out="NormAltitudeInLayer")
+    alt = binop(mat, unreal.MaterialExpressionAdd, alt, const(mat, 0.3, -1100, 650), -950, 500)
 
-    # Altitude (km) inside the cloud layer set by the controller: 0.3 km + 15 km * norm
-    attrib = node(mat, unreal.MaterialExpressionCloudSampleAttribute, -900, 450)
-    alt = binop(mat, unreal.MaterialExpressionMultiply, attrib, const(mat, 15.0, -900, 600), -700, 450, a_out="NormAltitudeInLayer")
-    alt = binop(mat, unreal.MaterialExpressionAdd, alt, const(mat, 0.3, -700, 600), -550, 450)
+    # 3D noise in km, drifting with the simulated wind
+    wp_km = binop(mat, unreal.MaterialExpressionMultiply, wp, const(mat, 0.00001, -2200, 450), -2000, 450)
+    drift = node(mat, unreal.MaterialExpressionVectorParameter, -2200, 600, parameter_name="AerosNoiseOffset",
+                 default_value=unreal.LinearColor(0, 0, 0, 0))
+    pos = binop(mat, unreal.MaterialExpressionSubtract, wp_km, drift, -1800, 500)
+    uvw_shape = binop(mat, unreal.MaterialExpressionMultiply, pos, const(mat, 1.0 / 6.0, -1800, 650), -1600, 550)
+    uvw_erosion = binop(mat, unreal.MaterialExpressionMultiply, pos, const(mat, 1.0 / 0.8, -1800, 750), -1600, 700)
+    noise_shape = node(mat, unreal.MaterialExpressionTextureSample, -1300, 800,
+                       texture=unreal.load_asset("/Engine/EngineSky/VolumetricClouds/T_VolumeNoiseShape128"))
+    link(uvw_shape, "", noise_shape, "UVs")
+    noise_erosion = node(mat, unreal.MaterialExpressionTextureSample, -1300, 1050,
+                         texture=unreal.load_asset("/Engine/EngineSky/VolumetricClouds/T_VolumeNoiseErosion32"))
+    link(uvw_erosion, "", noise_erosion, "UVs")
 
-    base_km = binop(mat, unreal.MaterialExpressionMultiply, base01, const(mat, 5.0, -500, 150), -450, 100)
-    top_km = binop(mat, unreal.MaterialExpressionMultiply, top01, const(mat, 16.0, -500, 250), -450, 200)
-    base_top = binop(mat, unreal.MaterialExpressionAdd, base_km, const(mat, 0.4, -450, 330), -300, 100)
-    top_low = binop(mat, unreal.MaterialExpressionSubtract, top_km, const(mat, 1.2, -450, 380), -300, 200)
+    custom = node(mat, unreal.MaterialExpressionCustom, -700, 400)
+    custom.set_editor_property("description", "AerosCloudDensity")
+    custom.set_editor_property("output_type", unreal.CustomMaterialOutputType.CMOT_FLOAT4)
+    inputs = []
+    for name in ["AltKm", "P", "Wx", "Sx", "N", "E"]:
+        ci = unreal.CustomInput()
+        ci.set_editor_property("input_name", name)
+        inputs.append(ci)
+    custom.set_editor_property("inputs", inputs)
+    custom.set_editor_property("code", CLOUD_HLSL)
+    link(alt, "", custom, "AltKm")
+    link(pos, "", custom, "P")
+    link(weather, "RGBA", custom, "Wx")
+    link(shape_map, "RGBA", custom, "Sx")
+    link(noise_shape, "RGBA", custom, "N")
+    link(noise_erosion, "RGBA", custom, "E")
 
-    rise = node(mat, unreal.MaterialExpressionSmoothStep, -150, 100)
-    link(base_km, "", rise, "Min"); link(base_top, "", rise, "Max"); link(alt, "", rise, "Value")
-    fall = node(mat, unreal.MaterialExpressionSmoothStep, -150, 250)
-    link(top_low, "", fall, "Min"); link(top_km, "", fall, "Max"); link(alt, "", fall, "Value")
-    fall_inv = node(mat, unreal.MaterialExpressionOneMinus, 0, 250)
-    link(fall, "", fall_inv, "")
-    profile = binop(mat, unreal.MaterialExpressionMultiply, rise, fall_inv, 150, 150)
+    density = mask(mat, custom, -450, 300, r=True)
+    dark = mask(mat, custom, -450, 450, g=True)
 
-    # Billowy detail: procedural noise (cheap settings)
-    # World position is in cm: 2.5e-6 gives cloud cells of a few km (0.00008 gave 125 m speckle)
-    noise = node(mat, unreal.MaterialExpressionNoise, -500, 600, scale=0.0000025, levels=4, output_min=0.0, output_max=1.0)
-    link(wp, "", noise, "Position")
-    one_minus_noise = node(mat, unreal.MaterialExpressionOneMinus, -300, 600)
-    link(noise, "", one_minus_noise, "")
-    erosion = binop(mat, unreal.MaterialExpressionMultiply, one_minus_noise, const(mat, 0.55, -300, 700), -150, 600)
-    cover_boost = binop(mat, unreal.MaterialExpressionMultiply, cover, const(mat, 1.3, -450, 0), -300, 0)
-    dens0 = binop(mat, unreal.MaterialExpressionSubtract, cover_boost, erosion, 0, 450)
-    dens_sat = node(mat, unreal.MaterialExpressionSaturate, 150, 450)
-    link(dens0, "", dens_sat, "")
-    density = binop(mat, unreal.MaterialExpressionMultiply, dens_sat, profile, 300, 300)
-
-    # Extinction: storms (precipitation) are optically thicker
-    dark = binop(mat, unreal.MaterialExpressionMultiply, precip, const(mat, 3.0, 300, 500), 450, 450)
-    dark = binop(mat, unreal.MaterialExpressionAdd, dark, const(mat, 1.0, 450, 550), 600, 450)
-    ext = binop(mat, unreal.MaterialExpressionMultiply, density, const(mat, 0.12, 300, 600), 600, 300)
-    ext = binop(mat, unreal.MaterialExpressionMultiply, ext, dark, 750, 300)
+    # Extinction (1/m): denser in precipitation cores
+    dark_mul = binop(mat, unreal.MaterialExpressionMultiply, dark, const(mat, 3.0, -300, 550), -150, 500)
+    dark_mul = binop(mat, unreal.MaterialExpressionAdd, dark_mul, const(mat, 1.0, -150, 600), 0, 500)
+    ext = binop(mat, unreal.MaterialExpressionMultiply, density, const(mat, 0.08, -300, 350), -150, 300)
+    ext = binop(mat, unreal.MaterialExpressionMultiply, ext, dark_mul, 50, 350)
     mel.connect_material_property(ext, "", unreal.MaterialProperty.MP_SUBSURFACE_COLOR)
 
-    albedo = node(mat, unreal.MaterialExpressionConstant3Vector, 750, 100, constant=unreal.LinearColor(0.9, 0.9, 0.92, 1))
+    # Albedo: bright white tops, slightly grey in storm cores
+    albedo = node(mat, unreal.MaterialExpressionLinearInterpolate, 50, 100)
+    link(node(mat, unreal.MaterialExpressionConstant3Vector, -150, 50, constant=unreal.LinearColor(0.95, 0.95, 0.97, 1)), "", albedo, "A")
+    link(node(mat, unreal.MaterialExpressionConstant3Vector, -150, 150, constant=unreal.LinearColor(0.75, 0.77, 0.8, 1)), "", albedo, "B")
+    link(dark, "", albedo, "Alpha")
     mel.connect_material_property(albedo, "", unreal.MaterialProperty.MP_BASE_COLOR)
 
-    flash = node(mat, unreal.MaterialExpressionScalarParameter, 450, 700, parameter_name="AerosLightningFlash", default_value=0.0)
-    # Local glow: a strike only lights the cloud around it, (1 - d / 12 km)^2
-    lpos = node(mat, unreal.MaterialExpressionVectorParameter, 450, 900, parameter_name="AerosLightningPos",
+    # Lightning: local glow, (1 - d / 12 km)^2 around the strike
+    flash = node(mat, unreal.MaterialExpressionScalarParameter, -450, 900, parameter_name="AerosLightningFlash", default_value=0.0)
+    lpos = node(mat, unreal.MaterialExpressionVectorParameter, -450, 1000, parameter_name="AerosLightningPos",
                 default_value=unreal.LinearColor(0, 0, -1.0e9, 1))
-    dist = node(mat, unreal.MaterialExpressionDistance, 600, 900)
+    dist = node(mat, unreal.MaterialExpressionDistance, -300, 1000)
     link(wp, "", dist, "A")
     link(lpos, "", dist, "B")
-    ratio = binop(mat, unreal.MaterialExpressionDivide, dist, const(mat, 1200000.0, 600, 1000), 700, 950)
-    near = node(mat, unreal.MaterialExpressionOneMinus, 800, 950)
+    ratio = binop(mat, unreal.MaterialExpressionDivide, dist, const(mat, 1200000.0, -300, 1100), -150, 1050)
+    near = node(mat, unreal.MaterialExpressionOneMinus, 0, 1050)
     link(ratio, "", near, "")
-    near_sat = node(mat, unreal.MaterialExpressionSaturate, 900, 950)
+    near_sat = node(mat, unreal.MaterialExpressionSaturate, 100, 1050)
     link(near, "", near_sat, "")
-    falloff = binop(mat, unreal.MaterialExpressionMultiply, near_sat, near_sat, 1000, 950)
-    glow = binop(mat, unreal.MaterialExpressionMultiply, density, flash, 750, 650)
-    glow = binop(mat, unreal.MaterialExpressionMultiply, glow, falloff, 900, 700)
-    glow = binop(mat, unreal.MaterialExpressionMultiply, glow, const(mat, 6.0, 900, 800), 1050, 650)
+    falloff = binop(mat, unreal.MaterialExpressionMultiply, near_sat, near_sat, 200, 1050)
+    glow = binop(mat, unreal.MaterialExpressionMultiply, density, flash, 50, 900)
+    glow = binop(mat, unreal.MaterialExpressionMultiply, glow, falloff, 300, 950)
+    glow = binop(mat, unreal.MaterialExpressionMultiply, glow, const(mat, 6.0, 300, 1100), 450, 950)
     mel.connect_material_property(glow, "", unreal.MaterialProperty.MP_EMISSIVE_COLOR)
 
-    mel.layout_material_expressions(mat)
     mel.recompile_material(mat)
     eal.save_loaded_asset(mat)
     log("Cloud material ready: " + mat.get_path_name())

@@ -82,6 +82,7 @@ private:
 	void FlyToNearestStorm();
 	void TeleportLookAt(const FVector& Location, const FVector& Target);
 	void TickTour(float DeltaSeconds);
+	void WaitForShaders(bool bWait);
 	void BuildTour();
 
 	int32 DebugLevel = 0;
@@ -94,4 +95,5 @@ private:
 	bool bTourShotTaken = false;
 	bool bQuitAfterTour = false;
 	float AutoTourDelay = -1.f;
+	bool bPausedForShaders = false;
 };

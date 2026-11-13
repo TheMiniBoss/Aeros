@@ -67,6 +67,10 @@ void AAerosWeatherController::BindCloudMaterial()
 	Cloud->SetMaterial(CloudMID);
 	Cloud->SetLayerBottomAltitude(0.3f);
 	Cloud->SetLayerHeight(15.f);
+	// Storm towers must be visible from far away (default 50 km hid everything beyond),
+	// with more samples so the longer rays keep their detail
+	Cloud->SetTracingMaxDistance(180.f);
+	Cloud->SetViewSampleCountScale(2.f);
 }
 
 void AAerosWeatherController::Tick(float DeltaSeconds)
@@ -117,6 +121,12 @@ void AAerosWeatherController::Tick(float DeltaSeconds)
 	if (CloudMID && Sub->GetWeatherMapTexture())
 	{
 		CloudMID->SetTextureParameterValue(TEXT("AerosWeatherMap"), Sub->GetWeatherMapTexture());
+		if (UAerosCloudManager* Clouds = Sub->GetCloudManager())
+		{
+			if (Clouds->GetCloudShapeMap()) CloudMID->SetTextureParameterValue(TEXT("AerosCloudShapeMap"), Clouds->GetCloudShapeMap());
+			const FVector Off = Clouds->GetCloudNoiseOffsetKm();
+			CloudMID->SetVectorParameterValue(TEXT("AerosNoiseOffset"), FLinearColor(float(Off.X), float(Off.Y), 0.f, 0.f));
+		}
 		const FVector4 D = Sub->GetDomainRect();
 		CloudMID->SetVectorParameterValue(TEXT("AerosDomain"), FLinearColor(float(D.X), float(D.Y), float(D.Z), float(D.W)));
 		CloudMID->SetScalarParameterValue(TEXT("AerosLightningFlash"), Sub->GetCloudManager() ? Sub->GetCloudManager()->GetLightningFlash() : 0.f);

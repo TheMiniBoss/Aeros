@@ -40,7 +40,7 @@ Aeros/Plugins/AerosWeather/
 4. **Boucle de test visuelle automatique** : `UnrealEditor.exe <uproject> -game -windowed -ResX=1600 -ResY=900 -AerosTourQuit -log=AerosTour.log` (lancer avec PowerShell `Start-Process`, pas Git Bash). La visite guidée (11 étapes, `-AerosTourOnly=1,2,3` pour n'en jouer que certaines ; l'étape 1 fait naître les orages) enregistre une capture par étape dans `Aeros/Saved/Screenshots/WindowsEditor/AerosTour/` puis quitte. Lire les PNG pour juger le rendu ; les lignes `Aeros tour:` / `Aeros demo:` du log disent ce qu'il y a sous la caméra.
 5. La météo réelle (Open-Meteo, `UAerosLiveWeather`) n'a jamais été testée.
 6. **Unreal MCP** : plugins activés, `.mcp.json` à la racine (http://127.0.0.1:8000/mcp), démarrage auto dans `Saved/Config/WindowsEditor/EditorPerProjectUserSettings.ini`. Le serveur n'a pas encore été vu en marche : si `unreal-mcp` n'apparaît pas, taper `ModelContextProtocol.StartServer` dans la console de l'éditeur puis recharger la session Claude.
-7. Visuel encore faible / à faire : tours orageuses pas toujours visibles de loin (matériau nuages), vague de tsunami peu visible, sol plat qui reflète le ciel en vue rasante (pas de landscape), effet « Séisme » qui dure longtemps après un M9 (répliques).
+7. Visuel encore faible / à faire : tornades (étape 3 : formes rope/cône/wedge, déformation, cycle de vie), vague de tsunami peu visible, sol plat qui reflète le ciel en vue rasante (pas de landscape), effet « Séisme » qui dure longtemps après un M9 (répliques).
 
 ## Règles apprises (erreurs à ne pas refaire)
 
@@ -54,6 +54,9 @@ Aeros/Plugins/AerosWeather/
 - Les effets « unlit » (émissifs) brillent la nuit : tout volume qui doit s'assombrir la nuit (pluie, entonnoir) doit être **lit**. Un flash global sur tout le matériau nuages blanchit le ciel la nuit : la lueur doit être locale (`AerosLightningPos`).
 - `FParse::Value` s'arrête aux virgules par défaut : passer `bShouldStopOnSeparator = false` pour lire une liste.
 - Pour fermer l'éditeur proprement : `save_assets([])` via MCP (AssetTools), puis `CloseMainWindow()` sur le process. Le MCP n'expose pas Live Coding : compiler éditeur fermé.
+- Le bruit Perlin-Worley du moteur (`T_VolumeNoiseShape128`) a surtout des valeurs hautes : un seuil « 1 - couverture » dessus donne un ciel couvert. Placer les nuages avec le champ cellulaire du nœud HLSL et garder le bruit pour l'érosion.
+- `VolumetricCloud` ne trace que 50 km par défaut : `SetTracingMaxDistance(180)`.
+- Après un changement de matériau, le premier lancement compile les shaders : la visite attend (`GShaderCompilingManager`), sinon les captures montrent les matériaux par défaut.
 - Durées de vie des acteurs (tornades, etc.) en secondes réelles : les faire vieillir avec `TimeScale / 60`, sinon ils s'accumulent quand le temps accélère.
 - Pas de variable locale qui porte le nom d'une constante de `Aeros::Phys` (`Cp`, `G`, `Lv`, `Rd`, `K0`...) : `AerosSimulation.cpp` fait `using namespace Aeros::Phys` et UE traite le masquage (C4459/C4456/C4458) comme une **erreur**.
 - **Unity build** : UE colle plusieurs `.cpp` ensemble. Un nom dans un namespace anonyme ou un `using namespace` au niveau fichier « fuit » dans les autres fichiers et masque leurs variables locales (erreur C4459). Mettre les helpers dans un namespace au nom unique (`AerosXxxInternal`) et les `using namespace` **dans les fonctions**.

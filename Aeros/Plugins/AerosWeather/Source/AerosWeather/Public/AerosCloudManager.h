@@ -8,7 +8,10 @@
 //  * Surface map (RGBA8): R wetness, G snow depth (0-50 cm), B hail cover, A temperature (-40..50 C).
 //  * Material Parameter Collection (optional): local values at the viewer for wet / snowy /
 //    hail-covered materials, wind, lightning flashes. See README for the parameter names.
-// Both textures are blended in time between two snapshots, so clouds move smoothly.
+//  * Cloud shape map (RGBA8): R anvil cover (spread downwind of deep storms by the 500 hPa wind),
+//    G updraft strength (0-30 m/s), B gust front / shelf cloud (surface convergence next to rain),
+//    A convective activity. Lets the cloud material draw anvils, towers and shelf clouds.
+// Weather / surface / hazard maps are blended in time between two snapshots, so clouds move smoothly.
 
 #pragma once
 
@@ -34,6 +37,15 @@ public:
 	UTexture2D* GetSurfaceMap() const { return SurfaceMap; }
 	/** RGBA8: R flood depth (sqrt, 0-5 m), G dust (0-50 g/m2), B ash on ground (sqrt, 0-100 mm), A sea anomaly (-5..5 m). */
 	UTexture2D* GetHazardMap() const { return HazardMap; }
+	/** RGBA8: R anvil cover, G updraft (0-30 m/s), B gust front / shelf cloud, A convective activity. */
+	UTexture2D* GetCloudShapeMap() const { return ShapeMap; }
+
+	/** Debug: writes every channel of the weather and cloud shape maps as greyscale PNGs
+	 *  (Saved/AerosDebug/<Prefix>_<channel>.png, north up). */
+	void DumpMaps(const FString& Prefix) const;
+
+	/** Cloud drift (km, Unreal XY) accumulated from the mid-level wind: offsets the 3D cloud noise. */
+	FVector GetCloudNoiseOffsetKm() const { return NoiseOffsetKm; }
 
 	/** Current lightning flash brightness at the viewer (0-1). */
 	float GetLightningFlash() const { return Flash; }
@@ -55,17 +67,24 @@ private:
 	void EnsureTextures(int32 NX, int32 NY);
 	void UpdateTextures();
 	void UpdateParameterCollection(float DeltaTime);
+	void UpdateShapeMap(const class FAerosSnapshot& Snap);
 	static void Upload(UTexture2D* Texture, const TArray<FColor>& Pixels, int32 W, int32 H);
 
 	UPROPERTY(Transient) TObjectPtr<UAerosWeatherSubsystem> Owner;
 	UPROPERTY(Transient) TObjectPtr<UTexture2D> WeatherMap;
 	UPROPERTY(Transient) TObjectPtr<UTexture2D> SurfaceMap;
 	UPROPERTY(Transient) TObjectPtr<UTexture2D> HazardMap;
+	UPROPERTY(Transient) TObjectPtr<UTexture2D> ShapeMap;
 	UPROPERTY(Transient) TObjectPtr<UMaterialParameterCollection> Collection;
 
 	TArray<FColor> WeatherPixels;
 	TArray<FColor> SurfacePixels;
 	TArray<FColor> HazardPixels;
+	TArray<FColor> ShapePixels;
+	TArray<float> AnvilAcc;
+	uint64 ShapeGeneration = MAX_uint64;
+	float ShapeTimer = 0.f;
+	FVector NoiseOffsetKm = FVector::ZeroVector;
 	int32 TexW = 0, TexH = 0;
 	float Timer = 0.f;
 	float Flash = 0.f;

@@ -10,6 +10,7 @@
 #include "AerosVolcano.h"
 #include "AerosWaterSurfaceComponent.h"
 #include "AerosLightning.h"
+#include "AerosCloudManager.h"
 #include "Camera/CameraComponent.h"
 #include "Components/SphereComponent.h"
 #include "GameFramework/FloatingPawnMovement.h"
@@ -19,7 +20,17 @@
 #include "EngineUtils.h"
 #include "UnrealClient.h"
 #include "Misc/CommandLine.h"
+#include "ShaderCompiler.h"
 #include "Misc/Paths.h"
+
+namespace AerosDemoPawnInternal
+{
+	/** Shaders still compiling (uncooked game / editor): the tour waits, or its screenshots show default materials. */
+	int32 PendingShaderJobs()
+	{
+		return GShaderCompilingManager ? GShaderCompilingManager->GetNumRemainingJobs() : 0;
+	}
+}
 
 AAerosDemoPawn::AAerosDemoPawn()
 {
@@ -78,7 +89,14 @@ void AAerosDemoPawn::Tick(float DeltaSeconds)
 {
 	Super::Tick(DeltaSeconds);
 	MessageTime = FMath::Max(0.f, MessageTime - DeltaSeconds);
-	if (AutoTourDelay > 0.f && (AutoTourDelay -= DeltaSeconds) <= 0.f) StartTour();
+	if (AutoTourDelay > 0.f)
+	{
+		// The countdown only runs once every shader is compiled
+		const int32 Pending = AerosDemoPawnInternal::PendingShaderJobs();
+		if (Pending > 0) Notify(FString::Printf(TEXT("Compilation des shaders : %d restants, la visite attend..."), Pending));
+		WaitForShaders(Pending > 0);
+		if (Pending == 0 && (AutoTourDelay -= DeltaSeconds) <= 0.f) StartTour();
+	}
 	TickTour(DeltaSeconds);
 	APlayerController* PC = Cast<APlayerController>(GetController());
 	if (!PC || !PC->IsLocalController()) return;
@@ -373,9 +391,25 @@ void AAerosDemoPawn::StopTour()
 	Notify(TEXT("Visite termin\u00E9e."));
 }
 
+void AAerosDemoPawn::WaitForShaders(bool bWait)
+{
+	// The weather is paused too, so the tour sees the same weather on every run
+	if (bWait == bPausedForShaders) return;
+	bPausedForShaders = bWait;
+	if (UAerosWeatherSubsystem* Sub = UAerosWeatherSubsystem::Get(this)) Sub->SetPaused(bWait);
+}
+
 void AAerosDemoPawn::TickTour(float DeltaSeconds)
 {
 	if (TourStep < 0 || !Tour.IsValidIndex(TourStep)) return;
+	// Freeze the step while shaders compile (a new effect appeared): no screenshot of default materials
+	const int32 Pending = AerosDemoPawnInternal::PendingShaderJobs();
+	WaitForShaders(Pending > 0);
+	if (Pending > 0)
+	{
+		Notify(FString::Printf(TEXT("Compilation des shaders : %d restants (la visite et la m\u00E9t\u00E9o sont en pause)"), Pending));
+		return;
+	}
 	TourTime += DeltaSeconds;
 	const FTourStep& Step = Tour[TourStep];
 
@@ -396,6 +430,13 @@ void AAerosDemoPawn::TickTour(float DeltaSeconds)
 		bTourShotTaken = true;
 		const FString File = FPaths::ScreenShotDir() / TEXT("AerosTour") / (Step.Shot + TEXT(".png"));
 		FScreenshotRequest::RequestScreenshot(File, true, false);
+		if (FParse::Param(FCommandLine::Get(), TEXT("AerosDumpMaps")))
+		{
+			if (UAerosWeatherSubsystem* DumpSub = UAerosWeatherSubsystem::Get(this))
+			{
+				if (DumpSub->GetCloudManager()) DumpSub->GetCloudManager()->DumpMaps(Step.Shot);
+			}
+		}
 	}
 	if (TourTime < Step.Duration) return;
 
