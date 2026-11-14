@@ -22,6 +22,7 @@ public class AerosWeatherDemo : ModuleRules
 			"InputCore",
 			"SlateCore",
 			"RenderCore", // ShaderCompiler.h: the tour waits for shader compilation
+			"ProceduralMeshComponent", // procedural landscape (AAerosDemoTerrain)
 		});
 	}
 }

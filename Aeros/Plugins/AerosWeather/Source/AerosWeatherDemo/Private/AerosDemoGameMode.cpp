@@ -6,6 +6,7 @@
 #include "AerosWeatherController.h"
 #include "AerosWeatherRadar.h"
 #include "AerosVolcano.h"
+#include "AerosDemoTerrain.h"
 #include "Engine/DirectionalLight.h"
 #include "Engine/ExponentialHeightFog.h"
 #include "Engine/SkyLight.h"
@@ -21,6 +22,8 @@
 #include "Materials/MaterialInterface.h"
 #include "Materials/MaterialInstanceDynamic.h"
 #include "EngineUtils.h"
+#include "GameFramework/PlayerController.h"
+#include "GameFramework/Pawn.h"
 #include "Misc/PackageName.h"
 
 namespace
@@ -151,11 +154,43 @@ void AAerosDemoGameMode::BuildScene()
 		}
 	}
 
-	// Ground: a 600 km plane (the whole domain, coast 70 km east) when nothing is under the origin
+	// Ground. Default: the procedural landscape. A level with its own ground keeps it, except the
+	// engine's flat Plane mesh (old demo map), which is replaced.
+	FAerosSimulationSettings TerrainSettings = DemoSettings;
+	for (TActorIterator<AAerosWeatherController> It(World); It; ++It) { TerrainSettings = It->Settings; break; }
+	const FVector VolcanoXY(-1800000.0, -1800000.0, 0.0);
 	FHitResult Hit;
 	// Object-type query: only real static geometry counts (the pawn already exists here and blocks every channel)
-	if (!World->LineTraceSingleByObjectType(Hit, FVector(0, 0, 100000), FVector(0, 0, -100000), FCollisionObjectQueryParams(ECC_WorldStatic)))
+	const bool bGround = World->LineTraceSingleByObjectType(Hit, FVector(0, 0, 100000), FVector(0, 0, -100000), FCollisionObjectQueryParams(ECC_WorldStatic));
+	AStaticMeshActor* FlatPlane = nullptr;
+	if (bGround)
 	{
+		AStaticMeshActor* SMA = Cast<AStaticMeshActor>(Hit.GetActor());
+		const UStaticMesh* Mesh = SMA ? SMA->GetStaticMeshComponent()->GetStaticMesh() : nullptr;
+		if (Mesh && Mesh->GetPathName() == TEXT("/Engine/BasicShapes/Plane.Plane")) FlatPlane = SMA;
+	}
+	if (bProceduralTerrain && (!bGround || FlatPlane))
+	{
+		if (FlatPlane) FlatPlane->Destroy();
+		Terrain = World->SpawnActor<AAerosDemoTerrain>(FVector::ZeroVector, FRotator::ZeroRotator, P);
+		if (Terrain)
+		{
+			Terrain->Configure(TerrainSettings);
+			if (bSpawnVolcano) Terrain->AddPad(VolcanoXY, 7000.f, 4000.f); // flat base for the cone
+			FVector Start(0, 0, 0);
+			if (APlayerController* PC = World->GetFirstPlayerController())
+			{
+				if (APawn* Pawn = PC->GetPawn()) Start = Pawn->GetActorLocation();
+			}
+			Terrain->BuildNow(Start);
+		}
+		SpawnProps();
+		UE_LOG(LogTemp, Display, TEXT("Aeros demo: procedural landscape%s, ground at the origin Z=%.0f"),
+			FlatPlane ? TEXT(" (replaced the flat plane)") : TEXT(""), GroundZ(0, 0));
+	}
+	else if (!bGround)
+	{
+		// Flat fallback: a 600 km plane (the whole domain, coast 70 km east)
 		if (AStaticMeshActor* Ground = World->SpawnActor<AStaticMeshActor>(FVector::ZeroVector, FRotator::ZeroRotator, P))
 		{
 			Ground->SetMobility(EComponentMobility::Movable);
@@ -196,13 +231,14 @@ void AAerosDemoGameMode::BuildScene()
 	for (TActorIterator<AAerosVolcano> It(World); It; ++It) { bHasVolcano = true; break; }
 	if (!bHasVolcano && bSpawnVolcano)
 	{
-		// 25 km north-west: a 1.8 km high cone (fallback mountain) that can erupt
-		AAerosVolcano* V = World->SpawnActorDeferred<AAerosVolcano>(AAerosVolcano::StaticClass(), FTransform(FVector(-1800000.0, -1800000.0, 0.0)));
+		// 25 km north-west: a 1.8 km high cone (fallback mountain) that can erupt, on its flat pad
+		const FVector At(VolcanoXY.X, VolcanoXY.Y, GroundZ(VolcanoXY.X, VolcanoXY.Y));
+		AAerosVolcano* V = World->SpawnActorDeferred<AAerosVolcano>(AAerosVolcano::StaticClass(), FTransform(At));
 		if (V)
 		{
 			V->bFallbackCone = true;
 			V->MaxVEI = 6;
-			V->FinishSpawning(FTransform(FVector(-1800000.0, -1800000.0, 0.0)));
+			V->FinishSpawning(FTransform(At));
 		}
 	}
 
@@ -229,7 +265,8 @@ void AAerosDemoGameMode::SpawnProps()
 		for (int32 S = 0; S < Stack; ++S)
 		{
 			const float Size = Rand.FRandRange(0.6f, 2.5f);
-			const FVector Loc(FMath::Cos(A) * R, FMath::Sin(A) * R, 60.f * Size + S * 105.f * Size);
+			const double X = FMath::Cos(A) * R, Y = FMath::Sin(A) * R;
+			const FVector Loc(X, Y, GroundZ(X, Y) + 60.f * Size + S * 105.f * Size);
 			AStaticMeshActor* Prop = World->SpawnActor<AStaticMeshActor>(Loc, FRotator(0, Rand.FRandRange(0.f, 90.f), 0), P);
 			if (!Prop) continue;
 			Prop->SetMobility(EComponentMobility::Movable);
@@ -244,4 +281,9 @@ void AAerosDemoGameMode::SpawnProps()
 			}
 		}
 	}
+}
+
+double AAerosDemoGameMode::GroundZ(double X, double Y) const
+{
+	return Terrain ? Terrain->GetGroundZ(X, Y) : 0.0;
 }

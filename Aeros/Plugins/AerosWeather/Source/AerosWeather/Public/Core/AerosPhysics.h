@@ -123,6 +123,14 @@ namespace Aeros::Phys
 		return 3.44e-5f * FMath::Pow(FMath::Max(CloudTop_km, 0.f), 4.9f);
 	}
 
+	/** Flashes per minute from the maximum updraft (m/s), Price & Rind 1992: F = 5e-6 W^4.54.
+	 *  The cloud-top form underestimates intense storms (supercells flash 30-200 / min): ~25 / min at
+	 *  30 m/s, ~94 / min at 40 m/s. */
+	FORCEINLINE float FlashRateUpdraft(float Updraft_ms)
+	{
+		return 5.0e-6f * FMath::Pow(FMath::Max(Updraft_ms, 0.f), 4.54f);
+	}
+
 	/** Enhanced Fujita rating from 3 s gust (m/s). */
 	FORCEINLINE int32 EFScale(float Wind)
 	{

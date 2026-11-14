@@ -37,7 +37,17 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Aeros Demo")
 	bool bSpawnVolcano = true;
 
+	/** Procedural landscape (hills, mountains, lakes, beaches, sea) instead of a flat plane. Replaces the
+	 *  engine's flat Plane mesh if that is the only ground under the origin (old demo map). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Aeros Demo")
+	bool bProceduralTerrain = true;
+
+	/** The landscape built by this game mode (null with a level that has its own ground). */
+	UPROPERTY(Transient, BlueprintReadOnly, Category = "Aeros Demo")
+	TObjectPtr<class AAerosDemoTerrain> Terrain;
+
 private:
 	void BuildScene();
 	void SpawnProps();
+	double GroundZ(double X, double Y) const;
 };

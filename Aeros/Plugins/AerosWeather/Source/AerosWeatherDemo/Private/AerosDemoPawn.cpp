@@ -9,6 +9,7 @@
 #include "AerosTornado.h"
 #include "AerosVolcano.h"
 #include "AerosWaterSurfaceComponent.h"
+#include "AerosDemoTerrain.h"
 #include "AerosLightning.h"
 #include "AerosCloudManager.h"
 #include "Camera/CameraComponent.h"
@@ -345,8 +346,22 @@ void AAerosDemoPawn::FlyToNearestStorm()
 //  Guided tour
 // =====================================================================
 
-void AAerosDemoPawn::TeleportLookAt(const FVector& Location, const FVector& Target)
+void AAerosDemoPawn::TeleportLookAt(const FVector& InLocation, const FVector& InTarget)
 {
+	// Tour heights are meant above flat ground: on the landscape, keep the camera (and its target) at
+	// least that high above the relief
+	FVector Location = InLocation, Target = InTarget;
+	for (TActorIterator<AAerosDemoTerrain> It(GetWorld()); It; ++It)
+	{
+		const double Ground = It->GetGroundZ(Location.X, Location.Y);
+		const double Lift = FMath::Max(Ground + FMath::Max(InLocation.Z, 2000.0) - Location.Z, 0.0);
+		if (Lift > 0.0 && InLocation.Z < 1000000.0) // not for the high views (15 km)
+		{
+			Location.Z += Lift;
+			Target.Z += Lift;
+		}
+		break;
+	}
 	SetActorLocation(Location);
 	if (AController* C = GetController()) C->SetControlRotation((Target - Location).Rotation());
 	FHitResult Hit;

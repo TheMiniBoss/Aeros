@@ -197,6 +197,26 @@ bool FAerosCloudVolumeTest::RunTest(const FString& Parameters)
 	if (!Strongest) return true;
 	const FAerosStormData& St = *Strongest;
 
+	// --- Lightning: the busiest storm flashes at its rate over the last 30 s step (a per-step cap of 10 kept
+	// supercells at 20 flashes / min whatever their 60-120 / min rate)
+	{
+		const FAerosStormData* Busiest = nullptr;
+		for (const FAerosStormData& B : Snap.Storms)
+			if (!Busiest || B.LightningRate > Busiest->LightningRate) Busiest = &B;
+		if (Busiest && Busiest->LightningRate >= 40.f)
+		{
+			// Strikes are generated once a minute and kept 2 minutes: at least one minute's worth is listed
+			int32 Flashes = 0;
+			for (const FAerosLightningStrike& L : Snap.Lightning)
+				if (L.StormId == Busiest->Id) ++Flashes;
+			TestTrue(TEXT("Busiest storm flashes at its rate (>= 60 % of one minute)"), Flashes >= int32(0.6f * Busiest->LightningRate));
+		}
+		else
+		{
+			TestTrue(TEXT("Outbreak has a storm with >= 40 flashes / min"), false);
+		}
+	}
+
 	FAerosCloudVolumeDesc Desc;
 	Desc.Center = FAerosCloudVolume::SnapCenter(St.UpdraftLocation);
 	TArray<uint8> Grid;

@@ -1198,7 +1198,7 @@ void FAerosSimulation::ColumnPhysics(int32 I, int32 J, FAerosCell& C, float Dt) 
 	}
 
 	C.Lightning = (C.Conv > 0.25f && C.W > 8.f && C.EL > 6000.f)
-		? FMath::Min(FlashRate(C.EL * 0.001f) * SmoothStep01((C.Conv - 0.25f) / 0.5f), 80.f) : 0.f;
+		? FMath::Min(FMath::Max(FlashRate(C.EL * 0.001f), FlashRateUpdraft(C.W)) * SmoothStep01((C.Conv - 0.25f) / 0.5f), 150.f) : 0.f;
 
 	// ---- 8. Ground accumulation ------------------------------------------------------
 	if (Settings.bEnableSurfaceAccumulation)
@@ -1628,7 +1628,7 @@ void FAerosSimulation::DetectAndTrackStorms(float Interval)
 		D.MaxHail = Comp.MaxHail;
 		D.MaxRainRate = Comp.MaxRain;
 		D.CloudTop = Comp.MaxTop;
-		D.LightningRate = FMath::Min(Comp.MaxLtg + 0.2f * (Comp.SumLtg - Comp.MaxLtg), 120.f);
+		D.LightningRate = FMath::Min(Comp.MaxLtg + 0.2f * (Comp.SumLtg - Comp.MaxLtg), 200.f);
 		D.CAPE = Comp.CAPE; D.SRH01 = Comp.SRH01; D.SRH03 = Comp.SRH03; D.BulkShear06 = Comp.Shear; D.LCL = Comp.LCL;
 		D.STP = Comp.MaxSTP; D.SCP = Comp.MaxSCP; D.Mesocyclone = Comp.MaxMeso;
 		D.Intensity = FMath::Clamp(FMath::Max((Comp.MaxDBZ - 30.f) / 35.f, Comp.MaxW / 50.f), 0.f, 1.f);
@@ -1656,16 +1656,17 @@ void FAerosSimulation::GenerateLightning(float Interval)
 		const FIntPoint Range = CompOfStorm[K];
 		const float Lambda = D.LightningRate / 60.f * Interval;
 
-		// Poisson sample (Knuth) with deterministic uniforms
+		// Poisson sample (Knuth) with deterministic uniforms; a supercell at 120-200 / min needs 60-100 per
+		// 30 s step (the old cap of 10 kept every storm at 20 / min)
 		int32 Count = 0;
-		float L = FMath::Exp(-FMath::Min(Lambda, 30.f)), Prod = 1.f;
-		for (int32 It = 0; It < 24; ++It)
+		float L = FMath::Exp(-FMath::Min(Lambda, 80.f)), Prod = 1.f;
+		for (int32 It = 0; It < 128; ++It)
 		{
 			Prod *= Hash01(Settings.Seed, uint32(StepCount), uint32(D.Id), uint32(It));
 			if (Prod <= L) break;
 			++Count;
 		}
-		Count = FMath::Min(Count, 10);
+		Count = FMath::Min(Count, 100);
 
 		for (int32 S = 0; S < Count; ++S)
 		{
@@ -1679,7 +1680,10 @@ void FAerosSimulation::GenerateLightning(float Interval)
 			FAerosLightningStrike Strike;
 			Strike.Sequence = NextStrikeSeq++;
 			Strike.Location = DomainToWorld(X, Y);
-			Strike.SimTime = float(SimTime - Interval * U2);
+			// Spread over the coming interval, own uniform (U2 also places the strike). Dating them in the past
+			// interval made half of them already late for the display clock (one step behind): they fired
+			// in a burst with each new snapshot, together with the storm's jump.
+			Strike.SimTime = float(SimTime + Interval * Hash01(Settings.Seed ^ 0x5A5A, uint32(StepCount), uint32(D.Id), uint32(S)));
 			Strike.PeakCurrent = 12.f + 45.f * U3 * U3;
 			Strike.bCloudToGround = U1 < 0.3f;
 			Strike.StormId = D.Id;
@@ -1705,7 +1709,8 @@ void FAerosSimulation::GenerateLightning(float Interval)
 			Lightning.Add(Strike);
 		}
 	}
-	if (Lightning.Num() > 256) Lightning.RemoveAt(0, Lightning.Num() - 256);
+	// Room for one step of a whole outbreak (10 storms x 60-100 strikes)
+	if (Lightning.Num() > 1536) Lightning.RemoveAt(0, Lightning.Num() - 1536);
 }
 
 // =====================================================================
