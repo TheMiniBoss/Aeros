@@ -589,13 +589,45 @@ bool UAerosWeatherSubsystem::FindNearestOcean(FVector From, FVector& OutCoast, F
 	if (!Current || !Current->IsValid()) return false;
 	float GX, GY;
 	Current->WorldToGrid(From, GX, GY);
+	const int32 NX = Current->NX, NY = Current->NY;
+
+	// Only large water bodies count as ocean: lakes (terrain hollows below sea level are water cells
+	// too) must not receive tsunamis or hurricanes. Size of each 4-connected water body, by flood fill.
+	TArray<int32> Body;
+	Body.Init(-1, NX * NY);
+	TArray<int32> BodySize, Stack;
+	int32 Largest = 0;
+	for (int32 Seed = 0; Seed < NX * NY; ++Seed)
+	{
+		if (Body[Seed] >= 0 || !Current->Cells[Seed].bWater) continue;
+		const int32 Id = BodySize.Add(0);
+		Body[Seed] = Id;
+		Stack.Reset();
+		Stack.Add(Seed);
+		while (Stack.Num() > 0)
+		{
+			const int32 K = Stack.Pop(EAllowShrinking::No);
+			++BodySize[Id];
+			const int32 I = K % NX, J = K / NX;
+			const int32 Next[4] = { I > 0 ? K - 1 : -1, I < NX - 1 ? K + 1 : -1, J > 0 ? K - NX : -1, J < NY - 1 ? K + NX : -1 };
+			for (const int32 N : Next)
+			{
+				if (N >= 0 && Body[N] < 0 && Current->Cells[N].bWater) { Body[N] = Id; Stack.Add(N); }
+			}
+		}
+		Largest = FMath::Max(Largest, BodySize[Id]);
+	}
+	// 150 cells = 600 km2 at 2 km; a small domain whose only water is small keeps its largest body
+	const int32 MinOceanCells = FMath::Min(150, Largest);
+
 	int32 Best = -1;
 	float BestD2 = TNumericLimits<float>::Max();
-	for (int32 J = 0; J < Current->NY; ++J)
+	for (int32 J = 0; J < NY; ++J)
 	{
-		for (int32 I = 0; I < Current->NX; ++I)
+		for (int32 I = 0; I < NX; ++I)
 		{
-			if (!Current->Cells[I + J * Current->NX].bWater) continue;
+			const int32 K = I + J * NX;
+			if (Body[K] < 0 || BodySize[Body[K]] < MinOceanCells) continue;
 			const float D2 = FMath::Square(I + 0.5f - GX) + FMath::Square(J + 0.5f - GY);
 			if (D2 < BestD2) { BestD2 = D2; Best = I + J * Current->NX; }
 		}
