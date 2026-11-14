@@ -252,7 +252,7 @@ void FAerosCloudVolume::Build(const FAerosSnapshot& Snap, const FAerosCloudVolum
 			for (int32 Z = 0; Z < NZ; ++Z)
 			{
 				const float Alt = (Z + 0.5f) * VZ;
-				float Dens = 0.f, Dark = 0.f;
+				float Dens = 0.f, Dark = 0.f, RainAmount = 0.f;
 
 				// Stratiform deck
 				if (StratDensity > 0.f && Alt > StratBase && Alt < StratTop) Dens = StratDensity * Smooth(StratBase, StratBase + 0.2f, Alt);
@@ -309,6 +309,14 @@ void FAerosCloudVolume::Build(const FAerosSnapshot& Snap, const FAerosCloudVolum
 							Dark = FMath::Max(Dark, Sh.Darkness * Core / 0.8f);
 						}
 					}
+					// Rain shaft below the base: no cloud density (R stays 0), rain amount in G; the shader turns
+					// it into a thin grey veil (a mesh curtain drew over the clouds as a white cylinder)
+					if (Alt < Sh.LCL && Sh.Darkness > 0.f)
+					{
+						const float D = FMath::Sqrt(FMath::Square(PX - Sh.HX) + FMath::Square(PY - Sh.HY));
+						const float Rain = Sh.Darkness * (1.f - Smooth(0.5f * Sh.CoreR, Sh.CoreR, D));
+						if (Rain > 0.f) RainAmount = FMath::Max(RainAmount, Rain);
+					}
 					// Wall cloud: lowered rotating base under the updraft
 					if (Sh.WallR > 0.f && Alt >= Sh.LCL - 0.4f && Alt < Sh.LCL)
 					{
@@ -327,10 +335,10 @@ void FAerosCloudVolume::Build(const FAerosSnapshot& Snap, const FAerosCloudVolum
 					}
 				}
 
-				if (Dens <= 0.f) continue;
+				if (Dens <= 0.f && RainAmount <= 0.f) continue;
 				const int32 Index = 2 * (X + Y * NX + Z * NX * NY);
 				OutRG8[Index] = uint8(FMath::Clamp(Dens, 0.f, 1.f) * 255.f + 0.5f);
-				OutRG8[Index + 1] = uint8(FMath::Clamp(Dark, 0.f, 1.f) * 255.f + 0.5f);
+				OutRG8[Index + 1] = uint8(FMath::Clamp(FMath::Max(Dark, RainAmount), 0.f, 1.f) * 255.f + 0.5f);
 			}
 		}
 	});

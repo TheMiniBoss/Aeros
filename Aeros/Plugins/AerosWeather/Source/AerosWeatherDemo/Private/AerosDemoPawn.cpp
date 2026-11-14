@@ -457,6 +457,7 @@ void AAerosDemoPawn::TickTour(float DeltaSeconds)
 	if (!bTourShotTaken && (bLightningNow || TourTime >= Step.Duration - 0.5f))
 	{
 		bTourShotTaken = true;
+		UE_LOG(LogTemp, Display, TEXT("Aeros tour: shot %s %s"), *Step.Shot, bLightningNow ? TEXT("on a lightning flash") : TEXT("at the end of the step"));
 		const FString File = FPaths::ScreenShotDir() / TEXT("AerosTour") / (Step.Shot + TEXT(".png"));
 		FScreenshotRequest::RequestScreenshot(File, true, false);
 		if (FParse::Param(FCommandLine::Get(), TEXT("AerosDumpMaps")))

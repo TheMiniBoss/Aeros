@@ -92,6 +92,11 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Aeros|Storm")
 	float CloudBaseHeight = 150000.f;
 
+	/** Show the translucent mesh rain curtain. Off by default: the volumetric clouds draw the rain shaft
+	 *  (voxel grid + rain map); the mesh drew over the clouds as a white cylinder. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Aeros|Storm")
+	bool bMeshRainShaft = false;
+
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Aeros|Storm")
 	TObjectPtr<UNiagaraComponent> StormVFX;
 

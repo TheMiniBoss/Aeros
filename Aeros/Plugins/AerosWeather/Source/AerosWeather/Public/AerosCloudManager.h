@@ -102,7 +102,9 @@ private:
 	TArray<FColor> WeatherPixels;
 	TArray<FColor> SurfacePixels;
 	TArray<FColor> HazardPixels;
-	TArray<FColor> ShapePixels;
+	TArray<FColor> ShapePixels;      // shape map of the current snapshot
+	TArray<FColor> ShapePrevPixels;  // ... of the previous one (crossfaded like the weather map)
+	TArray<FColor> ShapeBlendPixels; // uploaded
 	TArray<float> AnvilAcc;
 	uint64 ShapeGeneration = MAX_uint64;
 	float ShapeTimer = 0.f;

@@ -265,11 +265,22 @@ void UAerosStormManager::HandleLightning(const FAerosLightningStrike& Strike)
 	const FVector Viewer = Owner->GetViewerLocation();
 	if (FVector::DistSquared2D(Strike.Location, Viewer) > FMath::Square(Range)) return;
 
+	// At most ~4 flashes per real second (accelerated time shows hundreds per second: actor spam and a
+	// sky whitened by overlapping flashes). Close strikes (< 8 km) may borrow ahead: they matter most.
+	const double Now = World->GetRealTimeSeconds();
+	FlashTokens = FMath::Min(FlashTokens + float(Now - LastFlashRefill) * 4.f, 3.f);
+	LastFlashRefill = Now;
+	const bool bClose = FVector::DistSquared2D(Strike.Location, Viewer) < FMath::Square(800000.0);
+	if (FlashTokens < (bClose ? -1.f : 1.f)) return;
+	FlashTokens -= 1.f;
+
 	FActorSpawnParameters Params;
 	Params.ObjectFlags |= RF_Transient;
 	if (AAerosLightningFlash* Flash = World->SpawnActor<AAerosLightningFlash>(Params))
 	{
 		Flash->Fire(Strike, Viewer);
+		static int32 Spawned = 0;
+		if (++Spawned % 25 == 1) UE_LOG(LogTemp, Display, TEXT("Aeros lightning: %d flashes shown so far"), Spawned);
 	}
 }
 

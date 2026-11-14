@@ -108,7 +108,11 @@ void UAerosCloudManager::Tick(float DeltaTime)
 FVector4 UAerosCloudManager::GetCloudVolumeRect(int32 Index) const
 {
 	const FAerosCloudVolumeDesc& D = VolumeDescs[Index == 0 ? 1 - CurVolume : CurVolume];
-	return FVector4(D.Center.X, D.Center.Y, D.SizeKm * 100000.0, D.HeightKm);
+	// Storms move continuously between snapshots (~30 s apart): shift the grid with their mean motion,
+	// otherwise each new snapshot made them jump by a few hundred metres
+	const double Dt = FMath::Clamp(double(Owner->GetSimulationTime()) - D.SimTime, -120.0, 120.0);
+	const FVector C = D.Center + D.MotionCmS * Dt;
+	return FVector4(C.X, C.Y, D.SizeKm * 100000.0, D.HeightKm);
 }
 
 void UAerosCloudManager::UpdateCloudVolume(float DeltaTime)
@@ -163,6 +167,22 @@ void UAerosCloudManager::UpdateCloudVolume(float DeltaTime)
 	VolumeGeneration = Snap->Generation;
 	BuildingDesc = FAerosCloudVolumeDesc();
 	BuildingDesc.Center = Center;
+	BuildingDesc.SimTime = Snap->SimTime;
+	{
+		// Mean motion of the storms in and around the grid (weighted by intensity), else the steering wind
+		FVector Sum = FVector::ZeroVector;
+		double W = 0.0;
+		for (const FAerosStormData& S : Snap->Storms)
+		{
+			if (FVector::Dist2D(S.UpdraftLocation, Center) > 7000000.0) continue;
+			const double K = 0.2 + S.Intensity;
+			Sum += S.Velocity * K;
+			W += K;
+		}
+		const FVector2D Steer = (Snap->Synoptic.Wind850 + Snap->Synoptic.Wind500) * 0.5f;
+		const FVector Motion = W > 0.0 ? Sum / W : FAerosSnapshot::SimToWorldDir(float(Steer.X), float(Steer.Y));
+		BuildingDesc.MotionCmS = FVector(Motion.X, Motion.Y, 0.0) * 100.0;
+	}
 	BuildingData = MakeShared<TArray<uint8>, ESPMode::ThreadSafe>();
 	bVolumeBuilding = true;
 	TSharedPtr<TArray<uint8>, ESPMode::ThreadSafe> Out = BuildingData;
@@ -236,12 +256,28 @@ void UAerosCloudManager::UpdateTextures()
 	Upload(SurfaceMap, SurfacePixels, NX, NY);
 	Upload(HazardMap, HazardPixels, NX, NY);
 
-	// Shape map: only when a new snapshot arrived, at most 4 times per second (anvil splatting costs)
+	// Shape map: rebuilt when a new snapshot arrived (anvil splatting costs), then crossfaded from the
+	// previous one with the same alpha as the weather map (it jumped once per snapshot before)
 	if (Cur->Generation != ShapeGeneration && ShapeTimer >= 0.25f)
 	{
 		ShapeTimer = 0.f;
 		ShapeGeneration = Cur->Generation;
+		ShapePrevPixels = ShapePixels.Num() == NX * NY ? ShapePixels : TArray<FColor>();
 		UpdateShapeMap(*Cur);
+		if (ShapePrevPixels.Num() != ShapePixels.Num()) ShapePrevPixels = ShapePixels;
+	}
+	if (ShapePixels.Num() == NX * NY && ShapePrevPixels.Num() == NX * NY)
+	{
+		ShapeBlendPixels.SetNumUninitialized(NX * NY);
+		const int32 A256 = FMath::Clamp(int32(A * 256.f), 0, 256);
+		for (int32 K = 0; K < NX * NY; ++K)
+		{
+			const FColor& P = ShapePrevPixels[K];
+			const FColor& C = ShapePixels[K];
+			ShapeBlendPixels[K] = FColor(uint8((P.R * (256 - A256) + C.R * A256) >> 8), uint8((P.G * (256 - A256) + C.G * A256) >> 8),
+				uint8((P.B * (256 - A256) + C.B * A256) >> 8), uint8((P.A * (256 - A256) + C.A * A256) >> 8));
+		}
+		Upload(ShapeMap, ShapeBlendPixels, NX, NY);
 	}
 }
 
@@ -349,7 +385,6 @@ void UAerosCloudManager::UpdateShapeMap(const FAerosSnapshot& Snap)
 			ShapePixels[Row + I] = FColor(Byte(AnvilAcc[I + J * NX]), Byte(C.W / 30.f), Byte(Gust), Byte(C.Conv));
 		}
 	}
-	Upload(ShapeMap, ShapePixels, NX, NY);
 }
 
 void UAerosCloudManager::UpdateParameterCollection(float DeltaTime)

@@ -28,6 +28,9 @@ public:
 	void Tick(float DeltaTime);
 
 	void HandleLightning(const FAerosLightningStrike& Strike);
+	// Visual flash budget (real time): see HandleLightning
+	float FlashTokens = 3.f;
+	double LastFlashRefill = 0.0;
 	AAerosTornado* ForceTornado(int32 StormId);
 
 	FVector GetVortexWindAt(const FVector& WorldLocation) const;

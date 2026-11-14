@@ -242,6 +242,30 @@ bool FAerosCloudVolumeTest::RunTest(const FString& Parameters)
 	FAerosCloudVolume::Build(Single, Desc, SingleGrid);
 	TestTrue(TEXT("No anvil far upwind"), FAerosCloudVolume::SampleDensity(SingleGrid, Desc, Upwind, ELkm - 0.8f) < 0.05f);
 	TestTrue(TEXT("Clear below the cloud base away from storms"), FAerosCloudVolume::SampleDensity(SingleGrid, Desc, Upwind, 0.3f) < 0.05f);
+	// Rain shaft under the precipitation core: no cloud density (R) below the base, rain amount in G
+	{
+		const FAerosStormData* Rainiest = nullptr;
+		for (const FAerosStormData& R : Snap.Storms)
+			if (!Rainiest || R.MaxRainRate > Rainiest->MaxRainRate) Rainiest = &R;
+		TestTrue(TEXT("A storm rains (> 5 mm/h)"), Rainiest && Rainiest->MaxRainRate > 5.f);
+		if (!Rainiest) return true;
+		FAerosSnapshot RainSnap = Snap;
+		RainSnap.Storms.Reset();
+		RainSnap.Storms.Add(*Rainiest);
+		FAerosCloudVolumeDesc RainDesc;
+		RainDesc.Center = FAerosCloudVolume::SnapCenter(Rainiest->UpdraftLocation);
+		TArray<uint8> RainGrid;
+		FAerosCloudVolume::Build(RainSnap, RainDesc, RainGrid);
+		const float RainLCLkm = FMath::Max(Rainiest->LCL, 300.f) * 0.001f;
+		const FVector Core = Rainiest->HailCoreLocation.IsZero() ? Rainiest->UpdraftLocation : Rainiest->HailCoreLocation;
+		const double Half = RainDesc.SizeKm * 0.5 * 100000.0;
+		const int32 RX = FMath::FloorToInt(float((Core.X - (RainDesc.Center.X - Half)) / (RainDesc.SizeKm * 100000.0) * RainDesc.NX));
+		const int32 RY = FMath::FloorToInt(float((Core.Y - (RainDesc.Center.Y - Half)) / (RainDesc.SizeKm * 100000.0) * RainDesc.NY));
+		const int32 RZ = 0; // lowest layer: below the wall cloud (LCL - 0.4 km to LCL) as well
+		const int32 RI = 2 * (RX + RY * RainDesc.NX + RZ * RainDesc.NX * RainDesc.NY);
+		TestTrue(TEXT("Rain shaft: rain amount in G below the base"), RainGrid.IsValidIndex(RI + 1) && RainGrid[RI + 1] > 40);
+		TestTrue(TEXT("Rain shaft: no cloud density below the base"), RainGrid.IsValidIndex(RI) && RainGrid[RI] < 13);
+	}
 
 	// --- Two overlapping anvils with different tops (11 and 13 km): the anvil top must stay continuous
 	// across the overlap (no 2 km step where one anvil takes over from the other)

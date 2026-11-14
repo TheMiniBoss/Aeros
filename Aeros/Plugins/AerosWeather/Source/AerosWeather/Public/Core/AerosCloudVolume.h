@@ -23,6 +23,9 @@ struct AEROSWEATHER_API FAerosCloudVolumeDesc
 	float SizeKm = 100.f;   // horizontal size (square)
 	float HeightKm = 16.f;  // from the ground (z = 0) up
 	FVector Center = FVector::ZeroVector; // world cm, Z ignored
+	double SimTime = 0.0;                 // simulated time of the snapshot it was built from (s)
+	FVector MotionCmS = FVector::ZeroVector; // mean storm motion inside the grid (world cm/s): the renderer moves
+	                                      // the grid by MotionCmS * (display time - SimTime) between snapshots
 
 	float VoxelKmXY() const { return SizeKm / NX; }
 	float VoxelKmZ() const { return HeightKm / NZ; }

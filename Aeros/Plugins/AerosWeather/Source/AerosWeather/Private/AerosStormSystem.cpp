@@ -181,7 +181,7 @@ void AAerosStormSystem::UpdateRainShaft(float DeltaSeconds)
 {
 	if (!ShaftMID) return;
 	// Heavier rain = darker, denser curtain; hail turns it whitish. Fades in and out smoothly.
-	float Target = StormData.MaxRainRate > 2.f ? FMath::Clamp(StormData.MaxRainRate / 80.f, 0.15f, 0.65f) : 0.f;
+	float Target = (bMeshRainShaft && StormData.MaxRainRate > 2.f) ? FMath::Clamp(StormData.MaxRainRate / 80.f, 0.15f, 0.65f) : 0.f;
 	// Translucent meshes draw over the volumetric clouds (no depth test against them): seen from above
 	// the cloud base, the curtain showed through the storm as a flat ellipse. Up there the real rain is
 	// hidden by the cloud anyway.

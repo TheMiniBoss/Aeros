@@ -192,16 +192,18 @@ for (int j = -1; j <= 1; j++)
     {
         float2 c = qi + float2(i, j);
         float3 r = frac(sin(float3(dot(c, float2(127.1, 311.7)), dot(c, float2(269.5, 183.3)), dot(c, float2(419.2, 371.9)))) * 43758.5453);
-        if (r.z > cover * 1.1) continue;
+        // Grows / shrinks smoothly while the cover crosses this cell's threshold (it popped in and out)
+        float grow = saturate((cover * 1.1 - r.z) / 0.12);
+        if (grow <= 0.0) continue;
         // Each cloud has its own top (45-100 % of the depth): a field of uneven cumulus
-        float topCell = baseKm + cuDepth * (0.45 + 0.55 * frac(r.y * 7.13));
+        float topCell = baseKm + cuDepth * (0.45 + 0.55 * frac(r.y * 7.13)) * (0.35 + 0.65 * grow);
         topCell -= (topCell - baseKm) * 0.4 * (1.0 - bubbles);   // turrets of uneven height
         if (AltKm > topCell) continue;
         float hc = saturate((AltKm - baseKm) / max(topCell - baseKm, 0.1));
         // Near-vertical sides, rounded top: a cumulus, not a hemisphere
         float side = sqrt(saturate(1.0 - hc * hc * hc));
         float2 center = c + 0.2 + 0.6 * r.xy;
-        float radius = (0.3 + 0.35 * cover) * (0.7 + 0.6 * r.x) * side + updraft * 0.4;
+        float radius = ((0.3 + 0.35 * cover) * (0.7 + 0.6 * r.x) * side + updraft * 0.4) * grow;
         radius *= lerp(1.0, 0.75 + 0.5 * lowFbm, towerK);   // towers: bulging turrets up the sides
         shape = max(shape, 1.0 - length(q - center) / max(radius, 0.01));
     }
@@ -249,12 +251,21 @@ voxCu *= smoothstep(0.15, 0.35, voxCv);   // no crumbs outside the outline
 float voxIce  = saturate((voxRaw - (1.0 - lowFbm) * 0.2 - (1.0 - fib) * 0.12) * 2.5);
 float vox     = lerp(voxCu, voxIce, iceK);
 
+// --- Rain below the cloud base: the voxel grid stores the rain amount in G with no cloud density (R),
+// the 2D rain map takes over beyond the grid. A thin grey veil streaked by the noise (it replaces the
+// translucent mesh curtain, which drew over the clouds as a white cylinder).
+float voxRainAmt = voxDark * (1.0 - saturate(voxRaw * 8.0));
+float rainBelow  = 1.0 - smoothstep(baseKm - 0.1, baseKm + 0.1, AltKm);
+float rainVeil   = lerp(saturate(Wx.a * 1.2) * rainBelow, voxRainAmt, voxIn) * (0.55 + 0.45 * lowFbm) * 0.004;
+
 float full2D      = max(cloud, max(anvil, shelf * 0.9));
 float cumulusOnly = cloud * (1.0 - smoothstep(0.2, 0.4, conv));
 float density = lerp(full2D, max(cumulusOnly, vox), voxIn);
 // Rain greys only the lower cloud (liquid, below ~6 km); the glaciated tops stay white
 float rainDark = saturate(Wx.a * 1.2) * (1.0 - smoothstep(4.0, 7.0, AltKm));
 float dark    = lerp(rainDark, max(rainDark * 0.4, voxDark), voxIn);
+dark    = lerp(dark, 1.0, saturate(rainVeil * 400.0 * (1.0 - saturate(density * 20.0))));
+density = max(density, rainVeil);
 return float4(density, dark, anvil, shelf);
 """
 
@@ -475,7 +486,8 @@ def create_cloud_material(default_tex):
     falloff = binop(mat, unreal.MaterialExpressionMultiply, near_sat, near_sat, 200, 1050)
     glow = binop(mat, unreal.MaterialExpressionMultiply, density, flash, 50, 900)
     glow = binop(mat, unreal.MaterialExpressionMultiply, glow, falloff, 300, 950)
-    glow = binop(mat, unreal.MaterialExpressionMultiply, glow, const(mat, 6.0, 300, 1100), 450, 950)
+    # x2 (x6 whitened the whole night sky once the eye adapted to the dark)
+    glow = binop(mat, unreal.MaterialExpressionMultiply, glow, const(mat, 2.0, 300, 1100), 450, 950)
     mel.connect_material_property(glow, "", unreal.MaterialProperty.MP_EMISSIVE_COLOR)
 
     advanced = node(mat, unreal.MaterialExpressionVolumetricAdvancedMaterialOutput, 700, 1200)
@@ -716,6 +728,8 @@ def create_lightning_material():
     mat = get_or_create("M_AerosLightning", MAT_DIR, unreal.Material, unreal.MaterialFactoryNew())
     mel.delete_all_material_expressions(mat)
     mat.set_editor_property("shading_model", unreal.MaterialShadingModel.MSM_UNLIT)
+    # Additive: a segment whose brightness falls to 0 disappears (opaque, it was a black channel under the storm)
+    mat.set_editor_property("blend_mode", unreal.BlendMode.BLEND_ADDITIVE)
     mat.set_editor_property("used_with_instanced_static_meshes", True)
     color = node(mat, unreal.MaterialExpressionVectorParameter, -700, 0, parameter_name="Color",
                  default_value=unreal.LinearColor(0.75, 0.82, 1.0, 1.0))
