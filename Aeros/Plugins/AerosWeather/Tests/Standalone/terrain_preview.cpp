@@ -125,11 +125,11 @@ int main(int Argc, char** Argv)
 			{
 				const double Above = V - M.SeaLevelM;
 				R = Lerp(0.13, 0.26, S.Dryness); G = Lerp(0.24, 0.24, S.Dryness); B = Lerp(0.07, 0.1, S.Dryness);
-				const double Sand = std::fmax(1.0 - Smooth(1.5, 3.5, Above), S.Desert);
+				const double Sand = std::fmax(1.0 - Smooth(0.5, 1.5, Above), S.Desert);
 				R = Lerp(R, 0.62, Sand); G = Lerp(G, 0.54, Sand); B = Lerp(B, 0.38, Sand);
 				const double Rock = std::fmax(Smooth(0.45, 0.75, Slope), Smooth(1800.0, 2600.0, V) * 0.7);
 				R = Lerp(R, 0.3, Rock); G = Lerp(G, 0.28, Rock); B = Lerp(B, 0.26, Rock);
-				const double Snow = Smooth(2300.0, 2700.0, V) * (1.0 - Smooth(0.6, 0.9, Slope));
+				const double Snow = Smooth(2500.0, 2950.0, V) * (1.0 - Smooth(0.6, 0.9, Slope));
 				R = Lerp(R, 0.9, Snow); G = Lerp(G, 0.92, Snow); B = Lerp(B, 0.95, Snow);
 				R *= Shade; G *= Shade; B *= Shade;
 			}

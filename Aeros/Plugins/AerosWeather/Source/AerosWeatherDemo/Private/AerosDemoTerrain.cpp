@@ -218,8 +218,9 @@ TSharedPtr<AAerosDemoTerrain::FBatch> AAerosDemoTerrain::BuildBatch(TSharedPtr<c
 				const double Hm = Z * 0.01;
 				const double Slope = FMath::Sqrt(DZX * DZX + DZY * DZY); // rise / run
 				const double Rock = FMath::Max(Smooth(0.45, 0.8, Slope), Smooth(1900.0, 2800.0, Hm) * 0.55) * (1.0 - 0.7 * S.Desert);
-				const double Snow = Smooth(2250.0, 2650.0, Hm + 120.0 * (S.Dryness - 0.5)) * (1.0 - Smooth(0.7, 1.1, Slope));
-				const double Sand = FMath::Max(1.0 - Smooth(1.2, 3.5, Hm - SeaM), double(S.Desert)) * (1.0 - Rock);
+				const double Snow = Smooth(2500.0, 2950.0, Hm + 150.0 * (S.Dryness - 0.5)) * (1.0 - Smooth(0.7, 1.1, Slope));
+				// Beach: the first metre above the water (the start plains are 1.6-2.8 m above the sea: grass)
+				const double Sand = FMath::Max(1.0 - Smooth(0.5, 1.5, Hm - SeaM), double(S.Desert)) * (1.0 - Rock);
 				L.Colors[V] = FColor(uint8(Sand * 255.0 + 0.5), uint8(Rock * 255.0 + 0.5), uint8(Snow * 255.0 + 0.5), uint8(S.Dryness * 255.0f + 0.5f));
 			}
 		}

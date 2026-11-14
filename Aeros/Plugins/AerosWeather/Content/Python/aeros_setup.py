@@ -6,7 +6,8 @@
 #   Materials/MPC_AerosWeather          Material Parameter Collection fed by the plugin
 #   Materials/T_AerosDefaultWeather     tiny linear texture (default for texture parameters)
 #   Materials/M_AerosVolumetricCloud    Volumetric Cloud material driven by the weather map
-#   Materials/M_AerosGround             ground material: wetness, snow, hail, ash accumulation
+#   Materials/M_AerosGround             landscape ground: grass / sand / rock / snow masks + wetness, snow, hail, ash
+#   Materials/M_AerosSea                opaque sea and lakes (plane at sea level), small moving ripples
 #   Materials/M_AerosWater              translucent water (floods, storm surge, tsunami)
 #   Materials/M_AerosEmissive           unlit glow (lightning bolts, lava)
 #   Materials/M_AerosShaft              soft translucent volume (rain shafts, tornado funnel)
@@ -492,52 +493,121 @@ def create_cloud_material(default_tex):
     return mat
 
 
+def sampler_for(tex):
+    """Material sampler type matching a texture (a mismatch fails the compile -> default material)."""
+    S = unreal.MaterialSamplerType
+    TC = unreal.TextureCompressionSettings
+    comp = tex.get_editor_property("compression_settings")
+    srgb = tex.get_editor_property("srgb")
+    if comp == TC.TC_NORMALMAP:
+        return S.SAMPLERTYPE_NORMAL
+    if comp == TC.TC_GRAYSCALE:
+        return S.SAMPLERTYPE_GRAYSCALE if srgb else S.SAMPLERTYPE_LINEAR_GRAYSCALE
+    if comp == TC.TC_ALPHA:
+        return S.SAMPLERTYPE_ALPHA
+    if comp == TC.TC_MASKS:
+        return S.SAMPLERTYPE_MASKS
+    return S.SAMPLERTYPE_COLOR if srgb else S.SAMPLERTYPE_LINEAR_COLOR
+
+
+NOISE_TEX = "/Engine/EngineMaterials/Good64x64TilingNoiseHighFreq"
+
+
+def world_xy(mat, x, y):
+    wp = node(mat, unreal.MaterialExpressionWorldPosition, x, y)
+    return mask(mat, wp, x + 150, y, r=True, g=True)
+
+
+def noise_sample(mat, tex, xy, tile_cm, x, y, offset=None):
+    """Noise texture sampled in world space: one tile = tile_cm (plus an optional UV offset node)."""
+    uv = binop(mat, unreal.MaterialExpressionDivide, xy, const(mat, tile_cm, x - 150, y + 60), x, y)
+    if offset is not None:
+        uv = binop(mat, unreal.MaterialExpressionAdd, uv, offset, x + 80, y)
+    s = node(mat, unreal.MaterialExpressionTextureSample, x + 200, y, texture=tex, sampler_type=sampler_for(tex))
+    link(uv, "", s, "UVs")
+    return s
+
+
 # ---------------------------------------------------------------- ground material
 def create_ground_material(mpc):
+    """Procedural landscape ground (AAerosDemoTerrain). Vertex colour = surface masks computed on the CPU:
+    R sand (beaches, deserts), G rock (steep slopes, high ground), B snow (peaks), A dry grass.
+    World-space noise breaks the flat colours. Then the weather: wet, snow / hail cover, volcanic ash.
+    Rough everywhere (>= 0.45 even wet): no blurry sky mirror at grazing angles."""
     mat = get_or_create("M_AerosGround", MAT_DIR, unreal.Material, unreal.MaterialFactoryNew())
     mel.delete_all_material_expressions(mat)
 
     def p(name, x, y):
         return node(mat, unreal.MaterialExpressionCollectionParameter, x, y, collection=mpc, parameter_name=name)
 
+    def color(r, g, b, x, y):
+        return node(mat, unreal.MaterialExpressionConstant3Vector, x, y, constant=unreal.LinearColor(r, g, b, 1))
+
+    def lerp(a, b, alpha, x, y, a_out="", b_out="", alpha_out=""):
+        n = node(mat, unreal.MaterialExpressionLinearInterpolate, x, y)
+        link(a, a_out, n, "A"); link(b, b_out, n, "B"); link(alpha, alpha_out, n, "Alpha")
+        return n
+
+    # Surface masks (x TerrainMasks: 0 on meshes without vertex colours, which read as white)
+    vc = node(mat, unreal.MaterialExpressionVertexColor, -2000, 0)
+    use_masks = node(mat, unreal.MaterialExpressionScalarParameter, -2000, 200, parameter_name="TerrainMasks", default_value=1.0)
+    # VertexColor has no RGBA output: one masked channel at a time
+    vm = {ch: binop(mat, unreal.MaterialExpressionMultiply, vc, use_masks, -1800, 100 * i, a_out=ch)
+          for i, ch in enumerate("RGBA")}
+
+    grass = lerp(color(0.075, 0.13, 0.035, -1800, -400), color(0.2, 0.18, 0.075, -1800, -300), vm["A"], -1600, -350)
+    col = lerp(grass, color(0.5, 0.43, 0.3, -1600, -200), vm["R"], -1400, -300)
+    col = lerp(col, color(0.2, 0.185, 0.17, -1400, -150), vm["G"], -1200, -250)
+    col = lerp(col, color(0.82, 0.84, 0.88, -1200, -100), vm["B"], -1000, -200)
+
+    # World-space variation: 7 m, 61 m and 530 m noise (albedo x 0.7-1.25)
+    if eal.does_asset_exist(NOISE_TEX):
+        tex = unreal.load_asset(NOISE_TEX)
+        xy = world_xy(mat, -2000, 500)
+        n1 = noise_sample(mat, tex, xy, 700.0, -1700, 450)
+        n2 = noise_sample(mat, tex, xy, 6100.0, -1700, 600)
+        n3 = noise_sample(mat, tex, xy, 53000.0, -1700, 750)
+        s12 = binop(mat, unreal.MaterialExpressionAdd, n1, n2, -1300, 500, a_out="R", b_out="R")
+        s123 = binop(mat, unreal.MaterialExpressionAdd, s12, n3, -1150, 550, b_out="R")
+        n = binop(mat, unreal.MaterialExpressionMultiply, s123, const(mat, 0.3333, -1150, 650), -1000, 550)
+        var = lerp(const(mat, 0.7, -900, 450), const(mat, 1.25, -900, 500), n, -800, 500)
+        col = binop(mat, unreal.MaterialExpressionMultiply, col, var, -800, -150)
+    else:
+        unreal.log_warning("[Aeros] ground: no noise texture " + NOISE_TEX + ", flat colours")
+
     wet = p("AerosWetness", -900, 0)
     snow = p("AerosSnowDepth", -900, 150)
     hail = p("AerosHailCover", -900, 300)
-    ash = p("AerosAshDepth", -900, 520)
+    ash = p("AerosAshDepth", -900, 900)
+    white = color(0.9, 0.92, 0.95, -900, 750)
 
-    grass = node(mat, unreal.MaterialExpressionConstant3Vector, -900, -200, constant=unreal.LinearColor(0.13, 0.2, 0.07, 1))
-    white = node(mat, unreal.MaterialExpressionConstant3Vector, -900, 450, constant=unreal.LinearColor(0.9, 0.92, 0.95, 1))
+    # Wet: darker albedo
+    darken = lerp(const(mat, 1.0, -800, -100), const(mat, 0.6, -800, -50), wet, -600, -100)
+    wet_col = binop(mat, unreal.MaterialExpressionMultiply, col, darken, -450, -150)
 
-    # Wet: darker albedo, glossy (roadmap: water drives roughness / puddles)
-    darken = node(mat, unreal.MaterialExpressionLinearInterpolate, -600, -150)
-    link(const(mat, 1.0, -800, -100), "", darken, "A"); link(const(mat, 0.55, -800, -50), "", darken, "B"); link(wet, "", darken, "Alpha")
-    wet_col = binop(mat, unreal.MaterialExpressionMultiply, grass, darken, -450, -150)
-
-    # Snow cover (roadmap: snow drives WPO thickness) and hail whitening
+    # Snow cover and hail whitening
     snow_a = node(mat, unreal.MaterialExpressionSaturate, -600, 150)
     link(binop(mat, unreal.MaterialExpressionDivide, snow, const(mat, 4.0, -800, 220), -700, 150), "", snow_a, "")
     hail_a = binop(mat, unreal.MaterialExpressionMultiply, hail, const(mat, 0.8, -800, 360), -600, 300)
-    ash_a = node(mat, unreal.MaterialExpressionSaturate, -600, 520)
-    link(binop(mat, unreal.MaterialExpressionDivide, ash, const(mat, 20.0, -800, 600), -700, 520), "", ash_a, "")
+    ash_a = node(mat, unreal.MaterialExpressionSaturate, -600, 900)
+    link(binop(mat, unreal.MaterialExpressionDivide, ash, const(mat, 20.0, -800, 980), -700, 900), "", ash_a, "")
     cover_a = node(mat, unreal.MaterialExpressionMax, -450, 220)
     link(snow_a, "", cover_a, "A"); link(hail_a, "", cover_a, "B")
-    base = node(mat, unreal.MaterialExpressionLinearInterpolate, -300, 0)
-    link(wet_col, "", base, "A"); link(white, "", base, "B"); link(cover_a, "", base, "Alpha")
-    ash_col = node(mat, unreal.MaterialExpressionConstant3Vector, -300, -200, constant=unreal.LinearColor(0.22, 0.21, 0.2, 1))
-    base_ash = node(mat, unreal.MaterialExpressionLinearInterpolate, -150, 0)
-    link(base, "", base_ash, "A"); link(ash_col, "", base_ash, "B"); link(ash_a, "", base_ash, "Alpha")
+    base = lerp(wet_col, white, cover_a, -300, 0)
+    base_ash = lerp(base, color(0.22, 0.21, 0.2, -300, -200), ash_a, -150, 0)
     mel.connect_material_property(base_ash, "", unreal.MaterialProperty.MP_BASE_COLOR)
 
-    rough = node(mat, unreal.MaterialExpressionLinearInterpolate, -300, 250)
-    # Wet grass is darker and a bit glossy, not a mirror (0.08 reflected the whole sky)
-    link(const(mat, 0.85, -450, 400), "", rough, "A"); link(const(mat, 0.35, -450, 450), "", rough, "B"); link(wet, "", rough, "Alpha")
-    rough2 = node(mat, unreal.MaterialExpressionLinearInterpolate, -150, 250)
-    link(rough, "", rough2, "A"); link(const(mat, 0.6, -300, 450), "", rough2, "B"); link(cover_a, "", rough2, "Alpha")
-    mel.connect_material_property(rough2, "", unreal.MaterialProperty.MP_ROUGHNESS)
+    # Roughness: grass / sand 0.92, rock 0.82, snow 0.65; wet down to 0.45 (glossy, not a mirror)
+    r0 = lerp(const(mat, 0.92, -600, 400), const(mat, 0.82, -600, 450), vm["G"], -450, 420)
+    r1 = lerp(r0, const(mat, 0.65, -450, 500), vm["B"], -300, 450)
+    r2 = lerp(r1, const(mat, 0.45, -300, 550), wet, -150, 450)
+    r3 = lerp(r2, const(mat, 0.6, -150, 550), cover_a, 0, 450)
+    mel.connect_material_property(r3, "", unreal.MaterialProperty.MP_ROUGHNESS)
+    mel.connect_material_property(const(mat, 0.35, 0, 600), "", unreal.MaterialProperty.MP_SPECULAR)
 
-    wpo_z = binop(mat, unreal.MaterialExpressionMultiply, snow, const(mat, 1.0, -450, 600), -300, 600)
-    wpo = node(mat, unreal.MaterialExpressionAppendVector, -150, 600)
-    link(node(mat, unreal.MaterialExpressionConstant2Vector, -300, 700, r=0.0, g=0.0), "", wpo, "A")
+    wpo_z = binop(mat, unreal.MaterialExpressionMultiply, snow, const(mat, 1.0, -450, 700), -300, 700)
+    wpo = node(mat, unreal.MaterialExpressionAppendVector, -150, 700)
+    link(node(mat, unreal.MaterialExpressionConstant2Vector, -300, 800, r=0.0, g=0.0), "", wpo, "A")
     link(wpo_z, "", wpo, "B")
     mel.connect_material_property(wpo, "", unreal.MaterialProperty.MP_WORLD_POSITION_OFFSET)
 
@@ -545,6 +615,65 @@ def create_ground_material(mpc):
     mel.recompile_material(mat)
     eal.save_loaded_asset(mat)
     log("Ground material ready: " + mat.get_path_name())
+    return mat
+
+
+# ---------------------------------------------------------------- sea material
+def create_sea_material():
+    """Opaque sea and lakes (one plane at sea level under the landscape). Dark water, small moving
+    ripples (normal from the gradient of two scrolling noise layers), ripples fade with distance so
+    the far sea does not sparkle; specular reflection of the sky only at grazing angles."""
+    mat = get_or_create("M_AerosSea", MAT_DIR, unreal.Material, unreal.MaterialFactoryNew())
+    mel.delete_all_material_expressions(mat)
+    color = node(mat, unreal.MaterialExpressionConstant3Vector, -400, -200, constant=unreal.LinearColor(0.012, 0.04, 0.055, 1))
+    mel.connect_material_property(color, "", unreal.MaterialProperty.MP_BASE_COLOR)
+    mel.connect_material_property(const(mat, 0.14, -400, -80), "", unreal.MaterialProperty.MP_ROUGHNESS)
+    mel.connect_material_property(const(mat, 0.5, -400, -20), "", unreal.MaterialProperty.MP_SPECULAR)
+
+    if eal.does_asset_exist(NOISE_TEX):
+        tex = unreal.load_asset(NOISE_TEX)
+        xy = world_xy(mat, -2200, 200)
+        t = node(mat, unreal.MaterialExpressionTime, -2200, 400)
+        d = 1.0 / 64.0  # one texel of the 64 x 64 noise
+
+        def layer(tile_cm, speed, y):
+            drift = binop(mat, unreal.MaterialExpressionMultiply, t,
+                          node(mat, unreal.MaterialExpressionConstant2Vector, -2050, y + 120, r=speed[0], g=speed[1]), -1900, y + 100)
+            h0 = noise_sample(mat, tex, xy, tile_cm, -1700, y, drift)
+            dx = binop(mat, unreal.MaterialExpressionAdd, drift,
+                       node(mat, unreal.MaterialExpressionConstant2Vector, -1900, y + 200, r=d, g=0.0), -1800, y + 180)
+            dy = binop(mat, unreal.MaterialExpressionAdd, drift,
+                       node(mat, unreal.MaterialExpressionConstant2Vector, -1900, y + 300, r=0.0, g=d), -1800, y + 280)
+            hx = noise_sample(mat, tex, xy, tile_cm, -1700, y + 180, dx)
+            hy = noise_sample(mat, tex, xy, tile_cm, -1700, y + 280, dy)
+            gx = binop(mat, unreal.MaterialExpressionSubtract, h0, hx, -1300, y + 100, a_out="R", b_out="R")
+            gy = binop(mat, unreal.MaterialExpressionSubtract, h0, hy, -1300, y + 200, a_out="R", b_out="R")
+            g = node(mat, unreal.MaterialExpressionAppendVector, -1150, y + 150)
+            link(gx, "", g, "A"); link(gy, "", g, "B")
+            return g
+
+        g1 = layer(2400.0, (0.010, 0.006), 0)
+        g2 = layer(700.0, (-0.017, 0.011), 450)
+        g = binop(mat, unreal.MaterialExpressionAdd, g1, g2, -1000, 250)
+        # Ripple strength fades from 2.5 near the camera to 0.3 at 3 km
+        depth = node(mat, unreal.MaterialExpressionPixelDepth, -1150, 650)
+        fade = node(mat, unreal.MaterialExpressionSaturate, -900, 650)
+        link(binop(mat, unreal.MaterialExpressionDivide, depth, const(mat, 300000.0, -1150, 720), -1000, 650), "", fade, "")
+        k = node(mat, unreal.MaterialExpressionLinearInterpolate, -750, 600)
+        link(const(mat, 2.5, -900, 550), "", k, "A"); link(const(mat, 0.3, -900, 600), "", k, "B"); link(fade, "", k, "Alpha")
+        gk = binop(mat, unreal.MaterialExpressionMultiply, g, k, -600, 300)
+        nrm = node(mat, unreal.MaterialExpressionAppendVector, -450, 300)
+        link(gk, "", nrm, "A"); link(const(mat, 1.0, -600, 400), "", nrm, "B")
+        nn = node(mat, unreal.MaterialExpressionNormalize, -300, 300)
+        link(nrm, "", nn, "")
+        mel.connect_material_property(nn, "", unreal.MaterialProperty.MP_NORMAL)
+    else:
+        unreal.log_warning("[Aeros] sea: no noise texture " + NOISE_TEX + ", flat water")
+
+    mel.layout_material_expressions(mat)
+    mel.recompile_material(mat)
+    eal.save_loaded_asset(mat)
+    log("Sea material ready: " + mat.get_path_name())
     return mat
 
 
@@ -737,13 +866,17 @@ def create_demo_map(cloud_mat, ground_mat):
         if cloud_mat:
             try_set(clouds.volumetric_cloud_component, "material", cloud_mat)
 
-        ground = spawn(unreal.StaticMeshActor)
-        ground.static_mesh_component.set_static_mesh(unreal.load_asset("/Engine/BasicShapes/Plane"))
-        ground.set_actor_scale3d(unreal.Vector(200000, 200000, 1))
-        if ground_mat:
-            ground.static_mesh_component.set_material(0, ground_mat)
         spawn(unreal.PlayerStart, (0, 0, 300))
-        # AerosDemoGameMode adds the weather controller, radar, volcano and props at runtime.
+        # No ground: AerosDemoGameMode builds the procedural landscape (and the weather controller,
+        # radar, volcano and props) at runtime.
+
+    # Old maps had a flat 200 km plane: remove it (the game mode builds the landscape instead)
+    for actor in actors.get_all_level_actors():
+        if isinstance(actor, unreal.StaticMeshActor):
+            mesh = actor.static_mesh_component.get_editor_property("static_mesh")
+            if mesh and mesh.get_path_name() == "/Engine/BasicShapes/Plane.Plane":
+                actors.destroy_actor(actor)
+                log("Removed the old flat ground plane from the demo map")
 
     world = unreal.get_editor_subsystem(unreal.UnrealEditorSubsystem).get_editor_world()
     world.get_world_settings().set_editor_property("default_game_mode", demo_game_mode_class())
@@ -772,6 +905,7 @@ def main():
     step("Cloud material", create_cloud_material, assets.get("Default texture"))
     step("Ground material", create_ground_material, assets.get("MPC"))
     step("Water material", create_water_material)
+    step("Sea material", create_sea_material)
     step("Emissive mat.", create_emissive_material)
     step("Shaft material", create_shaft_material)
     step("Lightning mat.", create_lightning_material)

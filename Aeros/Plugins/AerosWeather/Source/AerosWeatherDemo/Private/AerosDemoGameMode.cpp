@@ -200,6 +200,8 @@ void AAerosDemoGameMode::BuildScene()
 			if (UMaterialInterface* GroundMat = LoadOptional<UMaterialInterface>(TEXT("/AerosWeather/Materials/M_AerosGround.M_AerosGround")))
 			{
 				M->SetMaterial(0, GroundMat);
+				// The plane has no vertex colours (read as white = sand + rock + snow): plain grass
+				if (UMaterialInstanceDynamic* MID = M->CreateDynamicMaterialInstance(0)) MID->SetScalarParameterValue(TEXT("TerrainMasks"), 0.f);
 			}
 			else if (UMaterialInstanceDynamic* MID = M->CreateDynamicMaterialInstance(0))
 			{
