@@ -256,7 +256,6 @@ bool FAerosCloudVolumeTest::RunTest(const FString& Parameters)
 		RainDesc.Center = FAerosCloudVolume::SnapCenter(Rainiest->UpdraftLocation);
 		TArray<uint8> RainGrid;
 		FAerosCloudVolume::Build(RainSnap, RainDesc, RainGrid);
-		const float RainLCLkm = FMath::Max(Rainiest->LCL, 300.f) * 0.001f;
 		const FVector Core = Rainiest->HailCoreLocation.IsZero() ? Rainiest->UpdraftLocation : Rainiest->HailCoreLocation;
 		const double Half = RainDesc.SizeKm * 0.5 * 100000.0;
 		const int32 RX = FMath::FloorToInt(float((Core.X - (RainDesc.Center.X - Half)) / (RainDesc.SizeKm * 100000.0) * RainDesc.NX));
