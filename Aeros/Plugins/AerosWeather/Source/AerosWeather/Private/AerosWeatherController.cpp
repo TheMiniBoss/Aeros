@@ -3,6 +3,7 @@
 #include "AerosWeatherController.h"
 #include "AerosWeatherSubsystem.h"
 #include "AerosCloudManager.h"
+#include "AerosTornado.h"
 #include "AerosCloudRender.h"
 #include "AerosAssetUtils.h"
 #include "Engine/TextureRenderTarget2D.h"
@@ -125,6 +126,7 @@ void AAerosWeatherController::UpdateCustomClouds(UAerosWeatherSubsystem* Sub, fl
 			P.Flashes.Add(F);
 		}
 	}
+	GatherCloudTornadoes(Sub, DeltaSeconds, P);
 	// Shadow map: 100 km centred on the viewer, snapped to 1 km (the light function reads the same rect).
 	if (CloudShadowRT)
 	{
@@ -146,6 +148,71 @@ void AAerosWeatherController::UpdateCustomClouds(UAerosWeatherSubsystem* Sub, fl
 		SkyComp->SetIntensity(BaseSkyLightIntensity * FMath::Lerp(1.f, 0.75f, CoverAbove));
 	}
 	AerosCloudRender::SetParams(P);
+}
+
+void AAerosWeatherController::GatherCloudTornadoes(UAerosWeatherSubsystem* Sub, float DeltaSeconds, FAerosCloudRenderParams& P)
+{
+	UWorld* World = GetWorld();
+	if (!World || !Sub) return;
+	const FVector Viewer = Sub->GetViewerLocation();
+	static IConsoleVariable* KVar = IConsoleManager::Get().FindConsoleVariable(TEXT("r.AerosClouds.TornadoK"));
+	const float K = KVar ? KVar->GetFloat() : 2.f;
+	// Gallery overrides (metres, m/s): cloud base and peak wind of every tornado
+	float ForcedBaseM = -1.f, ForcedVmax = -1.f;
+	FParse::Value(FCommandLine::Get(), TEXT("AerosTornadoLCL="), ForcedBaseM);
+	FParse::Value(FCommandLine::Get(), TEXT("AerosTornadoVmax="), ForcedVmax);
+
+	// The 4 nearest within 60 km
+	TArray<TPair<double, AAerosTornado*>> Near;
+	for (TActorIterator<AAerosTornado> It(World); It; ++It)
+	{
+		const double D = FVector::Dist2D(It->GetActorLocation(), Viewer);
+		if (D < 6000000.0) Near.Emplace(D, *It);
+	}
+	Near.Sort([](const TPair<double, AAerosTornado*>& A, const TPair<double, AAerosTornado*>& B) { return A.Key < B.Key; });
+	TSet<AAerosTornado*> Selected;
+	for (int32 I = 0; I < Near.Num() && I < 4; ++I) Selected.Add(Near[I].Value);
+
+	// Fades: toward 1 when selected, toward 0 when dropped (1/s): the set changes without a pop
+	for (AAerosTornado* T : Selected)
+	{
+		if (!TornadoFades.Contains(T))
+		{
+			TornadoFades.Add(T, 0.f);
+			UE_LOG(LogTemp, Verbose, TEXT("Aeros clouds: tornado %s joins the rendered set"), *T->GetName());
+		}
+	}
+	for (auto It = TornadoFades.CreateIterator(); It; ++It)
+	{
+		AAerosTornado* T = It.Key().Get();
+		const bool bIn = T && Selected.Contains(T);
+		const float OldFade = It.Value();
+		It.Value() = FMath::Clamp(OldFade + (bIn ? DeltaSeconds : -DeltaSeconds), 0.f, 1.f);
+		if (T && bIn && OldFade < 1.f && It.Value() >= 1.f) UE_LOG(LogTemp, Verbose, TEXT("Aeros clouds: tornado %s fully faded in"), *T->GetName());
+		if (T && !bIn && OldFade >= 1.f) UE_LOG(LogTemp, Verbose, TEXT("Aeros clouds: tornado %s starts fading out"), *T->GetName());
+		if (!T || (!bIn && It.Value() <= 0.f))
+		{
+			UE_LOG(LogTemp, Verbose, TEXT("Aeros clouds: tornado %s left the rendered set"), T ? *T->GetName() : TEXT("(destroyed)"));
+			It.RemoveCurrent();
+			continue;
+		}
+		if (P.Tornadoes.Num() >= 4) continue;   // a 5th fading one waits: at most 4 drawn
+
+		// Cloud base: the parent storm's LCL, else the local one
+		float BaseM = Sub->GetWeatherAtLocation(T->GetActorLocation()).LCL;
+		if (FAerosSnapshotPtr Snap = Sub->GetSnapshot())
+		{
+			for (const FAerosStormData& S : Snap->Storms)
+			{
+				if (S.Id == T->GetParentStormId() && S.LCL > 0.f) { BaseM = S.LCL; break; }
+			}
+		}
+		if (ForcedBaseM > 0.f) BaseM = ForcedBaseM;
+		FAerosCloudTornado D = T->MakeRenderDescriptor(FMath::Clamp(BaseM, 150.f, 4000.f), K);
+		if (ForcedVmax > 0.f && T->MaxWind > 0.f) D.VmaxMs *= ForcedVmax / T->MaxWind;
+		D.Fade = It.Value();
+		P.Tornadoes.Add(D);
+	}
 }
 
 void AAerosWeatherController::SetCustomCloudShadows(bool bOn)

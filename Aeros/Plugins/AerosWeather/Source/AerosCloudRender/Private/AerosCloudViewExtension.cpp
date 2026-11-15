@@ -35,6 +35,10 @@ namespace AerosCloudRenderInternal
 		TEXT("Scale of the aerial perspective in front of the clouds (1 = physical, 0 = off)."), ECVF_RenderThreadSafe);
 	TAutoConsoleVariable<int32> CVarQuality(TEXT("r.AerosClouds.Quality"), 2,
 		TEXT("Cloud quality 0-3: max ray steps 96 / 128 / 192 / 256, sun samples 3 / 4 / 6 / 8, trace at 1/4 resolution at 0 (1/2 otherwise)."), ECVF_RenderThreadSafe);
+	TAutoConsoleVariable<float> CVarTornadoK(TEXT("r.AerosClouds.TornadoK"), 2.f,
+		TEXT("Condensation calibration K of the tornado funnels (Core/AerosFunnel.h): higher = funnels reach lower."), ECVF_Default);
+	TAutoConsoleVariable<int32> CVarTornadoDebug(TEXT("r.AerosClouds.TornadoDebug"), 0,
+		TEXT("1: draw each tornado's bounding volume as a faint cloud."), ECVF_RenderThreadSafe);
 	TAutoConsoleVariable<int32> CVarLogResets(TEXT("r.AerosClouds.LogResets"), 0,
 		TEXT("1: log every reset of the cloud history (camera cut, teleport, size, time) at Log level."), ECVF_RenderThreadSafe);
 
@@ -68,6 +72,14 @@ namespace AerosCloudRenderInternal
 		SHADER_PARAMETER(float, VolumeBlend)
 		SHADER_PARAMETER(float, VolumeWeight)
 		SHADER_PARAMETER(FVector3f, NoiseOffsetKm)
+		SHADER_PARAMETER_ARRAY(FVector4f, TornadoA, [4])   // ground km xyz, cloud base km
+		SHADER_PARAMETER_ARRAY(FVector4f, TornadoB, [4])   // axis Bezier P1.xy, P2.xy (km offsets)
+		SHADER_PARAMETER_ARRAY(FVector4f, TornadoC, [4])   // top offset xy (km), Vmax (m/s), core radius (km)
+		SHADER_PARAMETER_ARRAY(FVector4f, TornadoD, [4])   // K, spin phase, rope-out, sub-vortices
+		SHADER_PARAMETER_ARRAY(FVector4f, TornadoE, [4])   // dust tint rgb, sub-vortex phase
+		SHADER_PARAMETER_ARRAY(FVector4f, TornadoF, [4])   // fade
+		SHADER_PARAMETER(uint32, NumTornadoes)
+		SHADER_PARAMETER(uint32, TornadoDebug)
 	END_SHADER_PARAMETER_STRUCT()
 
 	BEGIN_SHADER_PARAMETER_STRUCT(FNoiseParameters, )
@@ -448,6 +460,24 @@ FScreenPassTexture FAerosCloudViewExtension::Render_RenderThread(FRDGBuilder& Gr
 	DataParams.VolumeBlend = Data.VolumeBlend;
 	DataParams.VolumeWeight = Data.VolumeWeight;
 	DataParams.NoiseOffsetKm = Data.NoiseOffsetKm;
+	DataParams.NumTornadoes = 0;
+	for (const FAerosCloudTornado& Tw : Data.Tornadoes)
+	{
+		if (DataParams.NumTornadoes >= 4u || Tw.Fade <= 0.f) continue;
+		const uint32 Ti = DataParams.NumTornadoes++;
+		DataParams.TornadoA[Ti] = FVector4f(Tw.GroundKm, Tw.CloudBaseKm);
+		DataParams.TornadoB[Ti] = Tw.AxisKm;
+		DataParams.TornadoC[Ti] = FVector4f(Tw.TopKm.X, Tw.TopKm.Y, Tw.VmaxMs, Tw.CoreRadiusM * 0.001f);
+		DataParams.TornadoD[Ti] = FVector4f(Tw.K, Tw.SpinPhase, Tw.RopeOut, float(Tw.NumSubVortices));
+		DataParams.TornadoE[Ti] = FVector4f(Tw.DustTint, Tw.SubPhase);
+		DataParams.TornadoF[Ti] = FVector4f(Tw.Fade, 0.f, 0.f, 0.f);
+	}
+	for (uint32 Ti = DataParams.NumTornadoes; Ti < 4u; ++Ti)
+	{
+		DataParams.TornadoA[Ti] = DataParams.TornadoB[Ti] = DataParams.TornadoC[Ti] = FVector4f(0.f, 0.f, 0.f, 0.f);
+		DataParams.TornadoD[Ti] = DataParams.TornadoE[Ti] = DataParams.TornadoF[Ti] = FVector4f(0.f, 0.f, 0.f, 0.f);
+	}
+	DataParams.TornadoDebug = CVarTornadoDebug.GetValueOnRenderThread() > 0 ? 1u : 0u;
 	FNoiseParameters NoiseParams;
 	NoiseParams.ShapeNoise = GraphBuilder.RegisterExternalTexture(ShapeNoiseRT);
 	NoiseParams.DetailNoise = GraphBuilder.RegisterExternalTexture(DetailNoiseRT);

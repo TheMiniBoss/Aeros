@@ -645,7 +645,26 @@ void AAerosDemoPawn::BuildTour()
 		if (AAerosTornado* T = Sub->ForceTornado(-1))
 		{
 			const FVector At = T->GetActorLocation();
-			TeleportLookAt(FVector(At.X + 400000.0, At.Y + 300000.0, 25000.0), FVector(At.X, At.Y, 60000.0));
+			// Gallery framing: -AerosTornadoCam=DistKm,AltM,LookAltM (camera that far from the tornado, on the
+			// side away from the storm motion; negative distance = the opposite side, for backlit views)
+			FString CamArg;
+			if (FParse::Value(FCommandLine::Get(), TEXT("AerosTornadoCam="), CamArg, false))
+			{
+				TArray<FString> Parts;
+				CamArg.ParseIntoArray(Parts, TEXT(","));
+				const double DistCm = Parts.Num() > 0 ? FCString::Atod(*Parts[0]) * 100000.0 : 400000.0;
+				const double AltCm = Parts.Num() > 1 ? FCString::Atod(*Parts[1]) * 100.0 : 15000.0;
+				const double LookCm = Parts.Num() > 2 ? FCString::Atod(*Parts[2]) * 100.0 : 50000.0;
+				const double SeaZ = Sub->GetSimulationSettings().SeaLevelZ;
+				const double Base = FMath::Max(At.Z, SeaZ);
+				FVector Side = FVector(T->TrackVelocity.Y, -T->TrackVelocity.X, 0.0).GetSafeNormal();
+				if (Side.IsNearlyZero()) Side = FVector(1, 0, 0);
+				TeleportLookAt(FVector(At.X, At.Y, Base) + Side * DistCm + FVector(0, 0, AltCm), FVector(At.X, At.Y, Base + LookCm));
+			}
+			else
+			{
+				TeleportLookAt(FVector(At.X + 400000.0, At.Y + 300000.0, 25000.0), FVector(At.X, At.Y, 60000.0));
+			}
 		}
 	};
 	Tour.Add(S);

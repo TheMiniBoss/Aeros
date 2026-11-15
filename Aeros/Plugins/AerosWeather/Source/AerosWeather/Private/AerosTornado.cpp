@@ -2,6 +2,7 @@
 
 #include "AerosTornado.h"
 #include "Core/AerosFunnel.h"
+#include "AerosCloudRender.h"
 #include "AerosWeatherSubsystem.h"
 #include "AerosWeatherSettings.h"
 #include "AerosStormManager.h"
@@ -298,7 +299,76 @@ void AAerosTornado::Tick(float DeltaSeconds)
 		FunnelVFX->SetVariableFloat(TEXT("MaxWind"), MaxWind);
 	}
 	if (RoarAudio && RoarAudio->IsPlaying()) RoarAudio->SetVolumeMultiplier(FMath::Max(Strength, 0.05f));
+
+	// Custom cloud renderer: the funnel, wall cloud and dust whirl are part of the clouds; hide the meshes
+	// (debris and sound stay) and restore them when the engine clouds come back.
+	const bool bCloudFunnel = AerosCloudRender::IsEnabled();
+	if (bCloudFunnel != bMeshesHiddenForClouds)
+	{
+		bMeshesHiddenForClouds = bCloudFunnel;
+		USceneComponent* Meshes[4] = { FunnelMesh, FallbackFunnel, FallbackWallCloud, FallbackDustCloud };
+		if (bCloudFunnel) MeshVisibilityBeforeClouds.SetNum(4);
+		for (int32 K = 0; K < 4; ++K)
+		{
+			if (!Meshes[K]) continue;
+			if (bCloudFunnel) { MeshVisibilityBeforeClouds[K] = Meshes[K]->IsVisible(); Meshes[K]->SetVisibility(false); }
+			else if (MeshVisibilityBeforeClouds.IsValidIndex(K)) Meshes[K]->SetVisibility(MeshVisibilityBeforeClouds[K]);
+		}
+	}
+	if (const UAerosWeatherSubsystem* SpinSub = UAerosWeatherSubsystem::Get(this))
+	{
+		SpinSign = SpinSub->GetSimulationSettings().LatitudeDeg < 0.f ? -1.f : 1.f;
+	}
+	{
+		const float Age01 = Lifetime > 0.f ? FMath::Clamp(Age / Lifetime, 0.f, 1.f) : 1.f;
+		const float Rc = FMath::Max(Aeros::Funnel::CoreRadiusAt(CoreRadius, Age01), 10.f);
+		const float Vmax = MaxWind * Strength;
+		// Visual spin in real seconds, capped (fast vortices would strobe)
+		RenderSpin = FMath::Fmod(RenderSpin + SpinSign * FMath::Min(Vmax / Rc, 6.f) * DeltaSeconds, 2.f * PI);
+		RenderSubPhase = FMath::Fmod(RenderSubPhase + SpinSign * FMath::Min(0.5f * Vmax / (0.7f * Rc), 3.f) * DeltaSeconds, 2.f * PI);
+	}
 	if (bUseFallback) UpdateFallbackVisuals(DeltaSeconds);
+}
+
+FAerosCloudTornado AAerosTornado::MakeRenderDescriptor(float CloudBaseM, float K) const
+{
+	const float Age01 = Lifetime > 0.f ? FMath::Clamp(Age / Lifetime, 0.f, 1.f) : 1.f;
+	const float Decay = Aeros::Funnel::RopeOut(Age01);
+	const float Rc = Aeros::Funnel::CoreRadiusAt(CoreRadius, Age01);
+	const float H = FMath::Max(CloudBaseM, 100.f);
+
+	// Axis (same intent as the mesh funnel): the top follows the mesocyclone ahead along the storm motion,
+	// the base drags behind, the lean grows while it ropes out; slow sinuous bending, stronger for ropes.
+	FVector Motion = TrackVelocity.GetSafeNormal2D();
+	if (Motion.IsNearlyZero()) Motion = FVector(1, 0, 0);
+	const FVector Perp(-Motion.Y, Motion.X, 0.0);
+	const float Phase = float(uint32(Seed) % 1000u) * 0.01f;
+	const FVector Top = Motion * H * (0.1f + 0.55f * Decay) + Perp * H * 0.06f * FMath::Sin(VisualTime * 0.07f + Phase);
+	const float Bend = Rc * 0.35f + H * (0.025f + 0.16f * Decay);
+	const FVector P1 = Perp * Bend * FMath::Sin(Phase + VisualTime * 0.35f);
+	const FVector P2 = Top + Motion * Bend * 0.6f * FMath::Sin(Phase * 1.7f + VisualTime * 0.27f);
+
+	FAerosCloudTornado D;
+	// Over water the actor stands on the sea floor (the sea plane has no collision): the funnel starts at
+	// the sea surface (a waterspout)
+	FVector L = GetActorLocation();
+	if (const UAerosWeatherSubsystem* SeaSub = UAerosWeatherSubsystem::Get(this))
+	{
+		L.Z = FMath::Max(L.Z, double(SeaSub->GetSimulationSettings().SeaLevelZ));
+	}
+	D.GroundKm = FVector3f(float(L.X * 1e-5), float(L.Y * 1e-5), float(L.Z * 1e-5));
+	D.CloudBaseKm = H * 0.001f;
+	D.AxisKm = FVector4f(float(P1.X), float(P1.Y), float(P2.X), float(P2.Y)) * 0.001f;
+	D.TopKm = FVector2f(float(Top.X), float(Top.Y)) * 0.001f;
+	D.VmaxMs = MaxWind * Aeros::Funnel::LifeStrength(Age01);
+	D.CoreRadiusM = Rc;
+	D.K = K;
+	D.RopeOut = Decay;
+	D.SpinPhase = RenderSpin;
+	// Violent tornadoes split into orbiting sub-vortices (2 seeds in 3)
+	D.NumSubVortices = (EFRating >= 4 && uint32(Seed) % 3u != 0u) ? 3 + int32(uint32(Seed) % 3u) : 0;
+	D.SubPhase = RenderSubPhase;
+	return D;
 }
 
 void AAerosTornado::ApplyPhysicalEffects(float DeltaSeconds)

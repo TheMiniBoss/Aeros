@@ -15,6 +15,24 @@ struct FAerosCloudFlash
 	float Intensity = 0.f;                     // 0-1, as reported by the lightning actors
 };
 
+/** One tornado drawn inside the clouds (condensation funnel, wall cloud, dust whirl), see Core/AerosFunnel.h. */
+struct FAerosCloudTornado
+{
+	FVector3f GroundKm = FVector3f::ZeroVector;   // world km, Unreal axes, z = ground height
+	float CloudBaseKm = 1.f;                      // above the ground
+	FVector4f AxisKm = FVector4f(0.f, 0.f, 0.f, 0.f);   // axis = cubic Bezier in xy over t = h / base: P1.xy, P2.xy (offsets, km)
+	FVector2f TopKm = FVector2f::ZeroVector;      // P3.xy offset (P0 = the ground point)
+	float VmaxMs = 0.f;
+	float CoreRadiusM = 80.f;
+	float K = 1.f;
+	float RopeOut = 0.f;                          // 0-1
+	float SpinPhase = 0.f;                        // radians, wrapped (sign = rotation sense)
+	int32 NumSubVortices = 0;
+	float SubPhase = 0.f;
+	FVector3f DustTint = FVector3f(0.45f, 0.38f, 0.3f);
+	float Fade = 1.f;                             // 0-1, fades in / out of the rendered set
+};
+
 /**
  * Everything the custom cloud renderer needs from the simulation, sent once per frame from the
  * game thread. Same sources and units as the old cloud material parameters.
@@ -36,6 +54,7 @@ struct FAerosCloudRenderParams
 	TArray<FAerosCloudFlash, TInlineAllocator<8>> Flashes;
 	// Cloud shadow map (R16F transmittance towards the sun, UAV): rendered every 4th frame and when
 	// the rect moves; the sun's light function M_AerosCloudShadow reads it over the same rect.
+	TArray<FAerosCloudTornado, TInlineAllocator<4>> Tornadoes;   // at most 4, nearest to the viewer
 	FTextureRenderTargetResource* ShadowTarget = nullptr;
 	FVector4f ShadowRectCm = FVector4f(0.f, 0.f, 10000000.f, 10000000.f);   // xy centre, zw size (cm)
 };

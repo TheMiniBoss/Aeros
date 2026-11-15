@@ -36,6 +36,8 @@ enum class EAerosTornadoShape : uint8
 	Multivortex,  // wedge with several sub-vortices orbiting inside
 };
 
+struct FAerosCloudTornado;
+
 UCLASS(Blueprintable)
 class AEROSWEATHER_API AAerosTornado : public AActor
 {
@@ -110,6 +112,10 @@ public:
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Aeros|Tornado")
 	TObjectPtr<UProceduralMeshComponent> FunnelMesh;
 
+	/** What the custom cloud renderer draws for this tornado (funnel model inputs and axis), for a cloud
+	 *  base height (m above the ground) and the condensation calibration K. */
+	FAerosCloudTornado MakeRenderDescriptor(float CloudBaseM, float K) const;
+
 	/** Shape picked from the EF rating and the seed (same on every machine). */
 	UFUNCTION(BlueprintPure, Category = "Aeros|Tornado")
 	EAerosTornadoShape GetShape() const { return Shape; }
@@ -140,6 +146,12 @@ private:
 	float GroundZ = 0.f;
 	float VisualTime = 0.f;
 	bool bUseFallback = false;
+	// Custom cloud renderer: the funnel is drawn in the clouds, the meshes are hidden meanwhile
+	bool bMeshesHiddenForClouds = false;
+	TArray<bool> MeshVisibilityBeforeClouds;
+	float RenderSpin = 0.f;      // radians, visual rotation of the funnel striations
+	float RenderSubPhase = 0.f;  // radians, orbit of the sub-vortices
+	float SpinSign = 1.f;        // cyclonic: counter-clockwise in the north
 
 	float ParentCheckTimer = 0.f;
 	EAerosTornadoShape Shape = EAerosTornadoShape::Cone;
