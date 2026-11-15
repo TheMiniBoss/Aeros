@@ -33,6 +33,8 @@ namespace AerosCloudRenderInternal
 		TEXT("Scale of the sky light on the clouds (1 = physical)."), ECVF_RenderThreadSafe);
 	TAutoConsoleVariable<float> CVarHaze(TEXT("r.AerosClouds.Haze"), 1.f,
 		TEXT("Scale of the aerial perspective in front of the clouds (1 = physical, 0 = off)."), ECVF_RenderThreadSafe);
+	TAutoConsoleVariable<int32> CVarQuality(TEXT("r.AerosClouds.Quality"), 2,
+		TEXT("Cloud quality 0-3: max ray steps 96 / 128 / 192 / 256, sun samples 3 / 4 / 6 / 8, trace at 1/4 resolution at 0 (1/2 otherwise)."), ECVF_RenderThreadSafe);
 	TAutoConsoleVariable<int32> CVarLogResets(TEXT("r.AerosClouds.LogResets"), 0,
 		TEXT("1: log every reset of the cloud history (camera cut, teleport, size, time) at Log level."), ECVF_RenderThreadSafe);
 
@@ -45,6 +47,9 @@ namespace AerosCloudRenderInternal
 		SHADER_PARAMETER(FIntPoint, HalfSize)
 		SHADER_PARAMETER(FIntPoint, FullSize)
 		SHADER_PARAMETER(float, AmbientScale)
+		SHADER_PARAMETER(int32, TraceScale)
+		SHADER_PARAMETER(int32, MaxSteps)
+		SHADER_PARAMETER(int32, LightSteps)
 		SHADER_PARAMETER(float, HazeScale)
 	END_SHADER_PARAMETER_STRUCT()
 
@@ -81,6 +86,8 @@ namespace AerosCloudRenderInternal
 			SHADER_PARAMETER_STRUCT_INCLUDE(FNoiseParameters, Noise)
 			SHADER_PARAMETER(FVector4f, ShadowRectCm)
 			SHADER_PARAMETER(FIntPoint, ShadowSize)
+			SHADER_PARAMETER(uint32, ShadowRowStep)
+			SHADER_PARAMETER(uint32, ShadowRowPhase)
 			SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float>, OutShadow)
 		END_SHADER_PARAMETER_STRUCT()
 
@@ -334,7 +341,9 @@ FScreenPassTexture FAerosCloudViewExtension::Render_RenderThread(FRDGBuilder& Gr
 	FRDGTextureRef SceneDepth = Inputs.SceneTextures.SceneTextures->GetContents()->SceneDepthTexture;
 	const FIntRect ViewRect = SceneColor.ViewRect;
 	const FIntPoint FullSize = ViewRect.Size();
-	const FIntPoint HalfSize = FIntPoint::DivideAndRoundUp(FullSize, 2);
+	const int32 Quality = FMath::Clamp(CVarQuality.GetValueOnRenderThread(), 0, 3);
+	const int32 TraceScale = Quality == 0 ? 4 : 2;
+	const FIntPoint HalfSize = FIntPoint::DivideAndRoundUp(FullSize, TraceScale);   // traced resolution
 
 	const double Time = View.Family ? View.Family->Time.GetWorldTimeSeconds() : 0.0;
 	const float WindMs = CVarWind.GetValueOnRenderThread();
@@ -404,10 +413,18 @@ FScreenPassTexture FAerosCloudViewExtension::Render_RenderThread(FRDGBuilder& Gr
 	Common.HalfSize = HalfSize;
 	Common.FullSize = FullSize;
 	Common.AmbientScale = FMath::Max(CVarAmbient.GetValueOnRenderThread(), 0.f);
+	{
+		static const int32 Steps[4] = { 96, 128, 192, 256 };
+		static const int32 Light[4] = { 3, 4, 6, 8 };
+		Common.TraceScale = TraceScale;
+		Common.MaxSteps = Steps[Quality];
+		Common.LightSteps = Light[Quality];
+	}
 	Common.HazeScale = FMath::Clamp(CVarHaze.GetValueOnRenderThread(), 0.f, 1.f);
 
-	// 0. Cloud shadow map for the sun's light function: every 4th frame, and at once when its rect moved
-	// (the material already reads the new rect).
+	// 0. Cloud shadow map for the sun's light function: a quarter of the rows each frame (a full refresh
+	// every 4 frames without a GPU spike), and all of it at once when its rect moved (the material
+	// already reads the new rect).
 	FCloudDataParameters DataParams;
 	DataParams.WeatherMap = RegisterOr(GraphBuilder, Data.WeatherMap, TEXT("AerosClouds.WeatherMap"), false);
 	DataParams.ShapeMap = RegisterOr(GraphBuilder, Data.ShapeMap, TEXT("AerosClouds.ShapeMap"), false);
@@ -426,9 +443,9 @@ FScreenPassTexture FAerosCloudViewExtension::Render_RenderThread(FRDGBuilder& Gr
 	NoiseParams.NoiseSampler = TStaticSamplerState<SF_Trilinear, AM_Wrap, AM_Wrap, AM_Wrap>::GetRHI();
 
 	FRHITexture* ShadowRHI = Data.ShadowTarget ? Data.ShadowTarget->GetRenderTargetTexture() : nullptr;
-	if (ShadowRHI && EnumHasAnyFlags(ShadowRHI->GetFlags(), TexCreate_UAV)
-		&& (Frame - LastShadowFrame >= 4u || Data.ShadowRectCm != LastShadowRect))
+	if (ShadowRHI && EnumHasAnyFlags(ShadowRHI->GetFlags(), TexCreate_UAV) && Frame != LastShadowFrame)
 	{
+		const bool bFull = Data.ShadowRectCm != LastShadowRect;
 		LastShadowFrame = Frame;
 		LastShadowRect = Data.ShadowRectCm;
 		const FIntPoint ShadowSize(ShadowRHI->GetSizeXYZ().X, ShadowRHI->GetSizeXYZ().Y);
@@ -439,10 +456,13 @@ FScreenPassTexture FAerosCloudViewExtension::Render_RenderThread(FRDGBuilder& Gr
 		P->Noise = NoiseParams;
 		P->ShadowRectCm = Data.ShadowRectCm;
 		P->ShadowSize = ShadowSize;
+		P->ShadowRowStep = bFull ? 1u : 4u;
+		P->ShadowRowPhase = bFull ? 0u : (Frame & 3u);
 		P->OutShadow = GraphBuilder.CreateUAV(ShadowTex);
+		const FIntPoint Threads(ShadowSize.X, FMath::DivideAndRoundUp(ShadowSize.Y, int32(P->ShadowRowStep)));
 		TShaderMapRef<FShadowMapCS> Shader(GetGlobalShaderMap(View.GetFeatureLevel()));
-		FComputeShaderUtils::AddPass(GraphBuilder, RDG_EVENT_NAME("ShadowMap %dx%d", ShadowSize.X, ShadowSize.Y), Shader, P,
-			FComputeShaderUtils::GetGroupCount(ShadowSize, 8));
+		FComputeShaderUtils::AddPass(GraphBuilder, RDG_EVENT_NAME("ShadowMap %dx%d", Threads.X, Threads.Y), Shader, P,
+			FComputeShaderUtils::GetGroupCount(Threads, 8));
 	}
 
 	// 1. Trace at half resolution.

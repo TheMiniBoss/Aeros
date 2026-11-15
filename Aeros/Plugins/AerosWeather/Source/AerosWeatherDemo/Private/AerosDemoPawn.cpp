@@ -478,6 +478,12 @@ void AAerosDemoPawn::TickTour(float DeltaSeconds)
 			bLightningNow ? TEXT("on a lightning flash") : (bSwapNow ? TEXT("on a voxel grid swap") : TEXT("at the end of the step")));
 		const FString File = FPaths::ScreenShotDir() / TEXT("AerosTour") / (Step.Shot + TEXT(".png"));
 		FScreenshotRequest::RequestScreenshot(File, true, false);
+		// -AerosTourExec=cmd: a console command at each shot (e.g. profilegpu: the GPU timings go to the log)
+		FString TourExec;
+		if (FParse::Value(FCommandLine::Get(), TEXT("AerosTourExec="), TourExec, false) && !TourExec.IsEmpty())
+		{
+			if (APlayerController* ExecPC = Cast<APlayerController>(GetController())) ExecPC->ConsoleCommand(TourExec);
+		}
 		if (FParse::Param(FCommandLine::Get(), TEXT("AerosDumpMaps")))
 		{
 			if (UAerosWeatherSubsystem* DumpSub = UAerosWeatherSubsystem::Get(this))
