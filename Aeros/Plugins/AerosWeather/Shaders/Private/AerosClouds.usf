@@ -6,6 +6,7 @@
 // World units in km, Unreal axes (z up).
 
 #include "/Engine/Private/Common.ush"
+#include "/Engine/Private/SkyAtmosphereCommon.ush"
 
 float3 CameraKm;
 float3 MotionKmS;       // mean storm motion (reprojection only: the data is already advected)
@@ -14,6 +15,8 @@ uint   FrameIndex;
 int2   ViewMin;
 int2   HalfSize;
 int2   FullSize;
+float  AmbientScale;
+float  HazeScale;
 
 Texture2D SceneDepthTexture;
 RWTexture2D<float4> OutColor;
@@ -54,22 +57,50 @@ float HG(float c, float g)
 	return (1.0 - g2) / (4.0 * PI * pow(max(1.0 + g2 - 2.0 * g * c, 1e-4), 1.5));
 }
 
-// Optical depth towards the sun: 6 growing segments (2.6 km), detail capped at 2 octaves.
-float LightOpticalDepth(float3 P, float3 L, float DistKm, float Octaves)
+// Dual-lobe phase of the old material: forward g 0.6, back g -0.25, 30 % back.
+float CloudPhase(float c, float Scale)
 {
-	const float Seg[6] = { 0.08, 0.16, 0.3, 0.5, 0.9, 1.6 };
+	return lerp(HG(c, 0.6 * Scale), HG(c, -0.25 * Scale), 0.3);
+}
+
+float OpticalDepthAlong(float3 P, float3 L, float DistKm, float Octaves, const float Seg[6], int Num)
+{
 	float od = 0.0;
 	float t = 0.0;
-	[unroll] for (int i = 0; i < 6; ++i)
+	for (int i = 0; i < Num; ++i)
 	{
 		float3 Q = P + L * (t + Seg[i] * 0.5);
-		if (Q.z < SlabTopKm)
+		if (Q.z < SlabTopKm && Q.z > 0.0)
 		{
-			od += AerosCloudExtinction(AerosCloudDensity(Q, DistKm, min(Octaves, 2.0))) * Seg[i];
+			od += AerosCloudExtinction(AerosCloudDensity(Q, DistKm, Octaves)) * Seg[i];
 		}
 		t += Seg[i];
 	}
 	return od;
+}
+
+// Optical depth towards the sun over 2.6 km: 6 growing segments near, 3 longer ones far
+// (blended between 10 and 30 km, so the switch never pops). Detail capped at 2 octaves.
+float LightOpticalDepth(float3 P, float3 L, float DistKm, float Octaves)
+{
+	const float Near[6] = { 0.08, 0.16, 0.3, 0.5, 0.9, 0.66 };
+	const float Far[6] = { 0.3, 0.8, 1.5, 0.0, 0.0, 0.0 };
+	float FarK = smoothstep(10.0, 30.0, DistKm);
+	float Oct = min(Octaves, 2.0);
+	float od6 = FarK < 1.0 ? OpticalDepthAlong(P, L, DistKm, Oct, Near, 6) : 0.0;
+	float od3 = FarK > 0.0 ? OpticalDepthAlong(P, L, DistKm, Oct, Far, 3) : 0.0;
+	return lerp(od6, od3, FarK);
+}
+
+// Sky light: the SH irradiance (diffuse convolution) evaluated up and down, averaged.
+float3 SkySH(float3 N)
+{
+	float4 V = float4(N, 1.0);
+	float3 I0 = float3(dot(View.SkyIrradianceEnvironmentMap[0], V), dot(View.SkyIrradianceEnvironmentMap[1], V), dot(View.SkyIrradianceEnvironmentMap[2], V));
+	float4 B = V.xyzz * V.yzzx;
+	float3 I1 = float3(dot(View.SkyIrradianceEnvironmentMap[3], B), dot(View.SkyIrradianceEnvironmentMap[4], B), dot(View.SkyIrradianceEnvironmentMap[5], B));
+	float3 I2 = View.SkyIrradianceEnvironmentMap[6].xyz * (V.x * V.x - V.y * V.y);
+	return max(0.0, I0 + I1 + I2);
 }
 
 // ------------------------------------------------------------------ trace
@@ -89,6 +120,8 @@ void TraceCS(uint2 Id : SV_DispatchThreadID)
 	SunDir = dot(SunDir, SunDir) > 1e-4 ? normalize(SunDir) : float3(0, 0, 1);
 	float3 SunE = View.AtmosphereLightIlluminanceOnGroundPostTransmittance[0].rgb;
 	float CosT = dot(Dir, SunDir);
+	// The SH is normalised: the sky light colour carries its intensity (as in the engine's sky lighting).
+	float3 SkyAmb = View.SkyLightColor.rgb * 0.5 * (SkySH(float3(0, 0, 1)) + SkySH(float3(0, 0, -1))) * AmbientScale;
 
 	float3 Scat = 0.0;
 	float T = 1.0;
@@ -112,6 +145,7 @@ void TraceCS(uint2 Id : SV_DispatchThreadID)
 
 	if (t1 > t0)
 	{
+		const float UpSeg[6] = { 0.4, 0.6, 1.0, 0.0, 0.0, 0.0 };   // samples at 0.2 / 0.7 / 1.5 km above
 		float t = t0 + AerosCloudStepKm(t0) * IGN(float2(Id), FrameIndex);
 		[loop] for (int i = 0; i < 192 && t < t1 && T > 0.01; ++i)
 		{
@@ -123,17 +157,23 @@ void TraceCS(uint2 Id : SV_DispatchThreadID)
 			{
 				float Sigma = AerosCloudExtinction(Smp);
 				float od = LightOpticalDepth(P, SunDir, t, Octaves);
-				// Three scattering orders (Wrenninge): less extinction, wider phase each order.
+				// Three scattering orders: contribution 0.25^n, optical depth 0.8^n, phase flattened 0.5^n.
 				float S = 0.0;
-				float k = 1.0;
+				float a = 1.0;
+				float b = 1.0;
+				float c = 1.0;
 				[unroll] for (int n = 0; n < 3; ++n)
 				{
-					S += k * lerp(HG(CosT, -0.25 * k), HG(CosT, 0.8 * k), 0.7) * exp(-od * k);
-					k *= 0.5;
+					S += a * CloudPhase(CosT, c) * exp(-od * b);
+					a *= 0.25;
+					b *= 0.8;
+					c *= 0.5;
 				}
-				float Hf = saturate(P.z / 8.0);
+				// Sky light, dimmer low in the cloud and under thick cloud.
+				float UpOd = OpticalDepthAlong(P, float3(0, 0, 1), t, 1.0, UpSeg, 3);
+				// Side faces still see the horizon sky: the column above only takes away up to 75 %.
+				float3 Amb = SkyAmb * lerp(0.3, 1.0, Smp.Height) * lerp(0.25, 1.0, exp(-UpOd * 0.05));
 				float Albedo = lerp(0.92, 0.55, Smp.Dark);
-				float3 Amb = SunE * float3(0.035, 0.05, 0.08) * (0.35 + 0.65 * Hf);
 				float3 Lin = (SunE * S + Amb) * Albedo;
 				float Tr = exp(-Sigma * Step);
 				Scat += T * Lin * (1.0 - Tr);
@@ -244,9 +284,30 @@ void TemporalCS(uint2 Id : SV_DispatchThreadID)
 Texture2D SceneColorTexture;
 Texture2D CloudColor;
 Texture2D CloudDepth;
-float3 FlashKm;
-float3 FlashColor;
+float4 FlashPosKm[8];    // xyz km, w = intensity 0-1 (brightest first)
+uint NumFlashes;
 RWTexture2D<float4> OutSceneColor;
+
+// Aerial perspective between the camera and the cloud front (engine camera volume), pre-exposed.
+float4 CloudAerialPerspective(float3 Dir, float FrontKm)
+{
+	if (View.SkyAtmosphereApplyCameraAerialPerspectiveVolume <= 0.0)
+	{
+		return float4(0, 0, 0, 1);
+	}
+	float3 RelKm = Dir * FrontKm;
+	float4 NDC = mul(float4(View.TranslatedWorldCameraOrigin + RelKm * 1e5, 1.0), View.TranslatedWorldToClip);
+	return GetAerialPerspectiveLuminanceTransmittance(
+		View.RealTimeReflectionCapture, View.SkyAtmosphereCameraAerialPerspectiveVolumeSizeAndInvSize,
+		NDC, RelKm,
+		View.CameraAerialPerspectiveVolume, View.CameraAerialPerspectiveVolumeSampler,
+		View.SkyAtmosphereCameraAerialPerspectiveVolumeDepthResolutionInv,
+		View.SkyAtmosphereCameraAerialPerspectiveVolumeDepthResolution,
+		View.SkyAtmosphereAerialPerspectiveStartDepthKm,
+		View.SkyAtmosphereCameraAerialPerspectiveVolumeDepthSliceLengthKm,
+		View.SkyAtmosphereCameraAerialPerspectiveVolumeDepthSliceLengthKmInv,
+		1.0, 1000.0);
+}
 
 [numthreads(8, 8, 1)]
 void CompositeCS(uint2 Id : SV_DispatchThreadID)
@@ -260,46 +321,88 @@ void CompositeCS(uint2 Id : SV_DispatchThreadID)
 	float3 Dir = RayDirFromSvPos(float2(Pix) + 0.5);
 	float SceneKm = SceneDistKm(Pix, Dir);
 
-	// Bilinear taps, down-weighted where the half-res sample saw a different scene depth
-	// (keeps clouds behind a mountain from bleeding onto it).
 	float2 HP = (float2(Id) + 0.5) * 0.5 - 0.5;
 	int2 B = int2(floor(HP));
 	float2 F = HP - float2(B);
-	float4 Acc = 0.0;
-	float FrontAcc = 0.0;
-	float W = 0.0;
-	float4 Best = float4(0, 0, 0, 1);
-	float BestFront = 60.0;
-	float BestErr = 1e9;
-	[unroll] for (int j = 0; j < 4; ++j)
+	float4 Cloud;
+	float Front;
+	if (SceneKm >= 399.0)
 	{
-		int2 o = int2(j & 1, j >> 1);
-		int2 c = clamp(B + o, 0, HalfSize - 1);
-		float wb = (o.x != 0 ? F.x : 1.0 - F.x) * (o.y != 0 ? F.y : 1.0 - F.y);
-		float2 D = CloudDepth.Load(int3(c, 0)).xy;
-		float4 Col = CloudColor.Load(int3(c, 0));
-		float Err = abs(D.y - SceneKm) / max(min(D.y, SceneKm), 0.05);
-		float w = wb * exp(-Err * 8.0);
-		Acc += Col * w;
-		FrontAcc += D.x * w;
-		W += w;
-		if (Err < BestErr)
+		// Against the sky: a 4x4 tent over the premultiplied half-res result (no depth to respect),
+		// which softens the silhouettes instead of leaving a stair-stepped rim.
+		float4 Acc = 0.0;
+		float FrontAcc = 0.0;
+		float W = 0.0;
+		[unroll] for (int j = -1; j <= 2; ++j)
 		{
-			BestErr = Err;
-			Best = Col;
-			BestFront = D.x;
+			[unroll] for (int i = -1; i <= 2; ++i)
+			{
+				int2 c = clamp(B + int2(i, j), 0, HalfSize - 1);
+				float2 d = abs(float2(i, j) - F);
+				float w = max(0.0, 1.0 - d.x * 0.5) * max(0.0, 1.0 - d.y * 0.5);
+				float4 Col = CloudColor.Load(int3(c, 0));
+				Acc += Col * w;
+				FrontAcc += CloudDepth.Load(int3(c, 0)).x * w * (1.0 - Col.a);
+				W += w;
+			}
 		}
+		Cloud = Acc / max(W, 1e-4);
+		Front = (1.0 - Cloud.a) > 1e-4 ? FrontAcc / (W * (1.0 - Cloud.a)) : 60.0;
 	}
-	float4 Cloud = W > 1e-4 ? Acc / W : Best;
-	float Front = W > 1e-4 ? FrontAcc / W : BestFront;
+	else
+	{
+		// Bilinear taps, down-weighted where the half-res sample saw a different scene depth
+		// (keeps clouds behind a mountain from bleeding onto it).
+		float4 Acc = 0.0;
+		float FrontAcc = 0.0;
+		float W = 0.0;
+		float4 Best = float4(0, 0, 0, 1);
+		float BestFront = 60.0;
+		float BestErr = 1e9;
+		[unroll] for (int j = 0; j < 4; ++j)
+		{
+			int2 o = int2(j & 1, j >> 1);
+			int2 c = clamp(B + o, 0, HalfSize - 1);
+			float wb = (o.x != 0 ? F.x : 1.0 - F.x) * (o.y != 0 ? F.y : 1.0 - F.y);
+			float2 D = CloudDepth.Load(int3(c, 0)).xy;
+			float4 Col = CloudColor.Load(int3(c, 0));
+			float Err = abs(D.y - SceneKm) / max(min(D.y, SceneKm), 0.05);
+			float w = wb * exp(-Err * 8.0);
+			Acc += Col * w;
+			FrontAcc += D.x * w;
+			W += w;
+			if (Err < BestErr)
+			{
+				BestErr = Err;
+				Best = Col;
+				BestFront = D.x;
+			}
+		}
+		Cloud = W > 1e-4 ? Acc / W : Best;
+		Front = W > 1e-4 ? FrontAcc / W : BestFront;
+	}
+	float FrontKm = min(Front, SceneKm);
+
+	// Haze in front of the cloud: rgb * T_ap + L_ap * (1 - T).
+	if (Cloud.a < 0.999 && HazeScale > 0.0)
+	{
+		float4 AP = CloudAerialPerspective(Dir, FrontKm);
+		AP = lerp(float4(0, 0, 0, 1), AP, HazeScale);
+		Cloud.rgb = Cloud.rgb * AP.a + AP.rgb * (1.0 - Cloud.a);
+	}
 
 	float3 Out = Scene.rgb * Cloud.a + Cloud.rgb;
 
-	if (any(FlashColor > 0.0))
+	// Lightning: lit fresh every frame (never in the history), only where there is cloud.
+	float3 P = CameraKm + Dir * FrontKm;
+	float Glow = 0.0;
+	for (uint k = 0; k < NumFlashes; ++k)
 	{
-		float3 P = CameraKm + Dir * min(Front, SceneKm);
-		float g = exp(-length(P - FlashKm) / 2.5) * (1.0 - Cloud.a);
-		Out += FlashColor * g * View.PreExposure;
+		Glow += FlashPosKm[k].w * exp(-length(P - FlashPosKm[k].xyz) / 2.5);
 	}
+	// Physical scale: 400 cd/m2 in-cloud flash luminance, capped at 1.5 in pre-exposed units so a
+	// night exposure does not whiten the sky (subtle by day, bright at night).
+	Out += float3(0.8, 0.85, 1.0) * Glow * min(400.0 * View.PreExposure, 1.5) * (1.0 - Cloud.a);
+
 	OutSceneColor[Pix] = float4(Out, Scene.a);
 }

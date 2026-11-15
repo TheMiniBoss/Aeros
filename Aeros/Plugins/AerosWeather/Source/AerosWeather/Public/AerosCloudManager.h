@@ -18,6 +18,7 @@
 #include "CoreMinimal.h"
 #include "UObject/Object.h"
 #include "Core/AerosCloudVolume.h"
+#include "Core/AerosFlashList.h"
 #include "Tasks/Task.h"
 #include "AerosCloudManager.generated.h"
 
@@ -72,10 +73,14 @@ public:
 	/** World location of the brightest strike this frame (the clouds glow around it). */
 	FVector GetLightningLocation() const { return FlashLocation; }
 
+	/** The 8 brightest flashes of the last frame (Location in world cm), brightest first. */
+	TArrayView<const Aeros::FFlashEntry> GetFlashes() const { return TArrayView<const Aeros::FFlashEntry>(Flashes.GetData(), Flashes.Num()); }
+
 	/** Lightning actors report their current brightness seen from the viewer (0-1) and position, every frame. */
 	void ReportLightningFlash(float Value, const FVector& Location)
 	{
 		if (Value > PendingFlash) { PendingFlash = Value; PendingLocation = Location; }
+		PendingFlashes.Add(Value, Location);
 	}
 
 	/** Textures refresh rate (Hz). */
@@ -133,5 +138,7 @@ private:
 	float Flash = 0.f;
 	float PendingFlash = 0.f;
 	FVector PendingLocation = FVector::ZeroVector;
+	Aeros::TFlashList<8> PendingFlashes;   // filled by the lightning actors during the frame
+	Aeros::TFlashList<8> Flashes;          // last complete frame
 	FVector FlashLocation = FVector(0, 0, -1.0e9);
 };

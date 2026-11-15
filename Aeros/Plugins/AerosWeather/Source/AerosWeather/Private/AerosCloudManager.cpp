@@ -395,6 +395,8 @@ void UAerosCloudManager::UpdateParameterCollection(float DeltaTime)
 	if (PendingFlash > 0.f && PendingFlash >= Flash - DeltaTime * 12.f) FlashLocation = PendingLocation;
 	Flash = FMath::Max(PendingFlash, Flash - DeltaTime * 12.f);
 	PendingFlash = 0.f;
+	Flashes = PendingFlashes;
+	PendingFlashes.Reset();
 
 	UWorld* World = Owner->GetWorld();
 	if (!Collection || !World) return;

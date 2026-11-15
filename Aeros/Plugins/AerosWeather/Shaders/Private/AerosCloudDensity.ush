@@ -27,6 +27,7 @@ struct FAerosCloudSample
 {
 	float Density;   // 0-1 (extinction per km = Density * 80 * (1 + 3 * Dark))
 	float Dark;      // 0-1, rain greying
+	float Height;    // 0 at the cloud base, 1 at its top (ambient light)
 };
 
 float AerosCloudOctaves(float DistKm)
@@ -60,6 +61,7 @@ FAerosCloudSample AerosCloudDensity(float3 PosKm, float DistKm, float Octaves)
 	FAerosCloudSample Out;
 	Out.Density = 0.0;
 	Out.Dark = 0.0;
+	Out.Height = 0.5;
 
 	const float AltKm = PosKm.z;
 	const float3 P = PosKm - NoiseOffsetKm;
@@ -204,5 +206,6 @@ FAerosCloudSample AerosCloudDensity(float3 PosKm, float DistKm, float Octaves)
 
 	Out.Density = density;
 	Out.Dark = dark;
+	Out.Height = h;
 	return Out;
 }

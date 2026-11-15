@@ -29,6 +29,10 @@ namespace AerosCloudRenderInternal
 		TEXT("Test lightning: flashes per second near the camera (0 = simulation flashes only, < 0 = no flash at all)."), ECVF_RenderThreadSafe);
 	TAutoConsoleVariable<float> CVarBlend(TEXT("r.AerosClouds.HistoryBlend"), 0.1f,
 		TEXT("Weight of the new frame in the temporal accumulation (1 = no history)."), ECVF_RenderThreadSafe);
+	TAutoConsoleVariable<float> CVarAmbient(TEXT("r.AerosClouds.Ambient"), 1.f,
+		TEXT("Scale of the sky light on the clouds (1 = physical)."), ECVF_RenderThreadSafe);
+	TAutoConsoleVariable<float> CVarHaze(TEXT("r.AerosClouds.Haze"), 1.f,
+		TEXT("Scale of the aerial perspective in front of the clouds (1 = physical, 0 = off)."), ECVF_RenderThreadSafe);
 	TAutoConsoleVariable<int32> CVarLogResets(TEXT("r.AerosClouds.LogResets"), 0,
 		TEXT("1: log every reset of the cloud history (camera cut, teleport, size, time) at Log level."), ECVF_RenderThreadSafe);
 
@@ -40,6 +44,8 @@ namespace AerosCloudRenderInternal
 		SHADER_PARAMETER(FIntPoint, ViewMin)
 		SHADER_PARAMETER(FIntPoint, HalfSize)
 		SHADER_PARAMETER(FIntPoint, FullSize)
+		SHADER_PARAMETER(float, AmbientScale)
+		SHADER_PARAMETER(float, HazeScale)
 	END_SHADER_PARAMETER_STRUCT()
 
 	// Simulation data, same layout as the old cloud material parameters.
@@ -129,8 +135,8 @@ namespace AerosCloudRenderInternal
 			SHADER_PARAMETER_RDG_TEXTURE(Texture2D, SceneDepthTexture)
 			SHADER_PARAMETER_RDG_TEXTURE(Texture2D, CloudColor)
 			SHADER_PARAMETER_RDG_TEXTURE(Texture2D, CloudDepth)
-			SHADER_PARAMETER(FVector3f, FlashKm)
-			SHADER_PARAMETER(FVector3f, FlashColor)
+			SHADER_PARAMETER_ARRAY(FVector4f, FlashPosKm, [8])
+			SHADER_PARAMETER(uint32, NumFlashes)
 			SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float4>, OutSceneColor)
 		END_SHADER_PARAMETER_STRUCT()
 
@@ -375,6 +381,8 @@ FScreenPassTexture FAerosCloudViewExtension::Render_RenderThread(FRDGBuilder& Gr
 	Common.ViewMin = ViewRect.Min;
 	Common.HalfSize = HalfSize;
 	Common.FullSize = FullSize;
+	Common.AmbientScale = FMath::Max(CVarAmbient.GetValueOnRenderThread(), 0.f);
+	Common.HazeScale = FMath::Clamp(CVarHaze.GetValueOnRenderThread(), 0.f, 1.f);
 
 	// 1. Trace at half resolution.
 	const FRDGTextureDesc ColorDesc = FRDGTextureDesc::Create2D(HalfSize, PF_FloatRGBA, FClearValueBinding::Black, TexCreate_ShaderResource | TexCreate_UAV);
@@ -449,29 +457,32 @@ FScreenPassTexture FAerosCloudViewExtension::Render_RenderThread(FRDGBuilder& Gr
 	OutDesc.Flags &= ~(TexCreate_FastVRAM);
 	FRDGTextureRef Output = GraphBuilder.CreateTexture(OutDesc, TEXT("AerosClouds.SceneColor"));
 	{
-		FVector3f FlashKm(0.f);
-		float FlashIntensity = 0.f;
-		const float FlashRate = CVarFlash.GetValueOnRenderThread();
-		if (FlashRate > 0.f && TestFlash(Time, FlashRate, FlashKm))
-		{
-			FlashKm += FVector3f(Common.CameraKm.X, Common.CameraKm.Y, 0.f);   // test flash near the camera
-			FlashIntensity = 1.f;
-		}
-		else if (FlashRate == 0.f && Data.Flashes.Num() > 0)
-		{
-			FlashKm = Data.Flashes[0].PosKm;
-			FlashIntensity = Data.Flashes[0].Intensity;
-		}
-
 		FCompositeCS::FParameters* P = GraphBuilder.AllocParameters<FCompositeCS::FParameters>();
+		uint32 NumFlashes = 0;
+		const float FlashRate = CVarFlash.GetValueOnRenderThread();
+		FVector3f TestKm(0.f);
+		if (FlashRate > 0.f && TestFlash(Time, FlashRate, TestKm))
+		{
+			TestKm += FVector3f(Common.CameraKm.X, Common.CameraKm.Y, 0.f);   // test flash near the camera
+			P->FlashPosKm[NumFlashes++] = FVector4f(TestKm, 1.f);
+		}
+		else if (FlashRate == 0.f)
+		{
+			for (const FAerosCloudFlash& Flash : Data.Flashes)
+			{
+				if (NumFlashes < 8u && Flash.Intensity > 0.f)
+				{
+					P->FlashPosKm[NumFlashes++] = FVector4f(Flash.PosKm, Flash.Intensity);
+				}
+			}
+		}
+		P->NumFlashes = NumFlashes;
 		P->View = View.ViewUniformBuffer;
 		P->Common = Common;
 		P->SceneColorTexture = SceneColor.Texture;
 		P->SceneDepthTexture = SceneDepth;
 		P->CloudColor = AccumColor;
 		P->CloudDepth = AccumDepth;
-		P->FlashKm = FlashKm;
-		P->FlashColor = FVector3f(0.75f, 0.8f, 1.f) * 4000.f * FlashIntensity;
 		P->OutSceneColor = GraphBuilder.CreateUAV(Output);
 		TShaderMapRef<FCompositeCS> Shader(GetGlobalShaderMap(View.GetFeatureLevel()));
 		FComputeShaderUtils::AddPass(GraphBuilder, RDG_EVENT_NAME("Composite"), Shader, P,

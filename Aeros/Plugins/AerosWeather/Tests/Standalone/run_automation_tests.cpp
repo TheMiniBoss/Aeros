@@ -111,6 +111,43 @@ namespace CloudNoiseTests
 	}
 }
 
+// ---- Flash list (Core, pure C++): standalone only ----------------------------------------------
+#include "Core/AerosFlashList.h"
+
+namespace FlashListTests
+{
+	int Run()
+	{
+		FAutoTestBase T;
+		{
+			Aeros::TFlashList<8> L;
+			for (int I = 0; I < 20; ++I) L.Add(0.05f * I, FVector(I, 0, 0));
+			const bool bNum = L.Num() == 8;
+			T.TestTrue("FlashList_KeepsBrightest: Num = 8", bNum);
+			if (bNum)
+			{
+				T.TestTrue("FlashList_KeepsBrightest: first is 0.95", std::abs(L[0].Intensity - 0.95f) < 1e-5f && L[0].Location.X == 19.0);
+				T.TestTrue("FlashList_KeepsBrightest: last is 0.6", std::abs(L[7].Intensity - 0.6f) < 1e-5f);
+				bool bSorted = true;
+				for (int I = 1; I < 8; ++I) bSorted &= L[I - 1].Intensity >= L[I].Intensity;
+				T.TestTrue("FlashList_KeepsBrightest: sorted, brightest first", bSorted);
+			}
+		}
+		{
+			Aeros::TFlashList<8> L;
+			L.Add(0.f, FVector(1, 2, 3));
+			L.Add(-1.f, FVector(1, 2, 3));
+			T.TestTrue("FlashList_IgnoresZero: empty", L.Num() == 0);
+			L.Add(0.5f, FVector(1, 2, 3));
+			L.Add(0.f, FVector(4, 5, 6));
+			T.TestTrue("FlashList_IgnoresZero: one entry", L.Num() == 1 && L[0].Intensity == 0.5f);
+			L.Reset();
+			T.TestTrue("FlashList Reset", L.Num() == 0);
+		}
+		return T.Fails;
+	}
+}
+
 int main()
 {
 	int Fails = 0;
@@ -119,6 +156,7 @@ int main()
 	{ FAerosHazardTest T;    std::printf("Disasters\n"); T.RunTest(""); Fails += T.Fails; }
 	{ FAerosCloudVolumeTest T; std::printf("Cloud voxels\n"); T.RunTest(""); Fails += T.Fails; }
 	{ std::printf("Cloud noise\n"); Fails += CloudNoiseTests::Run(); }
+	{ std::printf("Flash list\n"); Fails += FlashListTests::Run(); }
 	std::printf("failures: %d\n", Fails);
 	return Fails == 0 ? 0 : 1;
 }
