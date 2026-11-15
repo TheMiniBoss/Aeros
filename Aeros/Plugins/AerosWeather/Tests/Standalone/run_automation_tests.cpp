@@ -225,6 +225,49 @@ namespace FunnelTests
 	}
 }
 
+// ---- Storm chaser rules (AerosWeatherDemo, pure C++): standalone only -----------------------------
+#include "AerosChaseRules.h"
+
+namespace ChaseTests
+{
+	int Run()
+	{
+		using namespace AerosChase;
+		FAutoTestBase T;
+		auto Tor = [](int EF, float D, float Off = 0.f, float Vis = 30.f)
+		{
+			FPhotoInput I; I.Subject = ESubject::Tornado; I.EF = EF; I.DistanceKm = D; I.CenterOffset = Off; I.VisibilityKm = Vis;
+			return PhotoPoints(I);
+		};
+		T.TestTrue("Chase_TornadoCloserScoresMore (1 km > 5 km > 15 km > 0)", Tor(2, 1.f) > Tor(2, 5.f) && Tor(2, 5.f) > Tor(2, 15.f) && Tor(2, 15.f) > 0);
+		T.TestTrue("Chase_TornadoBeyond20kmScoresNothing", Tor(5, 21.f) == 0);
+		T.TestTrue("Chase_StrongerTornadoScoresMore", Tor(4, 3.f) > Tor(1, 3.f));
+		T.TestTrue("Chase_FramingMatters (centre > edge > off screen = 0)", Tor(2, 3.f, 0.1f) > Tor(2, 3.f, 0.8f) && Tor(2, 3.f, 1.1f) == 0);
+		T.TestTrue("Chase_VisibilityMatters (rain at 1 km visibility halves or worse)", Tor(2, 3.f, 0.f, 1.f) * 2 <= Tor(2, 3.f, 0.f, 30.f));
+		{
+			FPhotoInput I; I.Subject = ESubject::Supercell; I.CenterOffset = 0.2f;
+			I.DistanceKm = 5.f; const int Near = PhotoPoints(I);
+			I.DistanceKm = 30.f; const int Mid = PhotoPoints(I);
+			I.DistanceKm = 90.f; const int Far = PhotoPoints(I);
+			T.TestTrue("Chase_SupercellNeedsDistance (5 km 0, 30 km > 0, 90 km 0)", Near == 0 && Mid > 0 && Far == 0);
+		}
+		{
+			FPhotoInput I; I.Subject = ESubject::Lightning; I.DistanceKm = 5.f; I.Brightness = 1.f;
+			const int Lit = PhotoPoints(I);
+			I.Brightness = 0.f;
+			T.TestTrue("Chase_LightningNeedsTheFlash", Lit > 0 && PhotoPoints(I) == 0);
+		}
+		T.TestTrue("Chase_NoDamageInCalmWeather", DamagePerSecond(10.f, 0.f, 0.f) == 0.f && DamagePerSecond(34.f, 19.f, 0.3f) == 0.f);
+		T.TestTrue("Chase_DamageGrowsWithHazard", DamagePerSecond(60.f, 0.f, 0.f) > DamagePerSecond(45.f, 0.f, 0.f) && DamagePerSecond(0.f, 50.f, 0.f) > DamagePerSecond(0.f, 30.f, 0.f)
+			&& DamagePerSecond(0.f, 0.f, 1.f) > 0.f);
+		T.TestTrue("Chase_LightningDamage (0 beyond 300 m, most at the strike)", LightningDamage(301.f) == 0.f && LightningDamage(0.f) > LightningDamage(150.f) && LightningDamage(150.f) > 0.f);
+		T.TestTrue("Chase_HailPointsGrowWithSize", HailPoints(50.f) > HailPoints(25.f) && HailPoints(25.f) > 0 && HailPoints(10.f) == 0);
+		T.TestTrue("Chase_RespawnPenaltyIsAQuarter", RespawnPenalty(1000) == 250 && RespawnPenalty(0) == 0);
+		T.TestTrue("Chase_RankGrowsWithScore", RankIndex(0) == 0 && RankIndex(100000) == 4 && RankIndex(800) >= RankIndex(300));
+		return T.Fails;
+	}
+}
+
 int main()
 {
 	int Fails = 0;
@@ -235,6 +278,7 @@ int main()
 	{ std::printf("Cloud noise\n"); Fails += CloudNoiseTests::Run(); }
 	{ std::printf("Flash list\n"); Fails += FlashListTests::Run(); }
 	{ std::printf("Funnel\n"); Fails += FunnelTests::Run(); }
+	{ std::printf("Storm chaser\n"); Fails += ChaseTests::Run(); }
 	std::printf("failures: %d\n", Fails);
 	return Fails == 0 ? 0 : 1;
 }

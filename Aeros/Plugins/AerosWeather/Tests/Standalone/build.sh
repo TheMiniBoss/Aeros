@@ -6,7 +6,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 CXX="${CXX:-g++}"
 SRC=../../Source/AerosWeather
-FLAGS="-std=c++20 -O2 -Wall -Wno-unused -Ishim -I$SRC/Public -I$SRC/Private -I../../Source/AerosCloudRender/Private"
+FLAGS="-std=c++20 -O2 -Wall -Wno-unused -Ishim -I$SRC/Public -I$SRC/Private -I../../Source/AerosCloudRender/Private -I../../Source/AerosWeatherDemo/Public"
 CORE="$SRC/Private/Core/AerosSimulation.cpp $SRC/Private/Core/AerosSnapshot.cpp $SRC/Private/Core/AerosCloudVolume.cpp ../../Source/AerosCloudRender/Private/AerosCloudNoise.cpp"
 mkdir -p bin
 $CXX $FLAGS -o bin/run_automation_tests run_automation_tests.cpp $CORE
