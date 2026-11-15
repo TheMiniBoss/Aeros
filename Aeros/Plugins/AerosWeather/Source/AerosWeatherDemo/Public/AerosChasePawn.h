@@ -104,13 +104,15 @@ public:
 	float ToastTime = 0.f;
 	FString BriefingText;
 
-	static constexpr float BriefingStartHour = 12.25f;
-	static constexpr float DayStartHour = 13.f;
+	static constexpr float BriefingStartHour = 15.25f;
+	static constexpr float DayStartHour = 16.f;
 	static constexpr float DayEndHour = 20.5f;
-	/** x20: a 7.5 h afternoon in ~22 min, storms that a car can keep up with, tornadoes of ~5 min. */
-	static constexpr float DayTimeScale = 20.f;
-	/** Fast travel (key T): to ~10 km of the nearest supercell, the clock moves on by this much. */
-	static constexpr float FastTravelHours = 1.f / 3.f;
+	/** x2: supercells move at ~15 m/s, ~30 m/s on screen, a 50 m/s car can catch them (at x20 they
+	 *  ran at 300 m/s). The 4.5 h evening lasts up to 2 h 15; the pause screen can end it. */
+	static constexpr float DayTimeScale = 2.f;
+	/** Fast travel (key T): to ~4 km of the nearest supercell, the clock moves on by this much. */
+	static constexpr float FastTravelHours = 1.f / 6.f;
+	static constexpr float FastTravelKm = 4.f;
 
 	/** Frames left during which the HUD hides itself (a photo is being captured without it). */
 	int32 PhotoHideFrames = 0;
@@ -169,5 +171,15 @@ private:
 	float QuitAfter = -1.f;
 	float EndDayAfter = -1.f;
 	float DrivingTime = 0.f;
+	float AutoTravelTimer = 0.f;
+	/** Tornado-genesis settings saved while the chase tunes them (negative = not tuned). */
+	float SavedTornadoInterval = -1.f;
+	float SavedTornadoFrequency = 1.f;
+	void TuneTornadoGenesis(bool bChase);
+	float AutoLogTimer = 0.f;
+	/** Scenario and clock are set from the briefing's ticks: a command issued before the weather
+	 *  thread runs (BeginPlay with -AerosChase) is dropped. 0 = not yet, 1 = sent, 2 = clock seen. */
+	int32 BriefingSetup = 0;
+	float BriefingSetupTimer = 0.f;
 	float SessionTime = 0.f;
 };

@@ -136,7 +136,7 @@ void AAerosChaseHUD::DrawHUD()
 		if (Sub) DrawDriving(P, Sub);
 		DrawRect(FLinearColor(0, 0, 0, 0.55f), 0, 0, SW, SH);
 		Text(TEXT("PAUSE"), SW * 0.5f, SH * 0.38f, Accent, 2.4f, true, GEngine->GetLargeFont());
-		Text(TEXT("\u00C9chap : reprendre      Retour arri\u00E8re : menu principal"), SW * 0.5f, SH * 0.38f + 64.f, Ink, 1.1f, true);
+		Text(TEXT("\u00C9chap : reprendre      Entr\u00E9e : finir la journ\u00E9e      Retour arri\u00E8re : menu principal"), SW * 0.5f, SH * 0.38f + 64.f, Ink, 1.1f, true);
 		break;
 	case EAerosChaseState::Summary:
 		DrawSummary(P);
@@ -190,14 +190,14 @@ void AAerosChaseHUD::DrawBriefing(AAerosChasePawn* P)
 	Y += 26.f;
 	Text(TEXT("Dangers : vents de tornade, gr\u00EAle > 2 cm, foudre \u00E0 moins de 300 m, routes inond\u00E9es."), X, Y, Dim, 0.9f);
 	Y += 26.f;
-	Text(TEXT("Trop loin ? T = trajet rapide vers la supercellule la plus proche, mais l'horloge avance de 20 minutes."), X, Y, Dim, 0.9f);
+	Text(TEXT("Trop loin ? T = trajet rapide \u00E0 4 km de la tornade (sinon de la supercellule) la plus proche, l'horloge avance de 10 minutes."), X, Y, Dim, 0.9f);
 	Y += 46.f;
 	Text(TEXT("Les orages se forment..."), X, Y, Ink, 1.f);
 	Bar(X, Y + 30.f, W, 10.f, P->BriefingProgress, Accent);
 	Text(FString::Printf(TEXT("%s"), *Clock(P->GetHour())), X + W, Y, Dim, 1.f);
 	if (P->bBriefingReady)
 	{
-		Text(TEXT("Une supercellule est n\u00E9e.  Entr\u00E9e : partir maintenant"), X, Y + 60.f, Accent, 1.f);
+		Text(TEXT("Une supercellule tourne d\u00E9j\u00E0.  Entr\u00E9e : partir maintenant"), X, Y + 60.f, Accent, 1.f);
 	}
 }
 
@@ -304,7 +304,7 @@ void AAerosChaseHUD::DrawDriving(AAerosChasePawn* P, UAerosWeatherSubsystem* Sub
 	// Controls reminder for the first seconds
 	if (P->StateTime < 25.f)
 	{
-		Text(TEXT("Z/S avancer-freiner   Q/D tourner   souris regarder   clic droit zoom   clic gauche ou Espace photo   T trajet rapide (+20 min)   \u00C9chap pause"),
+		Text(TEXT("Z/S avancer-freiner   Q/D tourner   souris regarder   clic droit zoom   clic gauche ou Espace photo   T trajet rapide (+10 min)   \u00C9chap pause"),
 			SW * 0.5f, SH - 40.f, FLinearColor(Dim.R, Dim.G, Dim.B, FMath::Clamp(25.f - P->StateTime, 0.f, 1.f)), 0.9f, true);
 	}
 }

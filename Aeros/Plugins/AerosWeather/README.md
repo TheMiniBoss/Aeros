@@ -39,11 +39,12 @@ Sans ouvrir l'éditeur : `UnrealEditor-Cmd.exe Aeros.uproject -run=pythonscript 
 
 **Play** ouvre un menu : *Chasseur d'orages*, *Démo technique (vol libre)*, *Quitter* (Z/S ou flèches, Entrée). `-AerosTech` (ou toute option `-AerosTour…`) démarre directement dans la démo technique. Retour au menu depuis la démo technique : **Retour arrière**.
 
-Une après-midi de supercellules (13 h → 20 h 30, temps ×20, ≈ 22 min). On conduit un véhicule au sol, on trouve les orages au radar, on les approche par le côté et on photographie ce que le ciel donne.
+Une fin d'après-midi de supercellules (16 h → 20 h 30, temps ×2 : les orages filent à ≈ 30 m/s à l'écran, le véhicule monte à 300 km/h ; la journée peut durer 2 h 15, la pause permet de la finir). On conduit un véhicule au sol, on trouve les orages au radar, on les approche par le côté et on photographie ce que le ciel donne.
 
-* **Briefing** : le scénario *Supercellules* tourne en accéléré depuis 12 h 15 pendant qu'on lit les règles. Dès qu'une supercellule existe, Entrée part tout de suite (sinon départ à 13 h, à ≈ 30 km de l'orage le plus fort, hors de la pluie).
+* **Briefing** : le scénario *Supercellules* tourne en accéléré depuis 15 h 15 pendant qu'on lit les règles (≈ 1 min : à ×600 la simulation ne fait que ×40-100). Dès qu'une supercellule tourne (mésocyclone), Entrée part tout de suite (sinon départ à 16 h). Départ à ≈ 8 km de l'orage le plus fort, hors de la pluie.
+* **Tornades** : pendant la journée, le plugin tente une tornade toutes les 60 s simulées par supercellule critique au lieu de 600 s (`TornadoCheckInterval`, remis à la fin) : à ×2, une tentative toutes les 30 s, sinon il fallait attendre 5 min réelles par essai.
 * **Points** (`AerosChaseRules.h`, testés hors moteur) : tornade (100 × (EF+1), bien plus près de 2 km, plus rien au-delà de 20 km), nuage-mur, éclair pris au bon moment (dans les 0,6 s), supercellule entière vue de 10 à 80 km, traversée d'un cœur de grêle (> 2 cm). Le sujet doit être dans le quart central du cadre, **vu** (pas caché par une colline ou une dune : tracé contre le relief) et **pas noyé dans la pluie** (la visibilité est la pire rencontrée sur la ligne de visée). Une seule photo compte par sujet : une meilleure ajoute la différence.
-* **Dangers** : vents de tornade (> 35 m/s, ils poussent aussi le véhicule), grêle > 2 cm, foudre à moins de 300 m, routes inondées (> 0,4 m). Hors danger le véhicule se répare lentement. Détruit : pénalité d'un quart du score, nouveau véhicule à 15 km.
+* **Dangers** : vents de tornade (> 35 m/s, ils poussent aussi le véhicule), grêle > 2 cm, foudre à moins de 300 m, routes inondées (> 0,4 m). Hors danger le véhicule se répare lentement. Détruit : pénalité d'un quart du score, nouveau véhicule à 8 km.
 * **Rangs** : Débutant, Observateur (400), Chasseur (1200), Chasseur confirmé (3000), Chasseur légendaire (6000).
 * **Interface** : heure et coucher du soleil, score et rang, boussole avec orages et tornades, radar 160 km, vitesse, état du véhicule, marqueurs à l'écran, alertes, viseur avec estimation des points en direct. L'écran de fin liste les meilleures photos. Les photos (sans interface) sont dans `Saved/Screenshots/<plateforme>/AerosChase/`.
 
@@ -54,8 +55,8 @@ Une après-midi de supercellules (13 h → 20 h 30, temps ×20, ≈ 22 min). On 
 | Souris | regarder autour |
 | Clic droit (maintenu) | zoom ×4 (viseur) |
 | Clic gauche ou **Espace** | photo |
-| **T** | trajet rapide : à ≈ 10 km de la supercellule la plus proche, l'horloge avance de 20 min |
-| **Échap** ou **P** | pause (la météo s'arrête) |
+| **T** | trajet rapide : à ≈ 4 km de la tornade la plus proche (sinon de la supercellule), hors de la pluie ; l'horloge avance de 10 min |
+| **Échap** ou **P** | pause (la météo s'arrête) ; en pause, **Entrée** finit la journée |
 | **Retour arrière** | menu |
 
 Pas de touches de fonction (F1-F12) dans la démo jouable : elles servent souvent au débogage du moteur.

@@ -8,6 +8,7 @@
 #include "AerosPrecipitationComponent.h"
 #include "AerosWaterSurfaceComponent.h"
 #include "AerosTornado.h"
+#include "AerosWeatherSettings.h"
 #include "Core/AerosFunnel.h"
 #include "Camera/CameraComponent.h"
 #include "GameFramework/PlayerController.h"
@@ -37,7 +38,9 @@ namespace AerosChasePawnInternal
 		return Km < 10.f ? FString::Printf(TEXT("%.1f km"), Km).Replace(TEXT("."), TEXT(",")) : FString::Printf(TEXT("%.0f km"), Km);
 	}
 
-	constexpr float MaxSpeedMs = 38.f;   // ~137 km/h
+	// 300 km/h: not a real car, but a supercell moves at ~30 m/s on screen (x2), and the storms are
+	// tens of km apart: at 180 km/h closing in from behind took a quarter of an hour.
+	constexpr float MaxSpeedMs = 85.f;
 	constexpr float CameraHeightCm = 170.f;
 }
 
@@ -85,8 +88,30 @@ void AAerosChasePawn::BeginPlay()
 	if (FParse::Param(FCommandLine::Get(), TEXT("AerosChase")) || bAutopilot) StartChase();
 }
 
+void AAerosChasePawn::TuneTornadoGenesis(bool bChase)
+{
+	// The plugin rolls for a tornado every 600 simulated s per supercell: at the chase's x2 that is one
+	// roll every 5 real minutes. A game needs a roll every ~30 s (still 15-45 % each, and only under
+	// a rotating storm in a tornadic environment). Restored when the day ends.
+	UAerosWeatherSettings* S = GetMutableDefault<UAerosWeatherSettings>();
+	if (bChase && SavedTornadoInterval < 0.f)
+	{
+		SavedTornadoInterval = S->TornadoCheckInterval;
+		SavedTornadoFrequency = S->TornadoFrequency;
+		S->TornadoCheckInterval = 60.f;
+		S->TornadoFrequency = FMath::Max(S->TornadoFrequency, 1.5f);
+	}
+	else if (!bChase && SavedTornadoInterval >= 0.f)
+	{
+		S->TornadoCheckInterval = SavedTornadoInterval;
+		S->TornadoFrequency = SavedTornadoFrequency;
+		SavedTornadoInterval = -1.f;
+	}
+}
+
 void AAerosChasePawn::EndPlay(const EEndPlayReason::Type Reason)
 {
+	TuneTornadoGenesis(false);
 	if (UAerosWeatherSubsystem* Sub = UAerosWeatherSubsystem::Get(this))
 	{
 		Sub->OnLightningStrike.RemoveDynamic(this, &AAerosChasePawn::HandleLightning);
@@ -212,6 +237,7 @@ void AAerosChasePawn::Tick(float DeltaSeconds)
 			if (UAerosWeatherSubsystem* PauseSub = UAerosWeatherSubsystem::Get(this)) PauseSub->SetPaused(false);
 		}
 		if (AerosChasePawnInternal::KeyPressed(PC, { EKeys::BackSpace })) GoToMenu();
+		else if (AerosChasePawnInternal::KeyPressed(PC, { EKeys::Enter })) { if (UAerosWeatherSubsystem* EndSub = UAerosWeatherSubsystem::Get(this)) EndSub->SetPaused(false); EndDay(); }
 		break;
 	case EAerosChaseState::Summary:
 		TickSummary(PC);
@@ -252,6 +278,7 @@ void AAerosChasePawn::GoToMenu()
 	State = EAerosChaseState::Menu;
 	StateTime = 0.f;
 	bZoom = false;
+	TuneTornadoGenesis(false);
 	if (UAerosWeatherSubsystem* Sub = UAerosWeatherSubsystem::Get(this)) { Sub->SetPaused(false); Sub->SetTimeScale(60.f); }
 }
 
@@ -282,16 +309,8 @@ void AAerosChasePawn::StartChase()
 	State = EAerosChaseState::Briefing;
 	StateTime = 0.f;
 	BriefingProgress = 0.f;
-	if (UAerosWeatherSubsystem* Sub = UAerosWeatherSubsystem::Get(this))
-	{
-		// A supercell outbreak: the storms grow fast (x600, about x100 in practice: the simulation
-		// cannot keep up) from 12:15 while the briefing is shown
-		Sub->SetPaused(false);
-		Sub->SetScenario(EAerosScenario::SupercellOutbreak);
-		const FAerosDateTime Now = Sub->GetDateTime();
-		Sub->SetDateTime(Now.DayOfYear, BriefingStartHour);
-		Sub->SetTimeScale(600.f);
-	}
+	BriefingSetup = 0;
+	BriefingSetupTimer = 0.f;
 	BriefingText = TEXT("Situation : air chaud et humide au sol, vent qui tourne avec l'altitude. Des supercellules vont se former cet apr\u00E8s-midi. Trouve-les au radar, approche-toi par le c\u00F4t\u00E9 (hors de la pluie) et photographie ce que le ciel te donne. Coucher du soleil vers 20 h 30.");
 }
 
@@ -299,14 +318,35 @@ void AAerosChasePawn::TickBriefing(float DeltaSeconds)
 {
 	UAerosWeatherSubsystem* Sub = UAerosWeatherSubsystem::Get(this);
 	if (!Sub) return;
+	// A supercell outbreak: the storms grow fast (x600, x40-100 in practice: the simulation cannot
+	// keep up) from 15:15 while the briefing is shown. Sent again until the clock shows it.
+	if (BriefingSetup < 2 && (BriefingSetupTimer -= DeltaSeconds) <= 0.f)
+	{
+		const float Now = Sub->GetDateTime().Hour;
+		if (BriefingSetup == 1 && Now >= BriefingStartHour - 0.05f && Now < DayStartHour + 0.5f)
+		{
+			BriefingSetup = 2;
+		}
+		else
+		{
+			Sub->SetPaused(false);
+			if (BriefingSetup == 0) Sub->SetScenario(EAerosScenario::SupercellOutbreak);
+			Sub->SetDateTime(Sub->GetDateTime().DayOfYear, BriefingStartHour);
+			Sub->SetTimeScale(600.f);
+			BriefingSetup = 1;
+			BriefingSetupTimer = 0.5f;
+		}
+	}
+	if (BriefingSetup < 2) return;
 	const float Hour = Sub->GetDateTime().Hour;
 	BriefingProgress = FMath::Clamp((Hour - BriefingStartHour) / (DayStartHour - BriefingStartHour), 0.f, 1.f);
 	bBriefingReady = false;
-	for (const FAerosStormData& S : Sub->GetStorms()) bBriefingReady |= S.Type == EAerosStormType::Supercell;
+	for (const FAerosStormData& S : Sub->GetStorms()) bBriefingReady |= S.Type == EAerosStormType::Supercell && S.Mesocyclone > 0.5f;
 	APlayerController* PC = Cast<APlayerController>(GetController());
 	const bool bSkip = bBriefingReady && StateTime > 2.f && PC
 		&& AerosChasePawnInternal::KeyPressed(PC, { EKeys::Enter, EKeys::SpaceBar, EKeys::LeftMouseButton });
-	if (bSkip || (Hour >= DayStartHour - 0.02f && StateTime > 4.f)) BeginDay();
+	const bool bAutoSkip = bAutopilot && bBriefingReady && StateTime > 3.f;
+	if (bSkip || bAutoSkip || (Hour >= DayStartHour - 0.02f && StateTime > 4.f)) BeginDay();
 }
 
 void AAerosChasePawn::BeginDay()
@@ -314,8 +354,9 @@ void AAerosChasePawn::BeginDay()
 	UAerosWeatherSubsystem* Sub = UAerosWeatherSubsystem::Get(this);
 	if (!Sub) return;
 	Sub->SetTimeScale(DayTimeScale);
-	// Start 30 km from the strongest storm, on land, facing it
-	SetActorLocation(FindSafeStart(Sub, 30.f));
+	TuneTornadoGenesis(true);
+	// Start 8 km from the strongest storm, on land, out of the rain, facing it
+	SetActorLocation(FindSafeStart(Sub, 8.f));
 	PlaceOnGround();
 	float BestI = -1.f;
 	FVector Target = GetActorLocation() + FVector(100000.0, 0.0, 0.0);
@@ -344,7 +385,7 @@ FVector AAerosChasePawn::FindSafeStart(UAerosWeatherSubsystem* Sub, float Distan
 	for (int32 K = 0; K < 16; ++K)
 	{
 		const float A = PI + (K % 2 == 0 ? 1.f : -1.f) * float((K + 1) / 2) * (PI / 8.f);
-		for (float D = DistanceKm; D <= DistanceKm * 2.f; D += 5.f)
+		for (float D = DistanceKm; D <= DistanceKm * 2.f; D += FMath::Max(1.f, DistanceKm / 6.f))
 		{
 			const FVector P = Center + FVector(FMath::Cos(A), FMath::Sin(A), 0.0) * double(D) * 100000.0;
 			if (GroundZAt(P.X, P.Y) < SeaZ + 300.0) continue;
@@ -360,6 +401,7 @@ void AAerosChasePawn::EndDay()
 {
 	State = EAerosChaseState::Summary;
 	StateTime = 0.f;
+	TuneTornadoGenesis(false);
 	UE_LOG(LogTemp, Display, TEXT("Aeros chase: day over, score %d, %d photos, destroyed %d"), Score, Album.Num(), Destroyed);
 	SummaryIndex = 0;
 	bZoom = false;
@@ -370,7 +412,7 @@ void AAerosChasePawn::Respawn()
 {
 	if (UAerosWeatherSubsystem* Sub = UAerosWeatherSubsystem::Get(this))
 	{
-		SetActorLocation(FindSafeStart(Sub, 15.f));
+		SetActorLocation(FindSafeStart(Sub, 8.f));
 	}
 	PlaceOnGround();
 	Health = 100.f;
@@ -410,11 +452,11 @@ void AAerosChasePawn::Drive(APlayerController* PC, float DeltaSeconds)
 	using namespace AerosChasePawnInternal;
 	const float Throttle = (KeyDown(PC, { EKeys::Z, EKeys::Up }) ? 1.f : 0.f) - (KeyDown(PC, { EKeys::S, EKeys::Down }) ? 1.f : 0.f);
 	const float Steer = (KeyDown(PC, { EKeys::D, EKeys::Right }) ? 1.f : 0.f) - (KeyDown(PC, { EKeys::Q, EKeys::Left }) ? 1.f : 0.f);
-	if (Throttle > 0.f) SpeedMs += (SpeedMs < 0.f ? 12.f : 5.f) * DeltaSeconds;
-	else if (Throttle < 0.f) SpeedMs -= (SpeedMs > 0.f ? 12.f : 3.f) * DeltaSeconds;
+	if (Throttle > 0.f) SpeedMs += (SpeedMs < 0.f ? 20.f : 14.f) * DeltaSeconds;
+	else if (Throttle < 0.f) SpeedMs -= (SpeedMs > 0.f ? 25.f : 4.f) * DeltaSeconds;
 	else SpeedMs = FMath::FInterpTo(SpeedMs, 0.f, DeltaSeconds, 0.4f);
 	const float Speed01 = FMath::Abs(SpeedMs) / MaxSpeedMs;
-	HeadingDeg += Steer * FMath::Lerp(70.f, 25.f, Speed01) * DeltaSeconds * (SpeedMs >= 0.f ? 1.f : -1.f) * FMath::Min(FMath::Abs(SpeedMs) / 3.f, 1.f);
+	HeadingDeg += Steer * FMath::Lerp(75.f, 35.f, Speed01) * DeltaSeconds * (SpeedMs >= 0.f ? 1.f : -1.f) * FMath::Min(FMath::Abs(SpeedMs) / 3.f, 1.f);
 }
 
 void AAerosChasePawn::Look(APlayerController* PC, float DeltaSeconds)
@@ -565,17 +607,29 @@ void AAerosChasePawn::FastTravel()
 		const double D = FVector::Dist2D(S.Location, L);
 		if (D < BestD) { BestD = D; Best = &S; }
 	}
-	if (!Best) { ShowToast(TEXT("Aucune supercellule en vue pour l'instant.")); return; }
-	if (BestD < 1500000.0) { ShowToast(TEXT("Tu es d\u00E9j\u00E0 pr\u00E8s de la supercellule.")); return; }
-	const FVector Center = Best->Location;
-	SetActorLocation(FindSafeStart(Sub, 10.f, &Center));
+	// A tornado on the ground beats any supercell
+	const AAerosTornado* Twister = nullptr;
+	double TwisterD = 1e18;
+	for (TActorIterator<AAerosTornado> It(GetWorld()); It; ++It)
+	{
+		if (It->GetStrength() < 0.15f) continue;
+		const double D = FVector::Dist2D(It->GetActorLocation(), L);
+		if (D < TwisterD) { TwisterD = D; Twister = *It; }
+	}
+	if (!Best && !Twister) { ShowToast(TEXT("Aucune supercellule en vue pour l'instant.")); return; }
+	const bool bTwister = Twister != nullptr;
+	const double TargetD = bTwister ? TwisterD : BestD;
+	const TCHAR* What = bTwister ? TEXT("de la tornade") : TEXT("de la supercellule");
+	if (TargetD < (FastTravelKm + 2.f) * 100000.0) { ShowToast(FString::Printf(TEXT("Tu es d\u00E9j\u00E0 pr\u00E8s %s."), What)); return; }
+	const FVector Center = bTwister ? Twister->GetActorLocation() : Best->Location;
+	SetActorLocation(FindSafeStart(Sub, FastTravelKm, &Center));
 	PlaceOnGround();
 	HeadingDeg = (Center - GetActorLocation()).Rotation().Yaw;
 	LookYaw = 0.f;
 	SpeedMs = 0.f;
 	const FAerosDateTime Now = Sub->GetDateTime();
 	Sub->SetDateTime(Now.DayOfYear, Now.Hour + FastTravelHours);
-	ShowToast(TEXT("Trajet rapide : 20 minutes plus tard, \u00E0 10 km de la supercellule."));
+	ShowToast(FString::Printf(TEXT("Trajet rapide : 10 minutes plus tard, \u00E0 4 km %s (hors de la pluie)."), What));
 }
 
 // ---------------------------------------------------------------- photos
@@ -723,14 +777,14 @@ void AAerosChasePawn::TickAutopilot(float DeltaSeconds)
 {
 	const FVector L = GetActorLocation();
 	FVector Target = FVector::ZeroVector;
-	float Want = 25.f;
+	float Want = 12.f;   // a supercell is worth most from 10-20 km
 	bool bHave = false;
 	float BestD = 1e9f;
 	for (TActorIterator<AAerosTornado> It(GetWorld()); It; ++It)
 	{
 		if (It->GetStrength() < 0.15f) continue;
 		const float D = float(FVector::Dist2D(It->GetActorLocation(), L)) * 1e-5f;
-		if (D < BestD) { BestD = D; Target = It->GetActorLocation() + FVector(0, 0, 30000.0); Want = 3.f; bHave = true; }
+		if (D < BestD && D < 40.f) { BestD = D; Target = It->GetActorLocation() + FVector(0, 0, 30000.0); Want = 3.f; bHave = true; }
 	}
 	if (!bHave)
 	{
@@ -743,15 +797,22 @@ void AAerosChasePawn::TickAutopilot(float DeltaSeconds)
 		BestD = float(FVector::Dist2D(Target, L)) * 1e-5f;
 	}
 	if (!bHave) return;
-	if (BestD > 25.f && StateTime > 5.f && (AutoPhotoTimer > 5.f))
+	AutoTravelTimer += DeltaSeconds;
+	if (BestD > Want + 8.f && AutoTravelTimer > 20.f)
 	{
+		AutoTravelTimer = 0.f;
 		FastTravel();
 		return;
+	}
+	if ((AutoLogTimer += DeltaSeconds) > 10.f)
+	{
+		AutoLogTimer = 0.f;
+		UE_LOG(LogTemp, Display, TEXT("Aeros chase: auto target %.1f km (want %.0f), speed %.0f km/h, score %d"), BestD, Want, SpeedMs * 3.6f, Score);
 	}
 	const float ToYaw = (Target - L).Rotation().Yaw;
 	const float DriveYaw = BestD > Want + 1.f ? ToYaw : (BestD < Want - 1.f ? ToYaw + 180.f : ToYaw + 90.f);
 	HeadingDeg = FMath::FixedTurn(HeadingDeg, DriveYaw, 40.f * DeltaSeconds);
-	SpeedMs = FMath::FInterpTo(SpeedMs, FMath::Abs(BestD - Want) > 1.f ? 30.f : 6.f, DeltaSeconds, 1.f);
+	SpeedMs = FMath::FInterpTo(SpeedMs, FMath::Abs(BestD - Want) > 1.f ? (BestD > Want + 5.f ? 80.f : 35.f) : 6.f, DeltaSeconds, 1.f);
 	// Aim the camera at the target
 	const FRotator Aim = (Target - Camera->GetComponentLocation()).Rotation();
 	LookYaw = FMath::Clamp(FRotator::NormalizeAxis(Aim.Yaw - HeadingDeg), -170.f, 170.f);

@@ -52,6 +52,8 @@ Aeros/Plugins/AerosWeather/
 - Démo jouable : **pas de touches de fonction** (F1-F12, réservées au débogage du moteur), et l'interface de la démo technique reste à la démo technique.
 - Photo sans interface : `RequestScreenshot(File, false, ...)` garde quand même le HUD canvas et le flash d'obturateur. Cacher le HUD (`PhotoHideFrames`) 2-3 images, capturer, **puis** lancer le flash.
 - À x600 la simulation ne suit pas (≈ x40-100 réel) : ne jamais attendre une heure exacte sans porte de sortie (briefing de ~1 min) ; tester `Hour >= H - 0.02` et proposer de passer.
+- `IssueCommand` est **ignoré tant que le thread météo n'existe pas** (`if (!SimThread) return`) : une commande lancée dans un `BeginPlay` (ex. `-AerosChase`) disparaît sans message. L'envoyer depuis le Tick et vérifier l'effet (ex. l'heure) avant de continuer.
+- Chasse : un véhicule ne rattrape un orage que si l'échelle de temps reste petite (orage 15 m/s × échelle à l'écran). À x20 ils filaient à 300 m/s. Les essais de tornade sont en temps **simulé** (`TornadoCheckInterval` = 600 s) : à petite échelle il n'y en a presque plus, la chasse le baisse à 60 s pendant la journée.
 
 - **Sources 100 % ASCII** (MSVC) : pas d'accent dans les `.h/.cpp`. Dans les chaînes, écrire \u00E9 (é), \u00E0 (à)... dans `TEXT("...")`. Attention : les outils Write/Edit décodent `\uXXXX` en vrai caractère. Écrire le texte avec accents puis convertir tous les non-ASCII en `\uXXXX` par un petit script Python (`chr(92)+'u%04X'`).
 - `FString::ToUpper` ne met pas les accents en majuscule (« DéGAGé ») : ne pas l'utiliser sur du texte français.
