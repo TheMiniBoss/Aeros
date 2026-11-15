@@ -26,7 +26,7 @@ namespace AerosCloudRenderInternal
 	TAutoConsoleVariable<float> CVarWind(TEXT("r.AerosClouds.Wind"), 0.f,
 		TEXT("Test override of the storm motion used for reprojection, m/s along +X (0 = use the simulation)."), ECVF_RenderThreadSafe);
 	TAutoConsoleVariable<float> CVarFlash(TEXT("r.AerosClouds.Flash"), 0.f,
-		TEXT("Test lightning: flashes per second inside the test tower (0 off)."), ECVF_RenderThreadSafe);
+		TEXT("Test lightning: flashes per second near the camera (0 = simulation flashes only, < 0 = no flash at all)."), ECVF_RenderThreadSafe);
 	TAutoConsoleVariable<float> CVarBlend(TEXT("r.AerosClouds.HistoryBlend"), 0.1f,
 		TEXT("Weight of the new frame in the temporal accumulation (1 = no history)."), ECVF_RenderThreadSafe);
 
@@ -392,12 +392,13 @@ FScreenPassTexture FAerosCloudViewExtension::Render_RenderThread(FRDGBuilder& Gr
 	{
 		FVector3f FlashKm(0.f);
 		float FlashIntensity = 0.f;
-		if (TestFlash(Time, CVarFlash.GetValueOnRenderThread(), FlashKm))
+		const float FlashRate = CVarFlash.GetValueOnRenderThread();
+		if (FlashRate > 0.f && TestFlash(Time, FlashRate, FlashKm))
 		{
 			FlashKm += FVector3f(Common.CameraKm.X, Common.CameraKm.Y, 0.f);   // test flash near the camera
 			FlashIntensity = 1.f;
 		}
-		else if (Data.Flashes.Num() > 0)
+		else if (FlashRate == 0.f && Data.Flashes.Num() > 0)
 		{
 			FlashKm = Data.Flashes[0].PosKm;
 			FlashIntensity = Data.Flashes[0].Intensity;

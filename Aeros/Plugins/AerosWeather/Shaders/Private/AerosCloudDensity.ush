@@ -1,0 +1,208 @@
+// Copyright Aeros. All Rights Reserved.
+// Cloud density of the custom renderer: port of the volumetric cloud material (aeros_setup.py, CLOUD_HLSL)
+// onto the generated noises, with a continuous level of detail. Octaves goes from 4 (near) to 1 (far);
+// each detail octave blends to its mean (0.5) as Octaves drops below its index, so detail fades in and
+// out with distance instead of popping between mips.
+// Units: km, Unreal world axes (z up). PosKm is the absolute world position.
+
+#pragma once
+
+Texture2D WeatherMap;     // R cover, G base (0-5 km), B top (0-16 km), A precipitation
+Texture2D ShapeMap;       // R anvil cover, G updraft, B gust front / shelf, A convective activity
+Texture3D VolumePrev;     // voxel storm anatomy (R cloud, G rain / dark), previous build
+Texture3D VolumeCur;      // current build
+SamplerState DataSampler; // bilinear clamp: the simulation is always read filtered
+float4 DomainCm;
+float4 RectPrevCm;
+float4 RectCurCm;
+float VolumeBlend;
+float VolumeWeight;
+float3 NoiseOffsetKm;
+
+Texture3D ShapeNoise;     // RGBA: Perlin-Worley, Worley 8 / 16 / 32 cells (tileable, 128^3)
+Texture3D DetailNoise;    // RGBA: Worley 4 / 8 / 16 cells, Worley fbm (tileable, 32^3)
+SamplerState NoiseSampler;
+
+struct FAerosCloudSample
+{
+	float Density;   // 0-1 (extinction per km = Density * 80 * (1 + 3 * Dark))
+	float Dark;      // 0-1, rain greying
+};
+
+float AerosCloudOctaves(float DistKm)
+{
+	return clamp(4.5 - log2(max(DistKm, 0.5)), 1.0, 4.0);
+}
+
+float AerosCloudStepKm(float DistKm)
+{
+	return clamp(0.06 + 0.012 * DistKm, 0.06, 0.5);
+}
+
+float AerosCloudExtinction(FAerosCloudSample S)
+{
+	return S.Density * 80.0 * (1.0 + 3.0 * S.Dark);
+}
+
+// Detail octave of index I: its mean when Octaves <= I, itself when Octaves >= I + 1.
+float AerosCloudOctave(float V, float Octaves, float I)
+{
+	return lerp(0.5, V, saturate(Octaves - I));
+}
+
+float3 AerosCloudVoxelUVW(float2 XYCm, float AltKm, float4 RectCm)
+{
+	return float3((XYCm - RectCm.xy) / RectCm.z + 0.5, AltKm / RectCm.w);
+}
+
+FAerosCloudSample AerosCloudDensity(float3 PosKm, float DistKm, float Octaves)
+{
+	FAerosCloudSample Out;
+	Out.Density = 0.0;
+	Out.Dark = 0.0;
+
+	const float AltKm = PosKm.z;
+	const float3 P = PosKm - NoiseOffsetKm;
+	const float2 XYCm = PosKm.xy * 1e5;
+
+	const float2 MapUV = (XYCm - DomainCm.xy) / DomainCm.zw + 0.5;
+	const float4 Wx = WeatherMap.SampleLevel(DataSampler, MapUV, 0);
+	const float4 Sx = ShapeMap.SampleLevel(DataSampler, MapUV, 0);
+
+	// Voxel coverage of this point (fades out over the last 12.5 % of the grid).
+	const float3 UnwarpedUVW = AerosCloudVoxelUVW(XYCm, AltKm, RectCurCm);
+	const float2 EdgeUV = abs(UnwarpedUVW.xy - 0.5) * 2.0;
+	const float VoxIn = VolumeWeight * (1.0 - smoothstep(0.875, 1.0, max(EdgeUV.x, EdgeUV.y)));
+
+	const float cover   = saturate(Wx.r);
+	const float baseKm  = Wx.g * 5.0;
+	const float topKm   = max(Wx.b * 16.0, baseKm + 0.25);
+	const float anvilCv = Sx.r;
+	const float updraft = Sx.g;
+	const float gust    = Sx.b;
+	const float conv    = Sx.a;
+
+	// Nothing here: no 2D cloud, no rain, no anvil, no shelf and outside the voxel grid.
+	if (cover < 1e-3 && Wx.a < 1e-3 && anvilCv < 1e-3 && gust < 1e-3 && VoxIn < 1e-3)
+	{
+		return Out;
+	}
+
+	// Level of detail as a continuous mip offset (0 near, 3 far) for the smooth noises.
+	const float Lod = 4.0 - Octaves;
+
+	// Smooth shape noises (warps and lobes): texels of ~260 m and more (a warp driven by fine detail
+	// glitters). The box-filtered mips lose contrast, so it is stretched back around the mean.
+	const float ShapeMip = 2.5 + Lod * (1.0 / 3.0);
+	const float N = saturate(0.5 + (ShapeNoise.SampleLevel(NoiseSampler, P / 6.0, ShapeMip).r - 0.5) * 1.6);
+	const float W = saturate(0.5 + (ShapeNoise.SampleLevel(NoiseSampler, P / 9.0 + float3(0.37, 0.11, 0.53), ShapeMip).r - 0.5) * 1.6);
+
+	// Bubbles: Worley 500 / 250 / 125 m (4 km tiles), each octave fading to its mean with distance.
+	const float3 B3 = ShapeNoise.SampleLevel(NoiseSampler, P / 4.0, Lod * 0.5).gba;
+	const float BubblesRaw = (AerosCloudOctave(B3.x, Octaves, 0.0) * 0.55
+		+ AerosCloudOctave(B3.y, Octaves, 1.0) * 0.30
+		+ AerosCloudOctave(B3.z, Octaves, 2.0) * 0.15);
+	const float bubbles = saturate(0.5 + (BubblesRaw - 0.5) * 1.3);   // the weighted sum is narrower than one channel
+
+	// Erosion (Worley fbm, 4 km tiles) and ice fibres (16 x 16 x 3 km tiles).
+	const float E = AerosCloudOctave(DetailNoise.SampleLevel(NoiseSampler, P / 4.0, 0).a, Octaves, 1.0);
+	const float fib = DetailNoise.SampleLevel(NoiseSampler, P * float3(1.0 / 16.0, 1.0 / 16.0, 1.0 / 3.0), 0).r;
+
+	const float lowFbm = N;
+	const float warpY  = W;
+	const float h       = saturate((AltKm - baseKm) / (topKm - baseKm));
+	const float highMod = lerp(E, 1.0 - E, saturate(h * 3.0));   // wispy base, billowy top
+
+	// --- 2D cumulus field: 1.1 km cells, one cloud per cell with probability = cover.
+	const float towerK  = smoothstep(0.3, 0.7, conv);
+	const float cuDepth = lerp(0.6 + 1.9 * cover, topKm - baseKm, towerK);
+	float shape = -1.0;   // 1 at a cloud centre, 0 on its outline, < 0 outside
+	if (cover > 1e-3 && AltKm >= baseKm && AltKm <= baseKm + cuDepth)
+	{
+		const float2 q = P.xy / 1.1 + float2(lowFbm - 0.5, warpY - 0.5) * 0.6;
+		const float2 qi = floor(q);
+		[unroll] for (int j = -1; j <= 1; j++)
+		{
+			[unroll] for (int i = -1; i <= 1; i++)
+			{
+				const float2 c = qi + float2(i, j);
+				const float3 r = frac(sin(float3(dot(c, float2(127.1, 311.7)), dot(c, float2(269.5, 183.3)), dot(c, float2(419.2, 371.9)))) * 43758.5453);
+				const float grow = saturate((cover * 1.1 - r.z) / 0.12);
+				float topCell = baseKm + cuDepth * (0.45 + 0.55 * frac(r.y * 7.13)) * (0.35 + 0.65 * grow);
+				topCell -= (topCell - baseKm) * 0.4 * (1.0 - bubbles);
+				if (grow > 0.0 && AltKm <= topCell)
+				{
+					const float hc = saturate((AltKm - baseKm) / max(topCell - baseKm, 0.1));
+					const float side = sqrt(saturate(1.0 - hc * hc * hc));
+					const float2 center = c + 0.2 + 0.6 * r.xy;
+					float radius = ((0.3 + 0.35 * cover) * (0.7 + 0.6 * r.x) * side + updraft * 0.4) * grow;
+					radius *= lerp(1.0, 0.75 + 0.5 * lowFbm, towerK);
+					shape = max(shape, 1.0 - length(q - center) / max(radius, 0.01));
+				}
+			}
+		}
+	}
+
+	// Nubis-style carving on a solid core; far away the field melts into a soft coverage.
+	const float baseCut = saturate((AltKm - baseKm) / 0.08);
+	float cv = saturate(shape * 1.6 + 0.35) * baseCut;
+	const float farK = smoothstep(30.0, 70.0, DistKm);
+	const float cvFar = saturate(cover * 1.4 - (1.0 - lowFbm) * 0.6) * baseCut * step(AltKm, baseKm + cuDepth);
+	cv = lerp(cv, cvFar, farK);
+	float cloud = saturate((bubbles - (1.0 - cv) * 1.2 - highMod * 0.1) * 2.0 + cv * 0.6 - 0.1);
+	cloud *= lerp(smoothstep(0.25, 0.45, cv), saturate(cv * 2.0), farK);
+
+	// --- 2D anvil: flat top at the tropopause, ragged base and edges.
+	const float anvilBase = 12.4 - (0.5 + 2.0 * anvilCv) * (0.75 + 0.5 * lowFbm);
+	const float anvilBand = saturate((AltKm - anvilBase) / 0.6) * saturate((12.4 - AltKm) / 0.25);
+	const float anvil = anvilBand * saturate((anvilCv * 1.5 - (1.0 - lowFbm) * 0.6 - (1.0 - fib) * 0.35) * 2.0);
+
+	// --- Shelf cloud: layered wedge between 0.4 and 1.9 km along the gust front.
+	const float shelfBand = saturate((AltKm - 0.45) / 0.08) * saturate((1.9 - AltKm) / 0.6);
+	const float layers = 0.6 + 0.4 * sin(AltKm * 38.0 + lowFbm * 5.0);
+	const float shelf = gust * shelfBand * layers * saturate(lowFbm * 1.5 - 0.2);
+
+	// --- Voxel grid, read through a smooth domain warp (+-0.8 km), and a vertical warp aloft
+	// (+-0.5 / +-0.2 km above 6-9 km: the anvil top swells instead of being a flat plate).
+	float vox = 0.0;
+	float voxRaw = 0.0;
+	float voxDark = 0.0;
+	if (VoxIn > 1e-3)
+	{
+		const float2 WarpC = float2(N, W) - 0.5;
+		const float2 WarpCm = WarpC * 160000.0;
+		const float AltWarped = AltKm + dot(WarpC, float2(1.0, 0.4)) * saturate((AltKm - 6.0) / 3.0);
+		const float3 UVWPrev = AerosCloudVoxelUVW(XYCm + WarpCm, AltWarped, RectPrevCm);
+		const float4 VC = VolumeCur.SampleLevel(DataSampler, AerosCloudVoxelUVW(XYCm + WarpCm, AltWarped, RectCurCm), 0);
+		float4 VP = VolumePrev.SampleLevel(DataSampler, UVWPrev, 0);
+		// The previous grid may be centred elsewhere: outside it the clamp sampler would extrude
+		// its border into straight walls, so blend from the current grid only there.
+		const float2 PrevEdge = abs(UVWPrev.xy - 0.5) * 2.0;
+		VP = lerp(VP, VC, smoothstep(0.95, 1.0, max(PrevEdge.x, PrevEdge.y)));
+		voxRaw = lerp(VP.r, VC.r, VolumeBlend);
+		voxDark = lerp(VP.g, VC.g, VolumeBlend);
+		const float iceK = smoothstep(9.0, 11.5, AltKm);
+		const float voxCv = saturate(voxRaw * 2.0);
+		float voxCu = saturate((bubbles - (1.0 - voxCv) * 1.2 - highMod * 0.1) * 2.0 + voxCv * 0.6 - 0.1);
+		voxCu *= smoothstep(0.15, 0.35, voxCv);
+		const float voxIce = saturate((voxRaw - (1.0 - lowFbm) * 0.2 - (1.0 - fib) * 0.12) * 2.5);
+		vox = lerp(voxCu, voxIce, iceK);
+	}
+
+	// --- Rain below the cloud base: a thin grey veil.
+	const float voxRainAmt = voxDark * (1.0 - saturate(voxRaw * 8.0));
+	const float rainBelow = 1.0 - smoothstep(baseKm - 0.1, baseKm + 0.1, AltKm);
+	const float rainVeil = lerp(saturate(Wx.a * 1.2) * rainBelow, voxRainAmt, VoxIn) * (0.55 + 0.45 * lowFbm) * 0.004;
+
+	const float full2D = max(cloud, max(anvil, shelf * 0.9));
+	const float cumulusOnly = cloud * (1.0 - smoothstep(0.2, 0.4, conv));
+	float density = lerp(full2D, max(cumulusOnly, vox), VoxIn);
+	const float rainDark = saturate(Wx.a * 1.2) * (1.0 - smoothstep(4.0, 7.0, AltKm));
+	float dark = lerp(rainDark, max(rainDark * 0.4, voxDark), VoxIn);
+	dark = lerp(dark, 1.0, saturate(rainVeil * 400.0 * (1.0 - saturate(density * 20.0))));
+	density = max(density, rainVeil);
+
+	Out.Density = density;
+	Out.Dark = dark;
+	return Out;
+}

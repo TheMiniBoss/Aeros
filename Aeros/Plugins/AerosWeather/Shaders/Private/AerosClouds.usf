@@ -1,6 +1,6 @@
 // Copyright Aeros. All Rights Reserved.
-// Spike: custom volumetric clouds.
-//   TraceCS     half resolution ray march of a synthetic cloud field, per-frame jitter
+// Custom volumetric clouds.
+//   TraceCS     half resolution ray march of the simulated cloud field (AerosCloudDensity.ush), per-frame jitter
 //   TemporalCS  accumulation; history reprojected along camera motion AND wind drift
 //   CompositeCS depth-aware upsample over the scene + fresh lightning term (never stored)
 // World units in km, Unreal axes (z up).
@@ -19,87 +19,9 @@ Texture2D SceneDepthTexture;
 RWTexture2D<float4> OutColor;
 RWTexture2D<float2> OutDepth;
 
-// Simulation data (same layout as the old cloud material parameters)
-Texture2D WeatherMap;
-Texture2D ShapeMap;
-Texture3D VolumePrev;
-Texture3D VolumeCur;
-SamplerState DataSampler;
-float4 DomainCm;
-float4 RectPrevCm;
-float4 RectCurCm;
-float VolumeBlend;
-float VolumeWeight;
-float3 NoiseOffsetKm;
+#include "/Plugin/AerosWeather/Private/AerosCloudDensity.ush"
 
-Texture3D ShapeNoise;    // RGBA: Perlin-Worley, Worley 8 / 16 / 32 cells (tileable)
-Texture3D DetailNoise;   // RGBA: Worley 4 / 8 / 16 cells, fbm
-SamplerState NoiseSampler;
-
-static const float BaseKm = 0.1;
-static const float TopKm = 16.0;
-static const float SigmaPerKm = 60.0;   // extinction of a dense cumulus core (0.06 / m)
-
-// ------------------------------------------------------------------ noise
-
-float Hash13(float3 p)
-{
-	p = frac(p * 0.1031);
-	p += dot(p, p.zyx + 31.32);
-	return frac((p.x + p.y) * p.z);
-}
-
-float ValueNoise(float3 p)
-{
-	float3 i = floor(p);
-	float3 f = frac(p);
-	f = f * f * (3.0 - 2.0 * f);
-	float a = Hash13(i);
-	float b = Hash13(i + float3(1, 0, 0));
-	float c = Hash13(i + float3(0, 1, 0));
-	float d = Hash13(i + float3(1, 1, 0));
-	float e = Hash13(i + float3(0, 0, 1));
-	float g = Hash13(i + float3(1, 0, 1));
-	float h = Hash13(i + float3(0, 1, 1));
-	float k = Hash13(i + float3(1, 1, 1));
-	return lerp(lerp(lerp(a, b, f.x), lerp(c, d, f.x), f.y), lerp(lerp(e, g, f.x), lerp(h, k, f.x), f.y), f.z);
-}
-
-// Continuous level of detail: octave i blends from its mean (0.5) to its value as
-// Octaves goes from i to i+1, so detail fades in and out with distance without popping.
-float DetailNoise(float3 p, float Octaves)
-{
-	float Sum = 0.0;
-	float Norm = 0.0;
-	float Amp = 0.5;
-	float Freq = 1.0;
-	[unroll] for (int i = 0; i < 4; ++i)
-	{
-		float n = ValueNoise(p * Freq + float(i) * 17.13);
-		Sum += lerp(0.5, n, saturate(Octaves - float(i))) * Amp;
-		Norm += Amp;
-		Amp *= 0.5;
-		Freq *= 2.03;
-	}
-	return Sum / Norm;
-}
-
-float3 VoxelUVW(float3 pKm, float4 RectCm)
-{
-	return float3((pKm.xy * 1e5 - RectCm.xy) / RectCm.z + 0.5, pKm.z / RectCm.w);
-}
-
-// Task 1 debug density: the voxel grids only (proves the data path; replaced by the ported field).
-float CloudDensity(float3 pKm, float Octaves)
-{
-	float3 a = VoxelUVW(pKm, RectPrevCm);
-	float3 b = VoxelUVW(pKm, RectCurCm);
-	float vp = VolumePrev.SampleLevel(DataSampler, a, 0).r;
-	float vc = VolumeCur.SampleLevel(DataSampler, b, 0).r;
-	float Inside = (all(b > 0.0) && all(b < 1.0)) ? 1.0 : 0.0;
-	float n = ShapeNoise.SampleLevel(NoiseSampler, (pKm - NoiseOffsetKm) / 6.0, 0).r;   // Task 2: proves the noise binding
-	return saturate(lerp(vp, vc, VolumeBlend) * 2.0) * n * VolumeWeight * Inside;
-}
+static const float SlabTopKm = 16.0;   // voxel grid height (the 2D anvil top is at 12.4 km)
 
 // ------------------------------------------------------------------ helpers
 
@@ -132,19 +54,19 @@ float HG(float c, float g)
 	return (1.0 - g2) / (4.0 * PI * pow(max(1.0 + g2 - 2.0 * g * c, 1e-4), 1.5));
 }
 
-float StepKm(float t)
-{
-	return clamp(0.06 + t * 0.012, 0.06, 0.5);
-}
-
-float LightOpticalDepth(float3 P, float3 L, float Octaves)
+// Optical depth towards the sun: 6 growing segments (2.6 km), detail capped at 2 octaves.
+float LightOpticalDepth(float3 P, float3 L, float DistKm, float Octaves)
 {
 	const float Seg[6] = { 0.08, 0.16, 0.3, 0.5, 0.9, 1.6 };
 	float od = 0.0;
 	float t = 0.0;
 	[unroll] for (int i = 0; i < 6; ++i)
 	{
-		od += CloudDensity(P + L * (t + Seg[i] * 0.5), min(Octaves, 2.0)) * SigmaPerKm * Seg[i];
+		float3 Q = P + L * (t + Seg[i] * 0.5);
+		if (Q.z < SlabTopKm)
+		{
+			od += AerosCloudExtinction(AerosCloudDensity(Q, DistKm, min(Octaves, 2.0))) * Seg[i];
+		}
 		t += Seg[i];
 	}
 	return od;
@@ -172,17 +94,17 @@ void TraceCS(uint2 Id : SV_DispatchThreadID)
 	float T = 1.0;
 	float DepthAcc = 0.0;
 
-	// Flat slab [BaseKm - 0.1, TopKm].
+	// Slab [0, SlabTopKm]: the march starts at the camera when it is inside the cloud layers.
 	float t0 = 0.0;
 	float t1 = 0.0;
 	if (abs(Dir.z) > 1e-5)
 	{
-		float a = (BaseKm - 0.1 - CameraKm.z) / Dir.z;
-		float b = (TopKm - CameraKm.z) / Dir.z;
+		float a = (0.0 - CameraKm.z) / Dir.z;
+		float b = (SlabTopKm - CameraKm.z) / Dir.z;
 		t0 = max(min(a, b), 0.0);
 		t1 = max(a, b);
 	}
-	else if (CameraKm.z > BaseKm - 0.1 && CameraKm.z < TopKm)
+	else if (CameraKm.z > 0.0 && CameraKm.z < SlabTopKm)
 	{
 		t1 = 1e9;
 	}
@@ -190,18 +112,17 @@ void TraceCS(uint2 Id : SV_DispatchThreadID)
 
 	if (t1 > t0)
 	{
-		float t = t0 + StepKm(t0) * IGN(float2(Id), FrameIndex);
+		float t = t0 + AerosCloudStepKm(t0) * IGN(float2(Id), FrameIndex);
 		[loop] for (int i = 0; i < 192 && t < t1 && T > 0.01; ++i)
 		{
-			float Step = StepKm(t);
+			float Step = AerosCloudStepKm(t);
 			float3 P = CameraKm + Dir * t;
-			// Detail octaves fall off smoothly with distance: 4 near, 1 beyond ~12 km.
-			float Octaves = clamp(4.5 - log2(max(t, 0.5) / 1.0), 1.0, 4.0);
-			float Dens = CloudDensity(P, Octaves);
-			if (Dens > 0.001)
+			float Octaves = AerosCloudOctaves(t);
+			FAerosCloudSample Smp = AerosCloudDensity(P, t, Octaves);
+			if (Smp.Density > 0.001)
 			{
-				float Sigma = Dens * SigmaPerKm;
-				float od = LightOpticalDepth(P, SunDir, Octaves);
+				float Sigma = AerosCloudExtinction(Smp);
+				float od = LightOpticalDepth(P, SunDir, t, Octaves);
 				// Three scattering orders (Wrenninge): less extinction, wider phase each order.
 				float S = 0.0;
 				float k = 1.0;
@@ -210,9 +131,10 @@ void TraceCS(uint2 Id : SV_DispatchThreadID)
 					S += k * lerp(HG(CosT, -0.25 * k), HG(CosT, 0.8 * k), 0.7) * exp(-od * k);
 					k *= 0.5;
 				}
-				float Hf = saturate((P.z - BaseKm) / 8.0);
+				float Hf = saturate(P.z / 8.0);
+				float Albedo = lerp(0.92, 0.55, Smp.Dark);
 				float3 Amb = SunE * float3(0.035, 0.05, 0.08) * (0.35 + 0.65 * Hf);
-				float3 Lin = SunE * S + Amb;
+				float3 Lin = (SunE * S + Amb) * Albedo;
 				float Tr = exp(-Sigma * Step);
 				Scat += T * Lin * (1.0 - Tr);
 				DepthAcc += t * T * (1.0 - Tr);
