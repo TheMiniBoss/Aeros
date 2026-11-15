@@ -93,6 +93,16 @@ private:
 	/** Feeds the custom cloud renderer and hides the engine VolumetricCloud while it is on. */
 	void UpdateCustomClouds(class UAerosWeatherSubsystem* Sub);
 	bool bCustomCloudsActive = false;
+	/** Cloud shadows of the custom renderer: R16F transmittance map read by the sun's light function. */
+	void SetCustomCloudShadows(bool bOn);
+
+	UPROPERTY(Transient)
+	TObjectPtr<class UTextureRenderTarget2D> CloudShadowRT;
+
+	UPROPERTY(Transient)
+	TObjectPtr<UMaterialInstanceDynamic> CloudShadowMID;
+
+	float BaseSkyLightIntensity = -1.f;
 
 	UPROPERTY(Transient)
 	TObjectPtr<UMaterialInstanceDynamic> CloudMID;

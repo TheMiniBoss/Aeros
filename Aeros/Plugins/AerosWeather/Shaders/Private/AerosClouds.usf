@@ -189,6 +189,42 @@ void TraceCS(uint2 Id : SV_DispatchThreadID)
 	OutDepth[Id] = float2(Front, SceneKm);
 }
 
+// ------------------------------------------------------------------ shadow map
+
+float4 ShadowRectCm;        // xy centre, zw size (cm)
+int2 ShadowSize;
+RWTexture2D<float> OutShadow;
+
+// Transmittance towards the sun from the ground (z = 0) through the cloud slab: one thread per texel,
+// 24 steps, smooth detail only (the light function samples it bilinearly over 100 km).
+[numthreads(8, 8, 1)]
+void ShadowMapCS(uint2 Id : SV_DispatchThreadID)
+{
+	if (any(Id >= (uint2)ShadowSize))
+	{
+		return;
+	}
+	float3 SunDir = View.AtmosphereLightDirection[0].xyz;
+	SunDir = dot(SunDir, SunDir) > 1e-4 ? normalize(SunDir) : float3(0, 0, 1);
+	if (SunDir.z < 0.02)
+	{
+		OutShadow[Id] = 1.0;   // sun at or below the horizon: no direct light to shadow
+		return;
+	}
+	float2 Uv = (float2(Id) + 0.5) / float2(ShadowSize);
+	float3 Ground = float3((ShadowRectCm.xy + (Uv - 0.5) * ShadowRectCm.zw) * 1e-5, 0.0);
+	// Path through [0, SlabTopKm], capped at 60 km for a low sun.
+	float Length = min(SlabTopKm / SunDir.z, 60.0);
+	float Step = Length / 24.0;
+	float od = 0.0;
+	[loop] for (int i = 0; i < 24; ++i)
+	{
+		float3 P = Ground + SunDir * ((float(i) + 0.5) * Step);
+		od += AerosCloudExtinction(AerosCloudDensity(P, 20.0, 1.0)) * Step;
+	}
+	OutShadow[Id] = exp(-od);
+}
+
 // ------------------------------------------------------------------ temporal
 
 Texture2D CurColor;

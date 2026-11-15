@@ -705,6 +705,49 @@ def create_water_material():
     return mat
 
 
+# ---------------------------------------------------------------- cloud shadows (custom renderer)
+def create_cloud_shadow_material(default_tex):
+    """Light function on the sun for the custom cloud renderer (r.AerosClouds 1): the transmittance
+    towards the sun from AerosCloudShadowMap (R16F render target written by the renderer), sampled at
+    (WorldXY - Rect.xy) / Rect.zw + 0.5. Fades to 1 over the last 5 % of the rect (no seam), 1 outside."""
+    mat = get_or_create("M_AerosCloudShadow", MAT_DIR, unreal.Material, unreal.MaterialFactoryNew())
+    mel.delete_all_material_expressions(mat)
+    mat.set_editor_property("material_domain", unreal.MaterialDomain.MD_LIGHT_FUNCTION)
+    wp = node(mat, unreal.MaterialExpressionWorldPosition, -1400, 0)
+    rect = node(mat, unreal.MaterialExpressionVectorParameter, -1400, 200, parameter_name="AerosCloudShadowRect",
+                default_value=unreal.LinearColor(0, 0, 10000000, 10000000))
+    wp_xy = mask(mat, wp, -1200, 0, r=True, g=True)
+    r_xy = mask(mat, rect, -1200, 200, r=True, g=True, src_out="RGBA")
+    r_zw = mask(mat, rect, -1200, 300, b=True, a=True, src_out="RGBA")
+    rel = binop(mat, unreal.MaterialExpressionSubtract, wp_xy, r_xy, -1050, 50)
+    uv = binop(mat, unreal.MaterialExpressionDivide, rel, r_zw, -900, 100)
+    uv = binop(mat, unreal.MaterialExpressionAdd, uv, const(mat, 0.5, -900, 250), -750, 100)
+    tex = node(mat, unreal.MaterialExpressionTextureSampleParameter2D, -550, 100,
+               parameter_name="AerosCloudShadowMap", texture=default_tex,
+               sampler_type=unreal.MaterialSamplerType.SAMPLERTYPE_LINEAR_COLOR,
+               sampler_source=unreal.SamplerSourceMode.SSM_CLAMP_WORLD_GROUP_SETTINGS)
+    link(uv, "", tex, "UVs")
+    custom = node(mat, unreal.MaterialExpressionCustom, -250, 100)
+    custom.set_editor_property("description", "AerosCloudShadowFade")
+    custom.set_editor_property("output_type", unreal.CustomMaterialOutputType.CMOT_FLOAT1)
+    inputs = []
+    for name in ["UV", "T"]:
+        ci = unreal.CustomInput()
+        ci.set_editor_property("input_name", name)
+        inputs.append(ci)
+    custom.set_editor_property("inputs", inputs)
+    custom.set_editor_property("code", "float2 e = abs(UV - 0.5) * 2.0;\n"
+                               "float k = saturate((1.0 - max(e.x, e.y)) / 0.05);\n"
+                               "return lerp(1.0, saturate(T), k);")
+    link(uv, "", custom, "UV")
+    link(tex, "R", custom, "T")
+    mel.connect_material_property(custom, "", unreal.MaterialProperty.MP_EMISSIVE_COLOR)
+    mel.recompile_material(mat)
+    eal.save_loaded_asset(mat)
+    log("Cloud shadow material ready: " + mat.get_path_name())
+    return mat
+
+
 # ---------------------------------------------------------------- effect materials
 def create_emissive_material():
     """Unlit glow (lightning bolts, lava, markers): Color * Intensity."""
@@ -917,6 +960,7 @@ def main():
     step("MPC", create_mpc)
     step("Default texture", create_default_texture)
     step("Cloud material", create_cloud_material, assets.get("Default texture"))
+    step("Cloud shadow mat.", create_cloud_shadow_material, assets.get("Default texture"))
     step("Ground material", create_ground_material, assets.get("MPC"))
     step("Water material", create_water_material)
     step("Sea material", create_sea_material)

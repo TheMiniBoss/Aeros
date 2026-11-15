@@ -67,4 +67,6 @@ private:
 	// and a second view added in the same graph must not move the first one's history.
 	TMap<uint32, TUniquePtr<FAerosCloudHistory>> Histories;
 	uint32 FrameIndex = 0;
+	uint32 LastShadowFrame = 0;
+	FVector4f LastShadowRect = FVector4f(0.f, 0.f, 0.f, 0.f);
 };

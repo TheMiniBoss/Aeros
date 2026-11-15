@@ -69,6 +69,28 @@ namespace AerosCloudRenderInternal
 		SHADER_PARAMETER_SAMPLER(SamplerState, NoiseSampler)
 	END_SHADER_PARAMETER_STRUCT()
 
+	class FShadowMapCS : public FGlobalShader
+	{
+	public:
+		DECLARE_GLOBAL_SHADER(FShadowMapCS);
+		SHADER_USE_PARAMETER_STRUCT(FShadowMapCS, FGlobalShader);
+
+		BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
+			SHADER_PARAMETER_STRUCT_REF(FViewUniformShaderParameters, View)
+			SHADER_PARAMETER_STRUCT_INCLUDE(FCloudDataParameters, Data)
+			SHADER_PARAMETER_STRUCT_INCLUDE(FNoiseParameters, Noise)
+			SHADER_PARAMETER(FVector4f, ShadowRectCm)
+			SHADER_PARAMETER(FIntPoint, ShadowSize)
+			SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float>, OutShadow)
+		END_SHADER_PARAMETER_STRUCT()
+
+		static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
+		{
+			return IsFeatureLevelSupported(Parameters.Platform, ERHIFeatureLevel::SM5);
+		}
+	};
+	IMPLEMENT_GLOBAL_SHADER(FShadowMapCS, "/Plugin/AerosWeather/Private/AerosClouds.usf", "ShadowMapCS", SF_Compute);
+
 	class FTraceCS : public FGlobalShader
 	{
 	public:
@@ -384,6 +406,45 @@ FScreenPassTexture FAerosCloudViewExtension::Render_RenderThread(FRDGBuilder& Gr
 	Common.AmbientScale = FMath::Max(CVarAmbient.GetValueOnRenderThread(), 0.f);
 	Common.HazeScale = FMath::Clamp(CVarHaze.GetValueOnRenderThread(), 0.f, 1.f);
 
+	// 0. Cloud shadow map for the sun's light function: every 4th frame, and at once when its rect moved
+	// (the material already reads the new rect).
+	FCloudDataParameters DataParams;
+	DataParams.WeatherMap = RegisterOr(GraphBuilder, Data.WeatherMap, TEXT("AerosClouds.WeatherMap"), false);
+	DataParams.ShapeMap = RegisterOr(GraphBuilder, Data.ShapeMap, TEXT("AerosClouds.ShapeMap"), false);
+	DataParams.VolumePrev = RegisterOr(GraphBuilder, Data.VolumePrev, TEXT("AerosClouds.VolumePrev"), true);
+	DataParams.VolumeCur = RegisterOr(GraphBuilder, Data.VolumeCur, TEXT("AerosClouds.VolumeCur"), true);
+	DataParams.DataSampler = TStaticSamplerState<SF_Bilinear, AM_Clamp, AM_Clamp, AM_Clamp>::GetRHI();
+	DataParams.DomainCm = Data.DomainCm;
+	DataParams.RectPrevCm = Data.RectPrevCm;
+	DataParams.RectCurCm = Data.RectCurCm;
+	DataParams.VolumeBlend = Data.VolumeBlend;
+	DataParams.VolumeWeight = Data.VolumeWeight;
+	DataParams.NoiseOffsetKm = Data.NoiseOffsetKm;
+	FNoiseParameters NoiseParams;
+	NoiseParams.ShapeNoise = GraphBuilder.RegisterExternalTexture(ShapeNoiseRT);
+	NoiseParams.DetailNoise = GraphBuilder.RegisterExternalTexture(DetailNoiseRT);
+	NoiseParams.NoiseSampler = TStaticSamplerState<SF_Trilinear, AM_Wrap, AM_Wrap, AM_Wrap>::GetRHI();
+
+	FRHITexture* ShadowRHI = Data.ShadowTarget ? Data.ShadowTarget->GetRenderTargetTexture() : nullptr;
+	if (ShadowRHI && EnumHasAnyFlags(ShadowRHI->GetFlags(), TexCreate_UAV)
+		&& (Frame - LastShadowFrame >= 4u || Data.ShadowRectCm != LastShadowRect))
+	{
+		LastShadowFrame = Frame;
+		LastShadowRect = Data.ShadowRectCm;
+		const FIntPoint ShadowSize(ShadowRHI->GetSizeXYZ().X, ShadowRHI->GetSizeXYZ().Y);
+		FRDGTextureRef ShadowTex = RegisterExternalTexture(GraphBuilder, ShadowRHI, TEXT("AerosClouds.ShadowMap"));
+		FShadowMapCS::FParameters* P = GraphBuilder.AllocParameters<FShadowMapCS::FParameters>();
+		P->View = View.ViewUniformBuffer;
+		P->Data = DataParams;
+		P->Noise = NoiseParams;
+		P->ShadowRectCm = Data.ShadowRectCm;
+		P->ShadowSize = ShadowSize;
+		P->OutShadow = GraphBuilder.CreateUAV(ShadowTex);
+		TShaderMapRef<FShadowMapCS> Shader(GetGlobalShaderMap(View.GetFeatureLevel()));
+		FComputeShaderUtils::AddPass(GraphBuilder, RDG_EVENT_NAME("ShadowMap %dx%d", ShadowSize.X, ShadowSize.Y), Shader, P,
+			FComputeShaderUtils::GetGroupCount(ShadowSize, 8));
+	}
+
 	// 1. Trace at half resolution.
 	const FRDGTextureDesc ColorDesc = FRDGTextureDesc::Create2D(HalfSize, PF_FloatRGBA, FClearValueBinding::Black, TexCreate_ShaderResource | TexCreate_UAV);
 	const FRDGTextureDesc DepthDesc = FRDGTextureDesc::Create2D(HalfSize, PF_G32R32F, FClearValueBinding::Black, TexCreate_ShaderResource | TexCreate_UAV);
@@ -393,20 +454,8 @@ FScreenPassTexture FAerosCloudViewExtension::Render_RenderThread(FRDGBuilder& Gr
 		FTraceCS::FParameters* P = GraphBuilder.AllocParameters<FTraceCS::FParameters>();
 		P->View = View.ViewUniformBuffer;
 		P->Common = Common;
-		P->Data.WeatherMap = RegisterOr(GraphBuilder, Data.WeatherMap, TEXT("AerosClouds.WeatherMap"), false);
-		P->Data.ShapeMap = RegisterOr(GraphBuilder, Data.ShapeMap, TEXT("AerosClouds.ShapeMap"), false);
-		P->Data.VolumePrev = RegisterOr(GraphBuilder, Data.VolumePrev, TEXT("AerosClouds.VolumePrev"), true);
-		P->Data.VolumeCur = RegisterOr(GraphBuilder, Data.VolumeCur, TEXT("AerosClouds.VolumeCur"), true);
-		P->Data.DataSampler = TStaticSamplerState<SF_Bilinear, AM_Clamp, AM_Clamp, AM_Clamp>::GetRHI();
-		P->Data.DomainCm = Data.DomainCm;
-		P->Data.RectPrevCm = Data.RectPrevCm;
-		P->Data.RectCurCm = Data.RectCurCm;
-		P->Data.VolumeBlend = Data.VolumeBlend;
-		P->Data.VolumeWeight = Data.VolumeWeight;
-		P->Data.NoiseOffsetKm = Data.NoiseOffsetKm;
-		P->Noise.ShapeNoise = GraphBuilder.RegisterExternalTexture(ShapeNoiseRT);
-		P->Noise.DetailNoise = GraphBuilder.RegisterExternalTexture(DetailNoiseRT);
-		P->Noise.NoiseSampler = TStaticSamplerState<SF_Trilinear, AM_Wrap, AM_Wrap, AM_Wrap>::GetRHI();
+		P->Data = DataParams;
+		P->Noise = NoiseParams;
 		P->SceneDepthTexture = SceneDepth;
 		P->OutColor = GraphBuilder.CreateUAV(TraceColor);
 		P->OutDepth = GraphBuilder.CreateUAV(TraceDepth);

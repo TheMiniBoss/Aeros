@@ -4,6 +4,8 @@
 #include "AerosWeatherSubsystem.h"
 #include "AerosCloudManager.h"
 #include "AerosCloudRender.h"
+#include "AerosAssetUtils.h"
+#include "Engine/TextureRenderTarget2D.h"
 #include "TextureResource.h"
 #include "Engine/DirectionalLight.h"
 #include "Engine/ExponentialHeightFog.h"
@@ -72,6 +74,7 @@ void AAerosWeatherController::UpdateCustomClouds(UAerosWeatherSubsystem* Sub)
 		{
 			Cloud->SetVisibility(!bOn);
 		}
+		SetCustomCloudShadows(bOn);
 	}
 	if (!bOn || !Sub)
 	{
@@ -105,7 +108,65 @@ void AAerosWeatherController::UpdateCustomClouds(UAerosWeatherSubsystem* Sub)
 			P.Flashes.Add(F);
 		}
 	}
+	// Shadow map: 100 km centred on the viewer, snapped to 1 km (the light function reads the same rect).
+	if (CloudShadowRT)
+	{
+		const FVector V = Sub->GetViewerLocation();
+		const double Snap = 100000.0;
+		P.ShadowRectCm = FVector4f(float(FMath::RoundToDouble(V.X / Snap) * Snap), float(FMath::RoundToDouble(V.Y / Snap) * Snap), 10000000.f, 10000000.f);
+		P.ShadowTarget = CloudShadowRT->GameThread_GetRenderTargetResource();
+		if (CloudShadowMID)
+		{
+			CloudShadowMID->SetVectorParameterValue(TEXT("AerosCloudShadowRect"), FLinearColor(P.ShadowRectCm.X, P.ShadowRectCm.Y, P.ShadowRectCm.Z, P.ShadowRectCm.W));
+		}
+	}
+	// Sky light under a cloud deck (replaces the VolumetricCloud's SkyLightCloudBottomOcclusion 0.75)
+	if (SkyLight && SkyLight->GetLightComponent())
+	{
+		USkyLightComponent* SkyComp = SkyLight->GetLightComponent();
+		if (BaseSkyLightIntensity < 0.f) BaseSkyLightIntensity = SkyComp->Intensity;
+		const float CoverAbove = FMath::Clamp(Sub->GetWeatherAtLocation(Sub->GetViewerLocation()).CloudCover, 0.f, 1.f);
+		SkyComp->SetIntensity(BaseSkyLightIntensity * FMath::Lerp(1.f, 0.75f, CoverAbove));
+	}
 	AerosCloudRender::SetParams(P);
+}
+
+void AAerosWeatherController::SetCustomCloudShadows(bool bOn)
+{
+	UDirectionalLightComponent* Sun = SunLight ? Cast<UDirectionalLightComponent>(SunLight->GetLightComponent()) : nullptr;
+	if (!bOn)
+	{
+		if (Sun && CloudShadowMID && Sun->LightFunctionMaterial == CloudShadowMID) Sun->SetLightFunctionMaterial(nullptr);
+		if (SkyLight && SkyLight->GetLightComponent() && BaseSkyLightIntensity >= 0.f) SkyLight->GetLightComponent()->SetIntensity(BaseSkyLightIntensity);
+		return;
+	}
+	if (!CloudShadowRT)
+	{
+		CloudShadowRT = NewObject<UTextureRenderTarget2D>(this, TEXT("AerosCloudShadowMap"));
+		CloudShadowRT->RenderTargetFormat = RTF_R16f;
+		CloudShadowRT->ClearColor = FLinearColor::White;
+		CloudShadowRT->bCanCreateUAV = true;
+		CloudShadowRT->AddressX = TA_Clamp;
+		CloudShadowRT->AddressY = TA_Clamp;
+		CloudShadowRT->InitAutoFormat(512, 512);
+		CloudShadowRT->UpdateResourceImmediate(true);
+	}
+	if (!CloudShadowMID)
+	{
+		UMaterialInterface* Mat = Aeros::LoadOptional(TSoftObjectPtr<UMaterialInterface>(FSoftObjectPath(TEXT("/AerosWeather/Materials/M_AerosCloudShadow.M_AerosCloudShadow"))));
+		if (Mat)
+		{
+			CloudShadowMID = UMaterialInstanceDynamic::Create(Mat, this);
+			CloudShadowMID->SetTextureParameterValue(TEXT("AerosCloudShadowMap"), CloudShadowRT);
+		}
+	}
+	if (Sun && CloudShadowMID)
+	{
+		Sun->SetLightFunctionMaterial(CloudShadowMID);
+		// The light function covers the whole view: no fade to the "disabled" brightness with distance.
+		Sun->SetLightFunctionFadeDistance(WORLD_MAX);
+		Sun->SetLightFunctionDisabledBrightness(1.f);
+	}
 }
 
 void AAerosWeatherController::BindCloudMaterial()

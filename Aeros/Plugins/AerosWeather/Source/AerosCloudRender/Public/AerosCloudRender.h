@@ -6,6 +6,7 @@
 #include "Containers/ContainerAllocationPolicies.h"
 
 class FTextureResource;
+class FTextureRenderTargetResource;
 
 /** One lightning flash lighting the clouds this frame. */
 struct FAerosCloudFlash
@@ -32,6 +33,10 @@ struct FAerosCloudRenderParams
 	FVector3f NoiseOffsetKm = FVector3f::ZeroVector;
 	FVector3f MotionKmS = FVector3f::ZeroVector;   // mean storm motion (reprojection + flash drift)
 	TArray<FAerosCloudFlash, TInlineAllocator<8>> Flashes;
+	// Cloud shadow map (R16F transmittance towards the sun, UAV): rendered every 4th frame and when
+	// the rect moves; the sun's light function M_AerosCloudShadow reads it over the same rect.
+	FTextureRenderTargetResource* ShadowTarget = nullptr;
+	FVector4f ShadowRectCm = FVector4f(0.f, 0.f, 10000000.f, 10000000.f);   // xy centre, zw size (cm)
 };
 
 namespace AerosCloudRender
