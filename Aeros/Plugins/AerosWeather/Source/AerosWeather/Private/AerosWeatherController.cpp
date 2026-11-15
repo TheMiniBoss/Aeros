@@ -95,7 +95,8 @@ void AAerosWeatherController::UpdateCustomClouds(UAerosWeatherSubsystem* Sub)
 		P.VolumeBlend = Clouds->GetCloudVolumeBlend();
 		P.VolumeWeight = Clouds->GetCloudVolumeWeight();
 		P.NoiseOffsetKm = FVector3f(Clouds->GetCloudNoiseOffsetKm());
-		P.MotionKmS = FVector3f(Clouds->GetCloudMotionCmS() / 100000.0);
+		// Per real second (the renderer reprojects with the frame time): storm motion x time scale
+		P.MotionKmS = FVector3f(Clouds->GetCloudMotionCmS() * (Sub->IsPaused() ? 0.0 : double(Sub->GetTimeScale())) / 100000.0);
 		if (Clouds->GetLightningFlash() > 0.f)
 		{
 			FAerosCloudFlash F;

@@ -152,6 +152,8 @@ void UAerosCloudManager::UpdateCloudVolume(float DeltaTime)
 			// After a jump the previous grid is somewhere else: show the new one at once
 			VolumeBlend = VolumeWeight > 0.f ? 0.f : 1.f;
 			VolumeWeight = 1.f;
+			++VolumeSwaps;
+			UE_LOG(LogTemp, Verbose, TEXT("Aeros clouds: voxel grid swap %d (blend %s)"), VolumeSwaps, VolumeBlend > 0.5f ? TEXT("instant") : TEXT("1 s"));
 		}
 	}
 

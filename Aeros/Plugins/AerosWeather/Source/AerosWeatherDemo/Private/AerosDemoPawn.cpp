@@ -393,6 +393,7 @@ void AAerosDemoPawn::StartTour()
 	TourTime = 0.f;
 	bTourShotTaken = false;
 	bTourShotBTaken = false;
+	TourSwapCount = -1;
 	TourTitle = Tour[0].Title;
 	TourCaption = Tour[0].Caption;
 	if (Tour[0].Enter) Tour[0].Enter();
@@ -428,6 +429,21 @@ void AAerosDemoPawn::TickTour(float DeltaSeconds)
 	}
 	TourTime += DeltaSeconds;
 	const FTourStep& Step = Tour[TourStep];
+	// -AerosTourStepSeconds=N: the steps after the first last N s (e.g. 70 to see several voxel grid
+	// swaps at x1); the first one keeps its length, it grows the storms at x600
+	float StepSeconds = Step.Duration;
+	float ForcedSeconds = 0.f;
+	if (TourStep > 0 && FParse::Value(FCommandLine::Get(), TEXT("AerosTourStepSeconds="), ForcedSeconds) && ForcedSeconds > 0.f) StepSeconds = ForcedSeconds;
+	// -AerosFlickerOnSwap: the flicker pair is taken when a new voxel grid replaces the old one (after 3 s)
+	const bool bSwapShots = FParse::Param(FCommandLine::Get(), TEXT("AerosFlickerOnSwap"));
+	bool bSwapNow = false;
+	if (bSwapShots && !bTourShotTaken)
+	{
+		UAerosWeatherSubsystem* SwapSub = UAerosWeatherSubsystem::Get(this);
+		const int32 Swaps = SwapSub && SwapSub->GetCloudManager() ? SwapSub->GetCloudManager()->GetCloudVolumeSwaps() : 0;
+		if (TourSwapCount < 0 || TourTime < 3.f) TourSwapCount = Swaps;
+		else bSwapNow = Swaps != TourSwapCount;
+	}
 	// -AerosTourTimeScale=N: force the time scale after the first step (which needs x600 to grow storms),
 	// e.g. 1 to judge cloud flicker at real speed
 	float ForcedScale = 0.f;
@@ -436,7 +452,7 @@ void AAerosDemoPawn::TickTour(float DeltaSeconds)
 		if (UAerosWeatherSubsystem* ScaleSub = UAerosWeatherSubsystem::Get(this)) ScaleSub->SetTimeScale(ForcedScale);
 	}
 	// -AerosFlickerShots: a second picture 0.2 s after the first (<Shot>_b.png); their difference measures flicker
-	if (bTourShotTaken && !bTourShotBTaken && TourTime >= Step.Duration - 0.3f && FParse::Param(FCommandLine::Get(), TEXT("AerosFlickerShots")))
+	if (bTourShotTaken && !bTourShotBTaken && TourTime >= TourShotATime + 0.2f && FParse::Param(FCommandLine::Get(), TEXT("AerosFlickerShots")))
 	{
 		bTourShotBTaken = true;
 		FScreenshotRequest::RequestScreenshot(FPaths::ScreenShotDir() / TEXT("AerosTour") / (Step.Shot + TEXT("_b.png")), true, false);
@@ -454,10 +470,12 @@ void AAerosDemoPawn::TickTour(float DeltaSeconds)
 				&& FVector::Dist2D(It->GetActorLocation(), GetActorLocation()) < 4000000.0) { bLightningNow = true; break; }
 		}
 	}
-	if (!bTourShotTaken && (bLightningNow || TourTime >= Step.Duration - 0.5f))
+	if (!bTourShotTaken && (bLightningNow || bSwapNow || TourTime >= StepSeconds - 0.5f))
 	{
 		bTourShotTaken = true;
-		UE_LOG(LogTemp, Display, TEXT("Aeros tour: shot %s %s"), *Step.Shot, bLightningNow ? TEXT("on a lightning flash") : TEXT("at the end of the step"));
+		TourShotATime = TourTime;
+		UE_LOG(LogTemp, Display, TEXT("Aeros tour: shot %s %s"), *Step.Shot,
+			bLightningNow ? TEXT("on a lightning flash") : (bSwapNow ? TEXT("on a voxel grid swap") : TEXT("at the end of the step")));
 		const FString File = FPaths::ScreenShotDir() / TEXT("AerosTour") / (Step.Shot + TEXT(".png"));
 		FScreenshotRequest::RequestScreenshot(File, true, false);
 		if (FParse::Param(FCommandLine::Get(), TEXT("AerosDumpMaps")))
@@ -472,12 +490,13 @@ void AAerosDemoPawn::TickTour(float DeltaSeconds)
 			}
 		}
 	}
-	if (TourTime < Step.Duration) return;
+	if (TourTime < StepSeconds) return;
 
 	++TourStep;
 	TourTime = 0.f;
 	bTourShotTaken = false;
 	bTourShotBTaken = false;
+	TourSwapCount = -1;
 	if (!Tour.IsValidIndex(TourStep))
 	{
 		StopTour();

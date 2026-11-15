@@ -11,12 +11,24 @@ struct FScreenPassTexture;
 struct FAerosCloudNoiseData;
 struct FPostProcessMaterialInputs;
 
+/** Temporal history of one view (each player, split screen half or scene capture has its own). */
+struct FAerosCloudHistory
+{
+	TRefCountPtr<IPooledRenderTarget> Color;
+	TRefCountPtr<IPooledRenderTarget> Depth;
+	FMatrix ViewProj = FMatrix::Identity;
+	double Time = -1.0;
+	FVector ViewOrigin = FVector::ZeroVector;
+	float Blend = 1.f;
+	uint32 LastFrame = 0;
+};
+
 /**
- * Spike: draws a synthetic cloud field with our own ray march, before depth of field.
+ * Draws the simulated clouds with our own ray march, before depth of field.
  * Enabled with r.AerosClouds 1. The pass traces at half resolution with a per-frame
  * jitter, accumulates over frames with a reprojection that follows the camera AND the
- * wind, then upsamples with depth weights. Lightning light is added fresh each frame
- * (never stored in the history), so a flash can't leave a dither trail.
+ * storm motion, then upsamples with depth weights. Lightning light is added fresh each
+ * frame (never stored in the history), so a flash can't leave a dither trail.
  */
 class FAerosCloudViewExtension : public FSceneViewExtensionBase
 {
@@ -50,10 +62,9 @@ private:
 	TRefCountPtr<IPooledRenderTarget> DetailNoiseRT;
 	bool UploadNoise_RenderThread(FRHICommandListImmediate& RHICmdList);
 
-	// Render-thread state (one view is enough for the spike).
-	TRefCountPtr<IPooledRenderTarget> HistoryColor;
-	TRefCountPtr<IPooledRenderTarget> HistoryDepth;
-	FMatrix PrevViewProj = FMatrix::Identity;
-	double PrevTime = -1.0;
+	// Render-thread state: one history per view, keyed by its view state (0 without one).
+	// Entries unused for 120 frames are dropped. Held by pointer: the graph extracts into them,
+	// and a second view added in the same graph must not move the first one's history.
+	TMap<uint32, TUniquePtr<FAerosCloudHistory>> Histories;
 	uint32 FrameIndex = 0;
 };

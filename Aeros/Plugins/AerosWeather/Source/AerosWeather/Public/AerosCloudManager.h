@@ -56,6 +56,8 @@ public:
 	FVector GetCloudMotionCmS() const { return VolumeDescs[CurVolume].MotionCmS; }
 	/** 0 = previous grid, 1 = current grid (ramps over 1 s after each upload). */
 	float GetCloudVolumeBlend() const { return VolumeBlend; }
+	/** Number of times a new voxel grid replaced the current one (tests time their pictures on it). */
+	int32 GetCloudVolumeSwaps() const { return VolumeSwaps; }
 	/** 0 after a jump of more than 40 km until the grid at the new place is uploaded, else 1. */
 	float GetCloudVolumeWeight() const { return VolumeWeight; }
 	/** Debug: grid slices as PNGs (horizontal at 2 km and 10 km, vertical west-east through the centre). */
@@ -119,6 +121,7 @@ private:
 	float VolumeBlend = 1.f;
 	float VolumeWeight = 0.f;
 	float VolumeTimer = 0.f;
+	int32 VolumeSwaps = 0;
 	uint64 VolumeGeneration = MAX_uint64;
 	bool bVolumeBuilding = false;
 	FAerosCloudVolumeDesc BuildingDesc;

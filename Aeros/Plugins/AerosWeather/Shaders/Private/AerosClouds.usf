@@ -159,7 +159,27 @@ SamplerState LinearSampler;
 float4x4 TranslatedToPrevClip;
 float DeltaTime;
 float NewWeight;
+float BlendBoost;        // |change of the voxel blend| x 4 this frame: the data itself moved
 uint bHistoryValid;
+
+float3 RGBToYCoCgHDR(float3 c)
+{
+	return float3(dot(c, float3(0.25, 0.5, 0.25)), dot(c, float3(0.5, 0.0, -0.5)), dot(c, float3(-0.25, 0.5, -0.25)));
+}
+
+float3 YCoCgToRGBHDR(float3 c)
+{
+	return float3(c.x + c.y - c.z, c.x + c.z, c.x - c.y - c.z);
+}
+
+// Pulls q towards the box centre until it is inside (clip, not clamp: keeps the hue of the history).
+float3 ClipToBox(float3 q, float3 Center, float3 Extent)
+{
+	float3 d = q - Center;
+	float3 a = abs(d / max(Extent, 1e-5));
+	float m = max(a.x, max(a.y, a.z));
+	return m > 1.0 ? Center + d / m : q;
+}
 
 [numthreads(8, 8, 1)]
 void TemporalCS(uint2 Id : SV_DispatchThreadID)
@@ -171,24 +191,32 @@ void TemporalCS(uint2 Id : SV_DispatchThreadID)
 	float4 Cur = CurColor.Load(int3(Id, 0));
 	float2 CurD = CurDepth.Load(int3(Id, 0)).xy;
 
-	float4 Mn = Cur;
-	float4 Mx = Cur;
+	// 3x3 statistics of the new frame: YCoCg mean and sigma (variance clipping), min / max of alpha.
+	float3 M1 = 0.0;
+	float3 M2 = 0.0;
+	float AMin = Cur.a;
+	float AMax = Cur.a;
 	[unroll] for (int y = -1; y <= 1; ++y)
 	{
 		[unroll] for (int x = -1; x <= 1; ++x)
 		{
 			float4 c = CurColor.Load(int3(clamp(int2(Id) + int2(x, y), 0, HalfSize - 1), 0));
-			Mn = min(Mn, c);
-			Mx = max(Mx, c);
+			float3 q = RGBToYCoCgHDR(c.rgb);
+			M1 += q;
+			M2 += q * q;
+			AMin = min(AMin, c.a);
+			AMax = max(AMax, c.a);
 		}
 	}
+	M1 /= 9.0;
+	float3 Sigma = sqrt(max(M2 / 9.0 - M1 * M1, 0.0));
 
 	float4 Result = Cur;
 	if (bHistoryValid != 0u)
 	{
 		float3 Dir = RayDirFromSvPos(float2(ViewMin) + float2(Id) * 2.0 + 1.0);
 		float FrontKm = min(CurD.x, CurD.y);
-		// The cloud at P now was at P - wind * dt last frame.
+		// The cloud at P now was at P - motion * dt last frame.
 		float3 PPrev = View.TranslatedWorldCameraOrigin + Dir * FrontKm * 1e5 - MotionKmS * 1e5 * DeltaTime;
 		float4 Clip = mul(float4(PPrev, 1.0), TranslatedToPrevClip);
 		if (Clip.w > 0.0)
@@ -197,8 +225,13 @@ void TemporalCS(uint2 Id : SV_DispatchThreadID)
 			if (all(Uv > 0.0) && all(Uv < 1.0))
 			{
 				float4 H = HistColor.SampleLevel(LinearSampler, Uv, 0);
-				H = clamp(H, Mn, Mx);
-				Result = lerp(H, Cur, NewWeight);
+				H.rgb = YCoCgToRGBHDR(ClipToBox(RGBToYCoCgHDR(H.rgb), M1, Sigma * 1.25));
+				H.a = clamp(H.a, AMin, AMax);
+				// Faster response where the image moves (reprojection smears) or the data changes.
+				float2 CurUv = (float2(Id) + 0.5) / float2(HalfSize);
+				float PixelMotion = length((Uv - CurUv) * float2(HalfSize));
+				float w = clamp(NewWeight + PixelMotion * 0.02 + BlendBoost, NewWeight, 0.6);
+				Result = lerp(H, Cur, w);
 			}
 		}
 	}

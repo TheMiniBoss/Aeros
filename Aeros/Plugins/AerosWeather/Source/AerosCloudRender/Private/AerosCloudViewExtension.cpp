@@ -29,6 +29,8 @@ namespace AerosCloudRenderInternal
 		TEXT("Test lightning: flashes per second near the camera (0 = simulation flashes only, < 0 = no flash at all)."), ECVF_RenderThreadSafe);
 	TAutoConsoleVariable<float> CVarBlend(TEXT("r.AerosClouds.HistoryBlend"), 0.1f,
 		TEXT("Weight of the new frame in the temporal accumulation (1 = no history)."), ECVF_RenderThreadSafe);
+	TAutoConsoleVariable<int32> CVarLogResets(TEXT("r.AerosClouds.LogResets"), 0,
+		TEXT("1: log every reset of the cloud history (camera cut, teleport, size, time) at Log level."), ECVF_RenderThreadSafe);
 
 	BEGIN_SHADER_PARAMETER_STRUCT(FCommonParameters, )
 		SHADER_PARAMETER(FVector3f, CameraKm)
@@ -101,6 +103,7 @@ namespace AerosCloudRenderInternal
 			SHADER_PARAMETER(FMatrix44f, TranslatedToPrevClip)
 			SHADER_PARAMETER(float, DeltaTime)
 			SHADER_PARAMETER(float, NewWeight)
+			SHADER_PARAMETER(float, BlendBoost)
 			SHADER_PARAMETER(uint32, bHistoryValid)
 			SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float4>, OutColor)
 			SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float2>, OutDepth)
@@ -306,9 +309,63 @@ FScreenPassTexture FAerosCloudViewExtension::Render_RenderThread(FRDGBuilder& Gr
 	const FIntPoint HalfSize = FIntPoint::DivideAndRoundUp(FullSize, 2);
 
 	const double Time = View.Family ? View.Family->Time.GetWorldTimeSeconds() : 0.0;
-	const float DeltaTime = PrevTime >= 0.0 ? (float)FMath::Clamp(Time - PrevTime, 0.0, 0.5) : 0.f;
 	const float WindMs = CVarWind.GetValueOnRenderThread();
 	const FAerosCloudRenderParams& Data = RTParams;
+
+	// History of this view; forget views not rendered for 120 frames.
+	const uint32 Frame = uint32(GFrameCounterRenderThread);
+	for (auto It = Histories.CreateIterator(); It; ++It)
+	{
+		if (Frame - It.Value()->LastFrame > 120u)
+		{
+			It.RemoveCurrent();
+		}
+	}
+	const uint32 ViewKey = View.State ? View.State->GetViewKey() : 0u;
+	TUniquePtr<FAerosCloudHistory>& HistoryPtr = Histories.FindOrAdd(ViewKey);
+	if (!HistoryPtr.IsValid())
+	{
+		HistoryPtr = MakeUnique<FAerosCloudHistory>();
+	}
+	FAerosCloudHistory& History = *HistoryPtr;
+	History.LastFrame = Frame;
+
+	const FVector ViewOrigin = View.ViewMatrices.GetViewOrigin();
+	const double Dt = History.Time >= 0.0 ? Time - History.Time : -1.0;
+	const TCHAR* ResetReason = nullptr;
+	if (!History.Color.IsValid() || !History.Depth.IsValid())
+	{
+		ResetReason = TEXT("first frame");
+	}
+	else if (History.Color->GetDesc().Extent != HalfSize)
+	{
+		ResetReason = TEXT("size");
+	}
+	else if (View.bCameraCut)
+	{
+		ResetReason = TEXT("camera cut");
+	}
+	else if (FVector::Dist(ViewOrigin, History.ViewOrigin) > 200000.0)
+	{
+		ResetReason = TEXT("teleport");
+	}
+	else if (Dt <= 0.0 || Dt > 0.5)
+	{
+		ResetReason = TEXT("time");
+	}
+	if (ResetReason)
+	{
+		UE_LOG(LogTemp, Verbose, TEXT("AerosClouds: history reset (%s)"), ResetReason);
+		if (CVarLogResets.GetValueOnRenderThread() > 0)
+		{
+			UE_LOG(LogTemp, Log, TEXT("AerosClouds: history reset (%s) view %u, %dx%d"), ResetReason, ViewKey, HalfSize.X, HalfSize.Y);
+		}
+	}
+	const bool bHistoryValid = ResetReason == nullptr;
+	const float DeltaTime = bHistoryValid ? float(Dt) : 0.f;
+	// The voxel blend ramps 0 -> 1 in 1 s and restarts at 0 on a grid swap (which shows the same
+	// field): only the ramp itself is a change of the data.
+	const float BlendStep = Data.VolumeBlend >= History.Blend ? Data.VolumeBlend - History.Blend : Data.VolumeBlend;
 
 	FCommonParameters Common;
 	Common.CameraKm = FVector3f(View.ViewMatrices.GetViewOrigin() / 100000.0);
@@ -350,16 +407,15 @@ FScreenPassTexture FAerosCloudViewExtension::Render_RenderThread(FRDGBuilder& Gr
 			FComputeShaderUtils::GetGroupCount(HalfSize, 8));
 	}
 
-	// 2. Temporal accumulation, reprojected along camera motion and wind.
-	const bool bHistoryValid = HistoryColor.IsValid() && HistoryColor->GetDesc().Extent == HalfSize && DeltaTime > 0.f;
-	FRDGTextureRef HistColor = bHistoryValid ? GraphBuilder.RegisterExternalTexture(HistoryColor) : TraceColor;
-	FRDGTextureRef HistDepth = bHistoryValid ? GraphBuilder.RegisterExternalTexture(HistoryDepth) : TraceDepth;
+	// 2. Temporal accumulation, reprojected along camera motion and storm motion.
+	FRDGTextureRef HistColor = bHistoryValid ? GraphBuilder.RegisterExternalTexture(History.Color) : TraceColor;
+	FRDGTextureRef HistDepth = bHistoryValid ? GraphBuilder.RegisterExternalTexture(History.Depth) : TraceDepth;
 	FRDGTextureRef AccumColor = GraphBuilder.CreateTexture(ColorDesc, TEXT("AerosClouds.AccumColor"));
 	FRDGTextureRef AccumDepth = GraphBuilder.CreateTexture(DepthDesc, TEXT("AerosClouds.AccumDepth"));
 
 	const FMatrix ViewProj = View.ViewMatrices.GetWorldToView() * View.ViewMatrices.ComputeProjectionNoAAMatrix();
 	{
-		const FMatrix TranslatedToPrevClip = FTranslationMatrix(-View.ViewMatrices.GetPreViewTranslation()) * (bHistoryValid ? PrevViewProj : ViewProj);
+		const FMatrix TranslatedToPrevClip = FTranslationMatrix(-View.ViewMatrices.GetPreViewTranslation()) * (bHistoryValid ? History.ViewProj : ViewProj);
 
 		FTemporalCS::FParameters* P = GraphBuilder.AllocParameters<FTemporalCS::FParameters>();
 		P->View = View.ViewUniformBuffer;
@@ -372,6 +428,7 @@ FScreenPassTexture FAerosCloudViewExtension::Render_RenderThread(FRDGBuilder& Gr
 		P->TranslatedToPrevClip = FMatrix44f(TranslatedToPrevClip);
 		P->DeltaTime = DeltaTime;
 		P->NewWeight = FMath::Clamp(CVarBlend.GetValueOnRenderThread(), 0.02f, 1.f);
+		P->BlendBoost = FMath::Abs(BlendStep) * 4.f;
 		P->bHistoryValid = bHistoryValid ? 1u : 0u;
 		P->OutColor = GraphBuilder.CreateUAV(AccumColor);
 		P->OutDepth = GraphBuilder.CreateUAV(AccumDepth);
@@ -379,10 +436,12 @@ FScreenPassTexture FAerosCloudViewExtension::Render_RenderThread(FRDGBuilder& Gr
 		FComputeShaderUtils::AddPass(GraphBuilder, RDG_EVENT_NAME("Temporal"), Shader, P,
 			FComputeShaderUtils::GetGroupCount(HalfSize, 8));
 	}
-	GraphBuilder.QueueTextureExtraction(AccumColor, &HistoryColor);
-	GraphBuilder.QueueTextureExtraction(AccumDepth, &HistoryDepth);
-	PrevViewProj = ViewProj;
-	PrevTime = Time;
+	GraphBuilder.QueueTextureExtraction(AccumColor, &History.Color);
+	GraphBuilder.QueueTextureExtraction(AccumDepth, &History.Depth);
+	History.ViewProj = ViewProj;
+	History.Time = Time;
+	History.ViewOrigin = ViewOrigin;
+	History.Blend = Data.VolumeBlend;
 
 	// 3. Depth-aware upsample + composite over the scene, plus the fresh lightning term.
 	FRDGTextureDesc OutDesc = SceneColor.Texture->Desc;
