@@ -9,7 +9,7 @@ Système de météo et de catastrophes naturelles **réaliste et optimisé**. Ce
 ## Démarrage rapide
 
 1. Ouvrir `Aeros.uproject` (UE 5.8). Accepter la compilation des modules.
-2. **Démo immédiate** : n'importe quel niveau (même vide) → *World Settings* → *GameMode Override* = `AerosDemoGameMode` → **Play**. Le mode démo construit le ciel, le soleil, le brouillard, un **paysage procédural** (collines, montagnes enneigées, lacs, plages, mer, désert), des caisses physiques, un volcan (cône de secours), le contrôleur météo et le radar.
+2. **Démo immédiate** : n'importe quel niveau (même vide) → *World Settings* → *GameMode Override* = `AerosDemoGameMode` → **Play** (menu : démo jouable ou démo technique, voir plus bas). Le mode démo construit le ciel, le soleil, le brouillard, un **paysage procédural** (collines, montagnes enneigées, lacs, plages, mer, désert), des caisses physiques, un volcan (cône de secours), le contrôleur météo et le radar.
 3. **Démo complète** : *Tools → Execute Python Script…* → `Plugins/AerosWeather/Content/Python/aeros_setup.py`.
 
 ### Que fait le script Python ?
@@ -35,7 +35,34 @@ Chaque étape est indépendante : à la fin, l'Output Log affiche `[Aeros] SUMMA
 
 Sans ouvrir l'éditeur : `UnrealEditor-Cmd.exe Aeros.uproject -run=pythonscript -script=<chemin>/aeros_setup.py -unattended -nullrhi` (l'étape carte échoue dans ce mode, les matériaux sont bien créés).
 
-### Touches de la démo (clavier AZERTY)
+### Démo jouable : Chasseur d'orages
+
+**Play** ouvre un menu : *Chasseur d'orages*, *Démo technique (vol libre)*, *Quitter* (Z/S ou flèches, Entrée). `-AerosTech` (ou toute option `-AerosTour…`) démarre directement dans la démo technique. Retour au menu depuis la démo technique : **Retour arrière**.
+
+Une après-midi de supercellules (13 h → 20 h 30, temps ×20, ≈ 22 min). On conduit un véhicule au sol, on trouve les orages au radar, on les approche par le côté et on photographie ce que le ciel donne.
+
+* **Briefing** : le scénario *Supercellules* tourne en accéléré depuis 12 h 15 pendant qu'on lit les règles. Dès qu'une supercellule existe, Entrée part tout de suite (sinon départ à 13 h, à ≈ 30 km de l'orage le plus fort, hors de la pluie).
+* **Points** (`AerosChaseRules.h`, testés hors moteur) : tornade (100 × (EF+1), bien plus près de 2 km, plus rien au-delà de 20 km), nuage-mur, éclair pris au bon moment (dans les 0,6 s), supercellule entière vue de 10 à 80 km, traversée d'un cœur de grêle (> 2 cm). Le sujet doit être dans le quart central du cadre, **vu** (pas caché par une colline ou une dune : tracé contre le relief) et **pas noyé dans la pluie** (la visibilité est la pire rencontrée sur la ligne de visée). Une seule photo compte par sujet : une meilleure ajoute la différence.
+* **Dangers** : vents de tornade (> 35 m/s, ils poussent aussi le véhicule), grêle > 2 cm, foudre à moins de 300 m, routes inondées (> 0,4 m). Hors danger le véhicule se répare lentement. Détruit : pénalité d'un quart du score, nouveau véhicule à 15 km.
+* **Rangs** : Débutant, Observateur (400), Chasseur (1200), Chasseur confirmé (3000), Chasseur légendaire (6000).
+* **Interface** : heure et coucher du soleil, score et rang, boussole avec orages et tornades, radar 160 km, vitesse, état du véhicule, marqueurs à l'écran, alertes, viseur avec estimation des points en direct. L'écran de fin liste les meilleures photos. Les photos (sans interface) sont dans `Saved/Screenshots/<plateforme>/AerosChase/`.
+
+| Touche | Action |
+|---|---|
+| **Z / S** (ou flèches) | accélérer / freiner, marche arrière |
+| **Q / D** | tourner |
+| Souris | regarder autour |
+| Clic droit (maintenu) | zoom ×4 (viseur) |
+| Clic gauche ou **Espace** | photo |
+| **T** | trajet rapide : à ≈ 10 km de la supercellule la plus proche, l'horloge avance de 20 min |
+| **Échap** ou **P** | pause (la météo s'arrête) |
+| **Retour arrière** | menu |
+
+Pas de touches de fonction (F1-F12) dans la démo jouable : elles servent souvent au débogage du moteur.
+
+Options de test : `-AerosChase` (saute le menu), `-AerosChaseAuto` (pilote automatique : va vers les tornades, vise, photographie toutes les 6 s), `-AerosChaseShots=N` (capture avec interface toutes les N s, `AerosChase/auto_###.png`), `-AerosChaseEndAfter=S` (fin de journée après S s de conduite), `-AerosChaseQuitAfter=S`. Le log écrit `Aeros chase: day over, score …`.
+
+### Touches de la démo technique (clavier AZERTY)
 
 | Touche | Action |
 |---|---|
