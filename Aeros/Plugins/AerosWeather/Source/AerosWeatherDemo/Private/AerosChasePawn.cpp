@@ -9,6 +9,7 @@
 #include "AerosWaterSurfaceComponent.h"
 #include "AerosTornado.h"
 #include "AerosWeatherSettings.h"
+#include "AerosWeatherRadar.h"
 #include "Core/AerosFunnel.h"
 #include "Camera/CameraComponent.h"
 #include "GameFramework/PlayerController.h"
@@ -88,30 +89,58 @@ void AAerosChasePawn::BeginPlay()
 	if (FParse::Param(FCommandLine::Get(), TEXT("AerosChase")) || bAutopilot) StartChase();
 }
 
-void AAerosChasePawn::TuneTornadoGenesis(bool bChase)
+void AAerosChasePawn::TuneTornadoGenesis(int32 Mode)
 {
 	// The plugin rolls for a tornado every 600 simulated s per supercell: at the chase's x2 that is one
 	// roll every 5 real minutes. A game needs a roll every ~30 s (still 15-45 % each, and only under
-	// a rotating storm in a tornadic environment). Restored when the day ends.
+	// a rotating storm in a tornadic environment). None during the briefing: the player should see
+	// the first one come down. Restored when the day ends.
 	UAerosWeatherSettings* S = GetMutableDefault<UAerosWeatherSettings>();
-	if (bChase && SavedTornadoInterval < 0.f)
+	if (Mode == 0)
 	{
-		SavedTornadoInterval = S->TornadoCheckInterval;
-		SavedTornadoFrequency = S->TornadoFrequency;
-		S->TornadoCheckInterval = 60.f;
-		S->TornadoFrequency = FMath::Max(S->TornadoFrequency, 1.5f);
-	}
-	else if (!bChase && SavedTornadoInterval >= 0.f)
-	{
+		if (SavedTornadoInterval < 0.f) return;
 		S->TornadoCheckInterval = SavedTornadoInterval;
 		S->TornadoFrequency = SavedTornadoFrequency;
 		SavedTornadoInterval = -1.f;
+		return;
 	}
+	if (SavedTornadoInterval < 0.f)
+	{
+		SavedTornadoInterval = S->TornadoCheckInterval;
+		SavedTornadoFrequency = S->TornadoFrequency;
+	}
+	S->TornadoCheckInterval = Mode == 2 ? 60.f : SavedTornadoInterval;
+	S->TornadoFrequency = Mode == 2 ? FMath::Max(SavedTornadoFrequency, 1.5f) : 0.f;
+}
+
+void AAerosChasePawn::SetRadarZoom(bool bIn)
+{
+	for (TActorIterator<AAerosWeatherRadar> It(GetWorld()); It; ++It)
+	{
+		if (bIn)
+		{
+			if (SavedRadarRange < 0.f) SavedRadarRange = It->RangeKm;
+			It->RangeKm = RadarRangeKm;
+		}
+		else if (SavedRadarRange > 0.f)
+		{
+			It->RangeKm = SavedRadarRange;
+		}
+	}
+	if (!bIn) SavedRadarRange = -1.f;
+}
+
+void AAerosChasePawn::RestoreWeather()
+{
+	// Back to a normal world for the menu and the technical demo
+	TuneTornadoGenesis(0);
+	SetRadarZoom(false);
+	if (UAerosWeatherSubsystem* Sub = UAerosWeatherSubsystem::Get(this)) Sub->SetConvectionControl(1.f, false);
 }
 
 void AAerosChasePawn::EndPlay(const EEndPlayReason::Type Reason)
 {
-	TuneTornadoGenesis(false);
+	RestoreWeather();
 	if (UAerosWeatherSubsystem* Sub = UAerosWeatherSubsystem::Get(this))
 	{
 		Sub->OnLightningStrike.RemoveDynamic(this, &AAerosChasePawn::HandleLightning);
@@ -237,7 +266,7 @@ void AAerosChasePawn::Tick(float DeltaSeconds)
 			if (UAerosWeatherSubsystem* PauseSub = UAerosWeatherSubsystem::Get(this)) PauseSub->SetPaused(false);
 		}
 		if (AerosChasePawnInternal::KeyPressed(PC, { EKeys::BackSpace })) GoToMenu();
-		else if (AerosChasePawnInternal::KeyPressed(PC, { EKeys::Enter })) { if (UAerosWeatherSubsystem* EndSub = UAerosWeatherSubsystem::Get(this)) EndSub->SetPaused(false); EndDay(); }
+		else if (AerosChasePawnInternal::KeyPressed(PC, { EKeys::Enter })) { if (UAerosWeatherSubsystem* EndSub = UAerosWeatherSubsystem::Get(this)) EndSub->SetPaused(false); EndReason = TEXT("Journ\u00E9e arr\u00EAt\u00E9e."); EndDay(); }
 		break;
 	case EAerosChaseState::Summary:
 		TickSummary(PC);
@@ -278,7 +307,7 @@ void AAerosChasePawn::GoToMenu()
 	State = EAerosChaseState::Menu;
 	StateTime = 0.f;
 	bZoom = false;
-	TuneTornadoGenesis(false);
+	RestoreWeather();
 	if (UAerosWeatherSubsystem* Sub = UAerosWeatherSubsystem::Get(this)) { Sub->SetPaused(false); Sub->SetTimeScale(60.f); }
 }
 
@@ -311,7 +340,10 @@ void AAerosChasePawn::StartChase()
 	BriefingProgress = 0.f;
 	BriefingSetup = 0;
 	BriefingSetupTimer = 0.f;
-	BriefingText = TEXT("Situation : air chaud et humide au sol, vent qui tourne avec l'altitude. Des supercellules vont se former cet apr\u00E8s-midi. Trouve-les au radar, approche-toi par le c\u00F4t\u00E9 (hors de la pluie) et photographie ce que le ciel te donne. Coucher du soleil vers 20 h 30.");
+	BubbleTries = 0;
+	BubbleTimer = 0.f;
+	EndReason.Empty();
+	BriefingText = TEXT("Situation : air chaud et humide au sol, vent qui tourne avec l'altitude. Une supercellule va na\u00EEtre \u00E0 l'ouest. Rejoins-la, approche-toi par le c\u00F4t\u00E9 (hors de la pluie) et guette la tornade : elle n'est pas encore l\u00E0. La journ\u00E9e finit quand l'orage meurt, ou au coucher du soleil (20 h 30).");
 }
 
 void AAerosChasePawn::TickBriefing(float DeltaSeconds)
@@ -330,7 +362,11 @@ void AAerosChasePawn::TickBriefing(float DeltaSeconds)
 		else
 		{
 			Sub->SetPaused(false);
-			if (BriefingSetup == 0) Sub->SetScenario(EAerosScenario::SupercellOutbreak);
+			// One storm only: no spontaneous initiation, the running ones (and their tornadoes) removed
+			Sub->SetScenario(EAerosScenario::SupercellOutbreak);
+			Sub->SetConvectionControl(0.f, true);
+			for (TActorIterator<AAerosTornado> It(GetWorld()); It; ++It) It->Destroy();
+			TuneTornadoGenesis(1);
 			Sub->SetDateTime(Sub->GetDateTime().DayOfYear, BriefingStartHour);
 			Sub->SetTimeScale(600.f);
 			BriefingSetup = 1;
@@ -338,6 +374,14 @@ void AAerosChasePawn::TickBriefing(float DeltaSeconds)
 		}
 	}
 	if (BriefingSetup < 2) return;
+	// The storm's seed: a warm bubble 20 km west of the player (inland), again if nothing grew
+	BubbleTimer += DeltaSeconds;
+	if (BubbleTries == 0 || (Sub->GetStorms().Num() == 0 && BubbleTimer > 8.f && BubbleTries < 4))
+	{
+		Sub->InjectThermalBubble(GetActorLocation() + FVector(-2000000.0, 500000.0, 0.0), 6.f, 3.5f, 2.f);
+		++BubbleTries;
+		BubbleTimer = 0.f;
+	}
 	const float Hour = Sub->GetDateTime().Hour;
 	BriefingProgress = FMath::Clamp((Hour - BriefingStartHour) / (DayStartHour - BriefingStartHour), 0.f, 1.f);
 	bBriefingReady = false;
@@ -354,7 +398,10 @@ void AAerosChasePawn::BeginDay()
 	UAerosWeatherSubsystem* Sub = UAerosWeatherSubsystem::Get(this);
 	if (!Sub) return;
 	Sub->SetTimeScale(DayTimeScale);
-	TuneTornadoGenesis(true);
+	TuneTornadoGenesis(2);
+	SetRadarZoom(true);
+	NoStormTime = 0.f;
+	bStormSeen = false;
 	// Start 8 km from the strongest storm, on land, out of the rain, facing it
 	SetActorLocation(FindSafeStart(Sub, 8.f));
 	PlaceOnGround();
@@ -401,7 +448,8 @@ void AAerosChasePawn::EndDay()
 {
 	State = EAerosChaseState::Summary;
 	StateTime = 0.f;
-	TuneTornadoGenesis(false);
+	TuneTornadoGenesis(0);
+	SetRadarZoom(false);
 	UE_LOG(LogTemp, Display, TEXT("Aeros chase: day over, score %d, %d photos, destroyed %d"), Score, Album.Num(), Destroyed);
 	SummaryIndex = 0;
 	bZoom = false;
@@ -429,7 +477,11 @@ void AAerosChasePawn::TickDriving(APlayerController* PC, float DeltaSeconds)
 	using namespace AerosChasePawnInternal;
 	UAerosWeatherSubsystem* Sub = UAerosWeatherSubsystem::Get(this);
 	if (!Sub) return;
-	if (Sub->GetDateTime().Hour >= DayEndHour) { EndDay(); return; }
+	if (Sub->GetDateTime().Hour >= DayEndHour) { EndReason = TEXT("Le soleil s'est couch\u00E9."); EndDay(); return; }
+	// The day is the storm's life: it ends once the storm has died
+	if (Sub->GetStorms().Num() > 0) { bStormSeen = true; NoStormTime = 0.f; }
+	else NoStormTime += DeltaSeconds;
+	if (bStormSeen && NoStormTime > 15.f) { EndReason = TEXT("L'orage s'est dissip\u00E9."); EndDay(); return; }
 	if (KeyPressed(PC, { EKeys::Escape, EKeys::P })) { State = EAerosChaseState::Paused; StateTime = 0.f; Sub->SetPaused(true); return; }
 	if (KeyPressed(PC, { EKeys::BackSpace })) { GoToMenu(); return; }
 
@@ -616,7 +668,15 @@ void AAerosChasePawn::FastTravel()
 		const double D = FVector::Dist2D(It->GetActorLocation(), L);
 		if (D < TwisterD) { TwisterD = D; Twister = *It; }
 	}
-	if (!Best && !Twister) { ShowToast(TEXT("Aucune supercellule en vue pour l'instant.")); return; }
+	if (!Best)
+	{
+		for (const FAerosStormData& S : Storms)
+		{
+			const double D = FVector::Dist2D(S.Location, L);
+			if (D < BestD) { BestD = D; Best = &S; }
+		}
+	}
+	if (!Best && !Twister) { ShowToast(TEXT("Aucun orage en vue pour l'instant.")); return; }
 	const bool bTwister = Twister != nullptr;
 	const double TargetD = bTwister ? TwisterD : BestD;
 	const TCHAR* What = bTwister ? TEXT("de la tornade") : TEXT("de la supercellule");

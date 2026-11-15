@@ -211,6 +211,7 @@ void AAerosChaseHUD::DrawSummary(AAerosChasePawn* P)
 	const float PanelBottom = Y - 24.f + SH * 0.78f;
 	Panel(X - 24.f, Y - 24.f, W + 48.f, SH * 0.78f, 0.85f);
 	Text(TEXT("FIN DE LA JOURN\u00C9E"), X, Y, Accent, 1.8f, false, GEngine->GetLargeFont());
+	if (!P->EndReason.IsEmpty()) Text(P->EndReason, X + 330.f, Y + 10.f, Dim, 1.1f);
 	Y += 64.f;
 	Text(FString::Printf(TEXT("%d points"), P->Score), X, Y, Ink, 2.2f, false, GEngine->GetLargeFont());
 	Y += 58.f;
@@ -424,5 +425,5 @@ void AAerosChaseHUD::DrawRadar(AAerosChasePawn* P, float X, float Y, float Size)
 		DrawLine(CX, CY, CX + FMath::Sin(B) * R * 0.35f, CY - FMath::Cos(B) * R * 0.35f, FLinearColor(1.f, 0.78f, 0.3f, 0.9f), 2.f);
 	}
 	DrawRect(Accent, CX - 3.f, CY - 3.f, 6.f, 6.f);
-	Text(TEXT("RADAR  160 km"), X, Y + Size + 8.f, Dim, 0.8f);
+	Text(FString::Printf(TEXT("RADAR  %.0f km"), Radar ? Radar->RangeKm : 160.f), X, Y + Size + 8.f, Dim, 0.8f);
 }

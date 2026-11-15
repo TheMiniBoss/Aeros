@@ -95,6 +95,8 @@ public:
 	bool bZoom = false;
 	float BriefingProgress = 0.f;   // 0-1 while the storms grow
 	bool bBriefingReady = false;    // a supercell exists: Enter starts the day at once
+	FString EndReason;              // why the day ended (summary screen)
+	static constexpr float RadarRangeKm = 30.f;
 	TArray<FAerosChasePhoto> Album;
 	FAerosChaseShotPreview Preview; // live estimate in the viewfinder
 	FString LastPhotoText;          // "+420 pts - Tornade EF3 a 1,2 km"
@@ -175,7 +177,18 @@ private:
 	/** Tornado-genesis settings saved while the chase tunes them (negative = not tuned). */
 	float SavedTornadoInterval = -1.f;
 	float SavedTornadoFrequency = 1.f;
-	void TuneTornadoGenesis(bool bChase);
+	void TuneTornadoGenesis(int32 Mode);   // 0 = restore, 1 = briefing (no tornado), 2 = the day
+
+	/** One storm only: born from a warm bubble west of the player during the briefing. */
+	int32 BubbleTries = 0;
+	float BubbleTimer = 0.f;
+	/** The day ends once the storm is gone (seen at least once, then absent this long). */
+	float NoStormTime = 0.f;
+	bool bStormSeen = false;
+	/** Radar zoomed on the storm while driving (the technical demo keeps its own range). */
+	float SavedRadarRange = -1.f;
+	void SetRadarZoom(bool bIn);
+	void RestoreWeather();
 	float AutoLogTimer = 0.f;
 	/** Scenario and clock are set from the briefing's ticks: a command issued before the weather
 	 *  thread runs (BeginPlay with -AerosChase) is dropped. 0 = not yet, 1 = sent, 2 = clock seen. */
