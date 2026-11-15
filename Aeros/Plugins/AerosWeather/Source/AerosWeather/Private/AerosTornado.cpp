@@ -1,6 +1,7 @@
 // Copyright Aeros. All Rights Reserved.
 
 #include "AerosTornado.h"
+#include "Core/AerosFunnel.h"
 #include "AerosWeatherSubsystem.h"
 #include "AerosWeatherSettings.h"
 #include "AerosStormManager.h"
@@ -199,10 +200,8 @@ void AAerosTornado::EndPlay(const EEndPlayReason::Type Reason)
 
 float AAerosTornado::GetStrength() const
 {
-	const float T = Lifetime > 0.f ? Age / Lifetime : 1.f;
-	const float SpinUp = Aeros::Phys::SmoothStep01(T / 0.12f);
-	const float RopeOut = 1.f - Aeros::Phys::SmoothStep01((T - 0.75f) / 0.25f);
-	return SpinUp * RopeOut;
+	// Same law as the funnel model the cloud renderer draws (Core/AerosFunnel.h)
+	return Aeros::Funnel::LifeStrength(Lifetime > 0.f ? Age / Lifetime : 1.f);
 }
 
 FVector AAerosTornado::GetWindAt(const FVector& WorldLocation) const

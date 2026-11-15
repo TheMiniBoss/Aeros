@@ -148,6 +148,75 @@ namespace FlashListTests
 	}
 }
 
+// ---- Funnel model (Core, pure C++): standalone only --------------------------------------------
+#include "Core/AerosFunnel.h"
+
+namespace FunnelTests
+{
+	bool Near(float A, float B, float Eps) { return std::abs(A - B) <= Eps; }
+
+	int Run()
+	{
+		using namespace Aeros::Funnel;
+		FAutoTestBase T;
+		{
+			FParams P; P.VmaxMs = 0.f; P.CoreRadiusM = 100.f; P.CloudBaseM = 1000.f; P.K = 1.f;
+			bool bNone = true;
+			for (int H = 0; H <= 1000; H += 50) bNone &= RadiusAtM(P, float(H)) == 0.f;
+			T.TestTrue("Funnel_NoVortexNoFunnel", bNone && TipHeightM(P) == 1000.f);
+		}
+		{
+			FParams P; P.CoreRadiusM = 100.f; P.CloudBaseM = 800.f; P.K = 1.f;
+			P.VmaxMs = 89.f; const float TipStrong = TipHeightM(P);
+			P.VmaxMs = 85.f; const float TipWeak = TipHeightM(P);
+			T.TestTrue("Funnel_TipOnGround (89 m/s touches, 85 m/s hangs)", TipStrong == 0.f && TipWeak > 0.f);
+		}
+		{
+			auto R = [](float V, float Rc, float Base) { FParams P; P.VmaxMs = V; P.CoreRadiusM = Rc; P.CloudBaseM = Base; P.K = 3.f; return RadiusAtM(P, 200.f); };
+			const bool bV = R(40, 100, 1000) < R(60, 100, 1000) && R(60, 100, 1000) < R(80, 100, 1000);
+			const bool bRc = R(70, 50, 1000) < R(70, 100, 1000) && R(70, 100, 1000) < R(70, 200, 1000);
+			const bool bBase = R(70, 100, 800) > R(70, 100, 1000) && R(70, 100, 1000) > R(70, 100, 1500);
+			T.TestTrue("Funnel_RadiusMonotonic (Vmax up, core up, base down -> wider)", bV && bRc && bBase);
+		}
+		{
+			FParams P; P.VmaxMs = 70.f; P.CoreRadiusM = 100.f; P.CloudBaseM = 1000.f; P.K = 1.5f;
+			const float Tip = TipHeightM(P);
+			T.TestTrue("Funnel_NarrowsDownward", RadiusAtM(P, 900.f) > RadiusAtM(P, 500.f) && RadiusAtM(P, 500.f) > RadiusAtM(P, Tip + 1.f)
+				&& Near(RadiusAtM(P, Tip), 0.f, 0.5f) && Tip > 0.f && Tip < 1000.f);
+		}
+		{
+			bool bOk = true;
+			const float Bases[] = { 0.f, 1.f, 1000.f };
+			const float Cores[] = { 1.f, 100.f, 2000.f };
+			const float Vs[] = { 0.f, 50.f, 120.f };
+			for (float Base : Bases) for (float Rc : Cores) for (float V : Vs)
+			{
+				FParams P; P.VmaxMs = V; P.CoreRadiusM = Rc; P.CloudBaseM = Base; P.K = 2.f;
+				const float Hs[] = { 0.f, Base * 0.5f, Base, Base + 100.f };
+				for (float H : Hs)
+				{
+					const float Rf = RadiusAtM(P, H);
+					bOk &= std::isfinite(Rf) && Rf >= 0.f;
+				}
+				const float Tip = TipHeightM(P);
+				bOk &= std::isfinite(Tip) && Tip >= 0.f;
+				bOk &= std::isfinite(PressureDeficitPa(V, 0.f, Rc)) && std::isfinite(TangentialWindMs(V, 0.f, Rc));
+			}
+			T.TestTrue("Funnel_DegenerateInputs (finite, non-negative)", bOk);
+		}
+		{
+			const bool bLife = Near(LifeStrength(0.f), 0.f, 1e-4f) && Near(LifeStrength(0.06f), 0.5f, 1e-3f) && Near(LifeStrength(0.5f), 1.f, 1e-4f)
+				&& Near(LifeStrength(0.875f), 0.5f, 1e-3f) && Near(LifeStrength(1.f), 0.f, 1e-4f);
+			T.TestTrue("Funnel_LifeMatchesTornado (0, 0.5, 1, 0.5, 0)", bLife);
+		}
+		{
+			T.TestTrue("Funnel wind peaks at the core", Near(TangentialWindMs(60.f, 100.f, 100.f), 60.f, 1e-3f) && TangentialWindMs(60.f, 50.f, 100.f) < 60.f && TangentialWindMs(60.f, 200.f, 100.f) < 60.f);
+			T.TestTrue("Funnel pressure deficit 1.1 x V^2 at the centre", Near(PressureDeficitPa(100.f, 0.f, 100.f), 11000.f, 1.f));
+		}
+		return T.Fails;
+	}
+}
+
 int main()
 {
 	int Fails = 0;
@@ -157,6 +226,7 @@ int main()
 	{ FAerosCloudVolumeTest T; std::printf("Cloud voxels\n"); T.RunTest(""); Fails += T.Fails; }
 	{ std::printf("Cloud noise\n"); Fails += CloudNoiseTests::Run(); }
 	{ std::printf("Flash list\n"); Fails += FlashListTests::Run(); }
+	{ std::printf("Funnel\n"); Fails += FunnelTests::Run(); }
 	std::printf("failures: %d\n", Fails);
 	return Fails == 0 ? 0 : 1;
 }
