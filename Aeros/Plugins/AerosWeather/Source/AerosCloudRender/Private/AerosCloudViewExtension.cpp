@@ -41,6 +41,7 @@ namespace AerosCloudRenderInternal
 	BEGIN_SHADER_PARAMETER_STRUCT(FCommonParameters, )
 		SHADER_PARAMETER(FVector3f, CameraKm)
 		SHADER_PARAMETER(FVector3f, MotionKmS)
+		SHADER_PARAMETER(FVector3f, DriftKmS)
 		SHADER_PARAMETER(float, TimeS)
 		SHADER_PARAMETER(uint32, FrameIndex)
 		SHADER_PARAMETER(FIntPoint, ViewMin)
@@ -48,6 +49,7 @@ namespace AerosCloudRenderInternal
 		SHADER_PARAMETER(FIntPoint, FullSize)
 		SHADER_PARAMETER(float, AmbientScale)
 		SHADER_PARAMETER(int32, TraceScale)
+		SHADER_PARAMETER(FIntPoint, JitterOffset)
 		SHADER_PARAMETER(int32, MaxSteps)
 		SHADER_PARAMETER(int32, LightSteps)
 		SHADER_PARAMETER(float, HazeScale)
@@ -134,6 +136,7 @@ namespace AerosCloudRenderInternal
 			SHADER_PARAMETER_RDG_TEXTURE(Texture2D, CurDepth)
 			SHADER_PARAMETER_RDG_TEXTURE(Texture2D, HistColor)
 			SHADER_PARAMETER_RDG_TEXTURE(Texture2D, HistDepth)
+			SHADER_PARAMETER_RDG_TEXTURE(Texture2D, SceneDepthTexture)
 			SHADER_PARAMETER_SAMPLER(SamplerState, LinearSampler)
 			SHADER_PARAMETER(FMatrix44f, TranslatedToPrevClip)
 			SHADER_PARAMETER(float, DeltaTime)
@@ -375,7 +378,7 @@ FScreenPassTexture FAerosCloudViewExtension::Render_RenderThread(FRDGBuilder& Gr
 	{
 		ResetReason = TEXT("first frame");
 	}
-	else if (History.Color->GetDesc().Extent != HalfSize)
+	else if (History.Color->GetDesc().Extent != FullSize)
 	{
 		ResetReason = TEXT("size");
 	}
@@ -408,6 +411,7 @@ FScreenPassTexture FAerosCloudViewExtension::Render_RenderThread(FRDGBuilder& Gr
 	FCommonParameters Common;
 	Common.CameraKm = FVector3f(View.ViewMatrices.GetViewOrigin() / 100000.0);
 	Common.MotionKmS = WindMs > 0.f ? FVector3f(WindMs / 1000.f, 0.f, 0.f) : Data.MotionKmS;
+	Common.DriftKmS = WindMs > 0.f ? Common.MotionKmS : Data.DriftKmS;
 	Common.TimeS = (float)FMath::Fmod(Time, 4096.0);
 	Common.FrameIndex = FrameIndex++;
 	Common.ViewMin = ViewRect.Min;
@@ -418,6 +422,12 @@ FScreenPassTexture FAerosCloudViewExtension::Render_RenderThread(FRDGBuilder& Gr
 		static const int32 Steps[4] = { 96, 128, 192, 256 };
 		static const int32 Light[4] = { 3, 4, 6, 8 };
 		Common.TraceScale = TraceScale;
+		// Traced pixel inside each block, cycling over the block (ordered so neighbours differ)
+		static const int32 Order2[4][2] = { {0, 0}, {1, 1}, {1, 0}, {0, 1} };
+		static const int32 Order4[16] = { 0, 10, 2, 8, 5, 15, 7, 13, 1, 11, 3, 9, 4, 14, 6, 12 };
+		const uint32 Phase = Common.FrameIndex;
+		Common.JitterOffset = TraceScale == 2 ? FIntPoint(Order2[Phase % 4][0], Order2[Phase % 4][1])
+			: FIntPoint(Order4[Phase % 16] % 4, Order4[Phase % 16] / 4);
 		Common.MaxSteps = Steps[Quality];
 		Common.LightSteps = Light[Quality];
 	}
@@ -489,8 +499,10 @@ FScreenPassTexture FAerosCloudViewExtension::Render_RenderThread(FRDGBuilder& Gr
 	// 2. Temporal accumulation, reprojected along camera motion and storm motion.
 	FRDGTextureRef HistColor = bHistoryValid ? GraphBuilder.RegisterExternalTexture(History.Color) : TraceColor;
 	FRDGTextureRef HistDepth = bHistoryValid ? GraphBuilder.RegisterExternalTexture(History.Depth) : TraceDepth;
-	FRDGTextureRef AccumColor = GraphBuilder.CreateTexture(ColorDesc, TEXT("AerosClouds.AccumColor"));
-	FRDGTextureRef AccumDepth = GraphBuilder.CreateTexture(DepthDesc, TEXT("AerosClouds.AccumDepth"));
+	const FRDGTextureDesc AccumColorDesc = FRDGTextureDesc::Create2D(FullSize, PF_FloatRGBA, FClearValueBinding::Black, TexCreate_ShaderResource | TexCreate_UAV);
+	const FRDGTextureDesc AccumDepthDesc = FRDGTextureDesc::Create2D(FullSize, PF_G32R32F, FClearValueBinding::Black, TexCreate_ShaderResource | TexCreate_UAV);
+	FRDGTextureRef AccumColor = GraphBuilder.CreateTexture(AccumColorDesc, TEXT("AerosClouds.AccumColor"));
+	FRDGTextureRef AccumDepth = GraphBuilder.CreateTexture(AccumDepthDesc, TEXT("AerosClouds.AccumDepth"));
 
 	const FMatrix ViewProj = View.ViewMatrices.GetWorldToView() * View.ViewMatrices.ComputeProjectionNoAAMatrix();
 	{
@@ -503,6 +515,7 @@ FScreenPassTexture FAerosCloudViewExtension::Render_RenderThread(FRDGBuilder& Gr
 		P->CurDepth = TraceDepth;
 		P->HistColor = HistColor;
 		P->HistDepth = HistDepth;
+		P->SceneDepthTexture = SceneDepth;
 		P->LinearSampler = TStaticSamplerState<SF_Bilinear, AM_Clamp, AM_Clamp, AM_Clamp>::GetRHI();
 		P->TranslatedToPrevClip = FMatrix44f(TranslatedToPrevClip);
 		P->DeltaTime = DeltaTime;
@@ -512,8 +525,8 @@ FScreenPassTexture FAerosCloudViewExtension::Render_RenderThread(FRDGBuilder& Gr
 		P->OutColor = GraphBuilder.CreateUAV(AccumColor);
 		P->OutDepth = GraphBuilder.CreateUAV(AccumDepth);
 		TShaderMapRef<FTemporalCS> Shader(GetGlobalShaderMap(View.GetFeatureLevel()));
-		FComputeShaderUtils::AddPass(GraphBuilder, RDG_EVENT_NAME("Temporal"), Shader, P,
-			FComputeShaderUtils::GetGroupCount(HalfSize, 8));
+		FComputeShaderUtils::AddPass(GraphBuilder, RDG_EVENT_NAME("Temporal %dx%d", FullSize.X, FullSize.Y), Shader, P,
+			FComputeShaderUtils::GetGroupCount(FullSize, 8));
 	}
 	GraphBuilder.QueueTextureExtraction(AccumColor, &History.Color);
 	GraphBuilder.QueueTextureExtraction(AccumDepth, &History.Depth);

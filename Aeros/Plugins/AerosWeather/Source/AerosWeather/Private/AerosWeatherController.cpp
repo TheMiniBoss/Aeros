@@ -74,7 +74,7 @@ void AAerosWeatherController::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	Super::EndPlay(EndPlayReason);
 }
 
-void AAerosWeatherController::UpdateCustomClouds(UAerosWeatherSubsystem* Sub)
+void AAerosWeatherController::UpdateCustomClouds(UAerosWeatherSubsystem* Sub, float DeltaSeconds)
 {
 	const bool bOn = AerosCloudRender::IsEnabled();
 	if (bOn != bCustomCloudsActive)
@@ -108,6 +108,13 @@ void AAerosWeatherController::UpdateCustomClouds(UAerosWeatherSubsystem* Sub)
 		P.VolumeBlend = Clouds->GetCloudVolumeBlend();
 		P.VolumeWeight = Clouds->GetCloudVolumeWeight();
 		P.NoiseOffsetKm = FVector3f(Clouds->GetCloudNoiseOffsetKm());
+		// Drift of the noise / cumulus field per real second, from its change this frame (the offset
+		// wraps every 10000 km: ignore a jump)
+		const FVector Off = Clouds->GetCloudNoiseOffsetKm();
+		const FVector Step = Off - PrevNoiseOffsetKm;
+		if (DeltaSeconds > 1e-4f && Step.Size2D() < 50.0) NoiseDriftKmS = FVector3f(Step / DeltaSeconds);
+		PrevNoiseOffsetKm = Off;
+		P.DriftKmS = NoiseDriftKmS;
 		// Per real second (the renderer reprojects with the frame time): storm motion x time scale
 		P.MotionKmS = FVector3f(Clouds->GetCloudMotionCmS() * (Sub->IsPaused() ? 0.0 : double(Sub->GetTimeScale())) / 100000.0);
 		for (const Aeros::FFlashEntry& E : Clouds->GetFlashes())
@@ -294,7 +301,7 @@ void AAerosWeatherController::Tick(float DeltaSeconds)
 		}
 	}
 
-	UpdateCustomClouds(Sub);
+	UpdateCustomClouds(Sub, DeltaSeconds);
 
 	if (SkyRecaptureInterval > 0.f && SkyLight && SkyLight->GetLightComponent())
 	{

@@ -31,7 +31,8 @@ struct FAerosCloudRenderParams
 	float VolumeBlend = 1.f;
 	float VolumeWeight = 0.f;
 	FVector3f NoiseOffsetKm = FVector3f::ZeroVector;
-	FVector3f MotionKmS = FVector3f::ZeroVector;   // mean storm motion (reprojection + flash drift)
+	FVector3f MotionKmS = FVector3f::ZeroVector;   // mean storm motion per real second (reprojection)
+	FVector3f DriftKmS = FVector3f::ZeroVector;    // drift of the cumulus field / noise per real second (reprojection)
 	TArray<FAerosCloudFlash, TInlineAllocator<8>> Flashes;
 	// Cloud shadow map (R16F transmittance towards the sun, UAV): rendered every 4th frame and when
 	// the rect moves; the sun's light function M_AerosCloudShadow reads it over the same rect.

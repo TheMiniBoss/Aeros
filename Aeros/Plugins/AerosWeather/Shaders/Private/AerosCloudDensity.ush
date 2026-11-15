@@ -106,6 +106,17 @@ FAerosCloudSample AerosCloudDensity(float3 PosKm, float DistKm, float Octaves)
 		+ AerosCloudOctave(B3.z, Octaves, 2.0) * 0.15);
 	const float bubbles = saturate(0.5 + (BubblesRaw - 0.5) * 1.3);   // the weighted sum is narrower than one channel
 
+	// Fine detail near the camera only: Worley 125 / 62 m (1 km tiles), fully on under ~1.4 km, gone by
+	// ~2.8 km (Octaves 4 -> 3). Mean-zero, and strongest on thin parts, so it sculpts the edges without
+	// changing the average density (no flicker in the mean).
+	const float FineK = saturate(Octaves - 3.0);
+	float FineMod = 0.0;
+	if (FineK > 0.0)
+	{
+		const float2 Fine = DetailNoise.SampleLevel(NoiseSampler, P, 0).gb;
+		FineMod = (dot(Fine, float2(0.6, 0.4)) - 0.5) * FineK;
+	}
+
 	// Erosion (Worley fbm, 4 km tiles) and ice fibres (16 x 16 x 3 km tiles).
 	const float E = AerosCloudOctave(DetailNoise.SampleLevel(NoiseSampler, P / 4.0, 0).a, Octaves, 1.0);
 	const float fib = DetailNoise.SampleLevel(NoiseSampler, P * float3(1.0 / 16.0, 1.0 / 16.0, 1.0 / 3.0), 0).r;
@@ -153,6 +164,7 @@ FAerosCloudSample AerosCloudDensity(float3 PosKm, float DistKm, float Octaves)
 	cv = lerp(cv, cvFar, farK);
 	float cloud = saturate((bubbles - (1.0 - cv) * 1.2 - highMod * 0.1) * 2.0 + cv * 0.6 - 0.1);
 	cloud *= lerp(smoothstep(0.25, 0.45, cv), saturate(cv * 2.0), farK);
+	cloud = saturate(cloud + FineMod * 0.7 * saturate(1.5 - cloud * 1.5) * step(1e-3, cloud));
 
 	// --- 2D anvil: flat top at the tropopause, ragged base and edges.
 	const float anvilBase = 12.4 - (0.5 + 2.0 * anvilCv) * (0.75 + 0.5 * lowFbm);
@@ -187,6 +199,7 @@ FAerosCloudSample AerosCloudDensity(float3 PosKm, float DistKm, float Octaves)
 		const float voxCv = saturate(voxRaw * 2.0);
 		float voxCu = saturate((bubbles - (1.0 - voxCv) * 1.2 - highMod * 0.1) * 2.0 + voxCv * 0.6 - 0.1);
 		voxCu *= smoothstep(0.15, 0.35, voxCv);
+		voxCu = saturate(voxCu + FineMod * 0.7 * saturate(1.5 - voxCu * 1.5) * step(1e-3, voxCu));
 		const float voxIce = saturate((voxRaw - (1.0 - lowFbm) * 0.2 - (1.0 - fib) * 0.12) * 2.5);
 		vox = lerp(voxCu, voxIce, iceK);
 	}

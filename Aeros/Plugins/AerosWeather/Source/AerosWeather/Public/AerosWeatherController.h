@@ -92,7 +92,9 @@ public:
 private:
 	void BindCloudMaterial();
 	/** Feeds the custom cloud renderer and hides the engine VolumetricCloud while it is on. */
-	void UpdateCustomClouds(class UAerosWeatherSubsystem* Sub);
+	void UpdateCustomClouds(class UAerosWeatherSubsystem* Sub, float DeltaSeconds);
+	FVector PrevNoiseOffsetKm = FVector::ZeroVector;
+	FVector3f NoiseDriftKmS = FVector3f::ZeroVector;
 	bool bCustomCloudsActive = false;
 	/** Cloud shadows of the custom renderer: R16F transmittance map read by the sun's light function. */
 	void SetCustomCloudShadows(bool bOn);

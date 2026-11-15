@@ -169,12 +169,12 @@ Blueprint : `Get Aeros Weather`, `Get Weather At`, `Describe Weather`, événeme
 Le `VolumetricCloud` du moteur reprojette son historique avec le seul mouvement de la caméra : le vent, l'évolution des nuages et les éclairs le faisaient scintiller (« dither »). Le plugin trace donc ses nuages lui-même, dans une extension de vue (`FAerosCloudViewExtension`, passe `BeforeDOF`, shaders dans `Shaders/Private/AerosClouds.usf` et `AerosCloudDensity.ush`). Le `VolumetricCloud` est caché tant que `r.AerosClouds` vaut 1 ; à 0 on retrouve l'ancien chemin et son matériau.
 
 * **Densité** : le même champ que l'ancien matériau (cumulus cellulaires, tours, enclumes, nuages en plateau, grille voxel, voile de pluie), sur des bruits 3D générés au démarrage (`AerosCloudNoise`, C++ pur, tuilables, 4 canaux normalisés : Perlin-Worley + Worley 8/16/32 ; détail Worley 4/8/16 + fbm). LOD continu : chaque octave de détail rejoint sa moyenne avec la distance (`AerosCloudOctaves` : 4 près, 1 au-delà de ~11 km), pas de saut de mip.
-* **Tracé** : demi-résolution (quart à `Quality 0`), départ à la caméra quand elle est dans les nuages, pas de 60 m près → 500 m loin, pas doublés dans l'air vide, sortie à T < 0,01.
+* **Tracé** : un pixel sur 4 (1 sur 16 à `Quality 0`), décalé à chaque image dans son bloc ; l'accumulation se fait en pleine résolution, donc chaque pixel reçoit son propre rayon toutes les 4 images (net, pas un agrandissement bilinéaire). Départ à la caméra quand elle est dans les nuages, pas de 60 m près → 500 m loin, pas doublés dans l'air vide, sortie à T < 0,01.
 * **Lumière** : soleil (phase double lobe g 0,6 / -0,25, 3 ordres de diffusion 0,25ⁿ / 0,8ⁿ), ombre vers le soleil sur 2,6 km (6 segments près, 3 loin), ciel = irradiance SH × couleur de la sky light, assombri en bas du nuage et sous une colonne épaisse ; albédo plus gris sous la pluie ; perspective aérienne du moteur devant le nuage (lointain bleuté).
-* **Temps** : accumulation par vue (historique remis à zéro sur coupure de caméra, saut > 2 km, changement de taille, trou de temps), reprojetée avec la caméra **et** le mouvement des orages (× échelle de temps), découpage par variance en YCoCg, poids plus fort quand l'image bouge ou que la grille voxel change.
+* **Temps** : accumulation par vue en pleine résolution (historique remis à zéro sur coupure de caméra, saut > 2 km, changement de taille, trou de temps), relue en Catmull-Rom (une lecture bilinéaire floutait à chaque image en mouvement), reprojetée avec la caméra et une profondeur lissée dans le temps (plus d'ondulation), en essayant deux mouvements, celui des orages et la dérive du vent (cumulus, bruit), et en gardant le plus cohérent ; découpage par variance en YCoCg. Détail fin (Worley 62-125 m) sous ~1,4 km de la caméra seulement.
 * **Éclairs** : jusqu'à 8 (`Aeros::TFlashList`, les plus brillants), ajoutés à chaque image sans passer par l'historique ; échelle physique plafonnée (discrets de jour, lumineux la nuit, pas de ciel blanchi).
 * **Ombres au sol** : carte 512² de transmittance sur 100 km autour de la caméra (recalée par pas de 1 km, un quart des lignes par image), lue par la fonction de lumière `M_AerosCloudShadow` du soleil ; la sky light baisse sous un ciel couvert.
-* **Coût** (RTX 4060, 1336×751, `Quality 2`) : 2,8-3,5 ms (`profilegpu`), GPU total +0,5 ms par rapport à l'ancien chemin.
+* **Coût** (RTX 4060, 1336×751, `Quality 2`) : 3,1-3,7 ms (`profilegpu`), GPU total +0,5 ms par rapport à l'ancien chemin.
 
 | Variable | Rôle |
 |---|---|
@@ -186,7 +186,7 @@ Le `VolumetricCloud` du moteur reprojette son historique avec le seul mouvement 
 | `r.AerosClouds.Wind` | test : mouvement imposé pour la reprojection (m/s vers +X) |
 | `r.AerosClouds.LogResets` | 1 : journalise chaque remise à zéro de l'historique |
 
-Mesures dans la visite : `-AerosFlickerShots` (paire à 0,2 s), `-AerosFlickerOnSwap` (paire au moment d'un échange de grille voxel), `-AerosTourStepSeconds=N` (étapes après la première), `-AerosTourExec=profilegpu` (temps GPU dans le log à chaque capture). Script de mesure : `Tests/Visual/flicker.py`.
+Mesures dans la visite : `-AerosFlickerShots` (paire à 0,2 s), `-AerosFlickerOnSwap` (paire au moment d'un échange de grille voxel), `-AerosTourStepSeconds=N` (étapes après la première), `-AerosTourExec=profilegpu` (temps GPU dans le log à chaque capture), `-AerosTourMove=V` / `-AerosTourYaw=D` (caméra qui avance de côté en m/s et tourne en °/s pendant les étapes après la première : flou et ondulation en mouvement). Script de mesure : `Tests/Visual/flicker.py`.
 
 ### Matériaux
 

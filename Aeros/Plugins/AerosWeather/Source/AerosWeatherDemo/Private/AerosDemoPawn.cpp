@@ -434,6 +434,19 @@ void AAerosDemoPawn::TickTour(float DeltaSeconds)
 	float StepSeconds = Step.Duration;
 	float ForcedSeconds = 0.f;
 	if (TourStep > 0 && FParse::Value(FCommandLine::Get(), TEXT("AerosTourStepSeconds="), ForcedSeconds) && ForcedSeconds > 0.f) StepSeconds = ForcedSeconds;
+	// -AerosTourMove=V (m/s, sideways) and -AerosTourYaw=D (deg/s): the camera keeps moving during the steps
+	// after the first, so the shots show the clouds in motion (blur, wobble of the reprojection)
+	if (TourStep > 0)
+	{
+		float MoveMs = 0.f, YawDs = 0.f;
+		FParse::Value(FCommandLine::Get(), TEXT("AerosTourMove="), MoveMs);
+		FParse::Value(FCommandLine::Get(), TEXT("AerosTourYaw="), YawDs);
+		if (MoveMs != 0.f) SetActorLocation(GetActorLocation() + GetControlRotation().RotateVector(FVector::RightVector) * MoveMs * 100.f * DeltaSeconds);
+		if (YawDs != 0.f)
+		{
+			if (AController* MoveC = GetController()) MoveC->SetControlRotation(MoveC->GetControlRotation() + FRotator(0.f, YawDs * DeltaSeconds, 0.f));
+		}
+	}
 	// -AerosFlickerOnSwap: the flicker pair is taken when a new voxel grid replaces the old one (after 3 s)
 	const bool bSwapShots = FParse::Param(FCommandLine::Get(), TEXT("AerosFlickerOnSwap"));
 	bool bSwapNow = false;

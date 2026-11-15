@@ -10,6 +10,7 @@
 
 float3 CameraKm;
 float3 MotionKmS;       // mean storm motion (reprojection only: the data is already advected)
+float3 DriftKmS;        // drift of the cumulus field and the noise (wind), per real second
 float  TimeS;
 uint   FrameIndex;
 int2   ViewMin;
@@ -17,6 +18,7 @@ int2   HalfSize;
 int2   FullSize;
 float  AmbientScale;
 int    TraceScale;     // full-res pixels per traced pixel (2, or 4 at quality 0)
+int2   JitterOffset;   // this frame's traced pixel inside each TraceScale x TraceScale block
 int    MaxSteps;
 int    LightSteps;
 float  HazeScale;
@@ -132,8 +134,9 @@ void TraceCS(uint2 Id : SV_DispatchThreadID)
 	{
 		return;
 	}
-	int2 FullPix = ViewMin + min(int2(Id) * TraceScale + TraceScale / 2, FullSize - 1);
-	float3 Dir = RayDirFromSvPos(float2(ViewMin) + float2(Id) * TraceScale + TraceScale * 0.5);
+	// One pixel of each block per frame, cycling: the full-res accumulation rebuilds every pixel.
+	int2 FullPix = ViewMin + min(int2(Id) * TraceScale + JitterOffset, FullSize - 1);
+	float3 Dir = RayDirFromSvPos(float2(FullPix) + 0.5);
 	float SceneKm = SceneDistKm(FullPix, Dir);
 
 	float3 SunDir = View.AtmosphereLightDirection[0].xyz;
@@ -284,62 +287,172 @@ float3 ClipToBox(float3 q, float3 Center, float3 Extent)
 	return m > 1.0 ? Center + d / m : q;
 }
 
+// History read with a 5-tap Catmull-Rom (bilinear taps): a bilinear read, repeated every frame while
+// the camera moves, blurred the accumulated clouds.
+float4 SampleHistoryCatmullRom(float2 Uv)
+{
+	float2 Size = float2(FullSize);
+	float2 Pos = Uv * Size;
+	float2 C1 = floor(Pos - 0.5) + 0.5;
+	float2 f = Pos - C1;
+	float2 w0 = f * (-0.5 + f * (1.0 - 0.5 * f));
+	float2 w1 = 1.0 + f * f * (-2.5 + 1.5 * f);
+	float2 w2 = f * (0.5 + f * (2.0 - 1.5 * f));
+	float2 w3 = f * f * (-0.5 + 0.5 * f);
+	float2 w12 = w1 + w2;
+	float2 Uv0 = (C1 - 1.0) / Size;
+	float2 Uv3 = (C1 + 2.0) / Size;
+	float2 Uv12 = (C1 + w2 / w12) / Size;
+	float4 R = HistColor.SampleLevel(LinearSampler, float2(Uv12.x, Uv0.y), 0) * (w12.x * w0.y)
+		+ HistColor.SampleLevel(LinearSampler, float2(Uv0.x, Uv12.y), 0) * (w0.x * w12.y)
+		+ HistColor.SampleLevel(LinearSampler, Uv12, 0) * (w12.x * w12.y)
+		+ HistColor.SampleLevel(LinearSampler, float2(Uv3.x, Uv12.y), 0) * (w3.x * w12.y)
+		+ HistColor.SampleLevel(LinearSampler, float2(Uv12.x, Uv3.y), 0) * (w12.x * w3.y);
+	float W = w12.x * w0.y + w0.x * w12.y + w12.x * w12.y + w3.x * w12.y + w12.x * w3.y;
+	return max(R / W, 0.0);
+}
+
+// Screen uv last frame of the point at FrontKm along Dir now, which moved by Motion (km/s) since.
+float2 ReprojectUv(float3 Dir, float FrontKm, float3 Motion, out bool bValid)
+{
+	float3 PPrev = View.TranslatedWorldCameraOrigin + Dir * FrontKm * 1e5 - Motion * 1e5 * DeltaTime;
+	float4 Clip = mul(float4(PPrev, 1.0), TranslatedToPrevClip);
+	float2 Uv = (Clip.xy / max(Clip.w, 1e-6)) * float2(0.5, -0.5) + 0.5;
+	bValid = Clip.w > 0.0 && all(Uv > 0.0) && all(Uv < 1.0);
+	return Uv;
+}
+
+// Depth-aware bilinear estimate of the new frame at a full-res pixel from the jittered traced samples
+// (down-weighted where a sample saw a different scene depth: clouds behind a mountain stay off it).
+void UpsampleCurrent(int2 Id, float SceneKm, out float4 Col, out float Front)
+{
+	float2 HP = float2(Id - JitterOffset) / float(TraceScale);
+	int2 B = int2(floor(HP));
+	float2 F = HP - float2(B);
+	float4 Acc = 0.0;
+	float FrontAcc = 0.0;
+	float W = 0.0;
+	float4 Best = float4(0, 0, 0, 1);
+	float BestFront = 60.0;
+	float BestErr = 1e9;
+	[unroll] for (int j = 0; j < 4; ++j)
+	{
+		int2 o = int2(j & 1, j >> 1);
+		int2 c = clamp(B + o, 0, HalfSize - 1);
+		float wb = (o.x != 0 ? F.x : 1.0 - F.x) * (o.y != 0 ? F.y : 1.0 - F.y);
+		float2 D = CurDepth.Load(int3(c, 0)).xy;
+		float4 C = CurColor.Load(int3(c, 0));
+		float Err = abs(D.y - SceneKm) / max(min(D.y, SceneKm), 0.05);
+		float w = wb * exp(-Err * 8.0);
+		Acc += C * w;
+		FrontAcc += D.x * w;
+		W += w;
+		if (Err < BestErr)
+		{
+			BestErr = Err;
+			Best = C;
+			BestFront = D.x;
+		}
+	}
+	Col = W > 1e-4 ? Acc / W : Best;
+	Front = W > 1e-4 ? FrontAcc / W : BestFront;
+}
+
+// Full-resolution accumulation. Each pixel gets a fresh traced sample every TraceScale^2 frames
+// (jittered trace); in between it keeps its reprojected history, clipped to the new frame's local
+// statistics. The history is read with Catmull-Rom (a bilinear read blurred it while moving).
 [numthreads(8, 8, 1)]
 void TemporalCS(uint2 Id : SV_DispatchThreadID)
 {
-	if (any(Id >= (uint2)HalfSize))
+	if (any(Id >= (uint2)FullSize))
 	{
 		return;
 	}
-	float4 Cur = CurColor.Load(int3(Id, 0));
-	float2 CurD = CurDepth.Load(int3(Id, 0)).xy;
+	int2 Pix = ViewMin + int2(Id);
+	float3 Dir = RayDirFromSvPos(float2(Pix) + 0.5);
+	float SceneKm = SceneDistKm(Pix, Dir);
+	int2 HalfId = min(int2(Id) / TraceScale, HalfSize - 1);
+	bool bFresh = all((int2(Id) % TraceScale) == JitterOffset);
 
-	// 3x3 statistics of the new frame: YCoCg mean and sigma (variance clipping), min / max of alpha.
+	float4 Cur;
+	float CurFront;
+	UpsampleCurrent(int2(Id), SceneKm, Cur, CurFront);
+	if (bFresh)
+	{
+		// The pixel's own sample, with a little of its neighbours: one jittered ray is noisy.
+		Cur = lerp(Cur, CurColor.Load(int3(HalfId, 0)), 0.7);
+		CurFront = lerp(CurFront, CurDepth.Load(int3(HalfId, 0)).x, 0.7);
+	}
+
+	// 3x3 statistics of the new frame around this pixel: YCoCg mean and sigma (variance clipping),
+	// min / max of alpha, and an opacity-weighted front depth (one jittered sample is too noisy).
 	float3 M1 = 0.0;
 	float3 M2 = 0.0;
 	float AMin = Cur.a;
 	float AMax = Cur.a;
+	float FrontSum = 0.0;
+	float FrontW = 0.0;
 	[unroll] for (int y = -1; y <= 1; ++y)
 	{
 		[unroll] for (int x = -1; x <= 1; ++x)
 		{
-			float4 c = CurColor.Load(int3(clamp(int2(Id) + int2(x, y), 0, HalfSize - 1), 0));
+			int2 Pc = clamp(HalfId + int2(x, y), 0, HalfSize - 1);
+			float4 c = CurColor.Load(int3(Pc, 0));
 			float3 q = RGBToYCoCgHDR(c.rgb);
 			M1 += q;
 			M2 += q * q;
 			AMin = min(AMin, c.a);
 			AMax = max(AMax, c.a);
+			float wf = 1.0 - c.a + 1e-3;
+			FrontSum += CurDepth.Load(int3(Pc, 0)).x * wf;
+			FrontW += wf;
 		}
 	}
 	M1 /= 9.0;
 	float3 Sigma = sqrt(max(M2 / 9.0 - M1 * M1, 0.0));
+	float FrontNow = min(FrontSum / FrontW, SceneKm);
 
 	float4 Result = Cur;
+	float FrontOut = min(CurFront, SceneKm);
 	if (bHistoryValid != 0u)
 	{
-		float3 Dir = RayDirFromSvPos(float2(ViewMin) + float2(Id) * TraceScale + TraceScale * 0.5);
-		float FrontKm = min(CurD.x, CurD.y);
-		// The cloud at P now was at P - motion * dt last frame.
-		float3 PPrev = View.TranslatedWorldCameraOrigin + Dir * FrontKm * 1e5 - MotionKmS * 1e5 * DeltaTime;
-		float4 Clip = mul(float4(PPrev, 1.0), TranslatedToPrevClip);
-		if (Clip.w > 0.0)
+		// Depth: blend the reprojected history depth with this frame's (smooth over time), then
+		// reproject again with it, so the history is not pulled around by the depth noise (wobble).
+		bool bV0;
+		float2 Uv0 = ReprojectUv(Dir, FrontNow, MotionKmS, bV0);
+		float FrontHist = bV0 ? HistDepth.SampleLevel(LinearSampler, Uv0, 0).x : FrontNow;
+		float FrontStable = min(lerp(FrontHist, FrontNow, 0.25), SceneKm);
+		FrontOut = FrontStable;
+
+		// Two motions: storms (voxel grid) move with MotionKmS, the cumulus field and the noise drift
+		// with the wind (DriftKmS). Keep the history sample that matches the new frame best.
+		bool bVs, bVd;
+		float2 UvS = ReprojectUv(Dir, FrontStable, MotionKmS, bVs);
+		float2 UvD = ReprojectUv(Dir, FrontStable, DriftKmS, bVd);
+		float4 Hs = bVs ? SampleHistoryCatmullRom(UvS) : Cur;
+		float4 Hd = bVd ? SampleHistoryCatmullRom(UvD) : Cur;
+		float Es = bVs ? length(RGBToYCoCgHDR(Hs.rgb) - M1) + abs(Hs.a - Cur.a) * (M1.x + 1e-3) : 1e30;
+		float Ed = bVd ? length(RGBToYCoCgHDR(Hd.rgb) - M1) + abs(Hd.a - Cur.a) * (M1.x + 1e-3) : 1e30;
+		bool bUseD = Ed < Es;
+		if (bVs || bVd)
 		{
-			float2 Uv = (Clip.xy / Clip.w) * float2(0.5, -0.5) + 0.5;
-			if (all(Uv > 0.0) && all(Uv < 1.0))
-			{
-				float4 H = HistColor.SampleLevel(LinearSampler, Uv, 0);
-				H.rgb = YCoCgToRGBHDR(ClipToBox(RGBToYCoCgHDR(H.rgb), M1, Sigma * 1.25));
-				H.a = clamp(H.a, AMin, AMax);
-				// Faster response where the image moves (reprojection smears) or the data changes.
-				float2 CurUv = (float2(Id) + 0.5) / float2(HalfSize);
-				float PixelMotion = length((Uv - CurUv) * float2(HalfSize));
-				float w = clamp(NewWeight + PixelMotion * 0.02 + BlendBoost, NewWeight, 0.6);
-				Result = lerp(H, Cur, w);
-			}
+			float4 H = bUseD ? Hd : Hs;
+			float2 Uv = bUseD ? UvD : UvS;
+			H.rgb = YCoCgToRGBHDR(ClipToBox(RGBToYCoCgHDR(H.rgb), M1, Sigma * 1.25));
+			H.a = clamp(H.a, AMin, AMax);
+			float2 CurUv = (float2(Id) + 0.5) / float2(FullSize);
+			float PixelMotion = length((Uv - CurUv) * float2(FullSize));
+			// A fresh sample weighs TraceScale x the base weight (a pixel gets one every TraceScale^2 frames:
+			// longer memory, less grain, the sharp history carries the detail); between
+			// samples only motion and data changes pull towards the (softer) upsampled estimate.
+			float Boost = PixelMotion * 0.0025 + BlendBoost;
+			float w = bFresh ? clamp(NewWeight * float(TraceScale) + Boost, NewWeight, 0.6)
+			                 : clamp(Boost * 0.5, 0.0, 0.3);
+			Result = lerp(H, Cur, w);
 		}
 	}
 	OutColor[Id] = Result;
-	OutDepth[Id] = CurD;
+	OutDepth[Id] = float2(FrontOut, SceneKm);
 }
 
 // ------------------------------------------------------------------ composite
@@ -384,66 +497,9 @@ void CompositeCS(uint2 Id : SV_DispatchThreadID)
 	float3 Dir = RayDirFromSvPos(float2(Pix) + 0.5);
 	float SceneKm = SceneDistKm(Pix, Dir);
 
-	float2 HP = (float2(Id) + 0.5) / float(TraceScale) - 0.5;
-	int2 B = int2(floor(HP));
-	float2 F = HP - float2(B);
-	float4 Cloud;
-	float Front;
-	if (SceneKm >= 399.0)
-	{
-		// Against the sky: a 4x4 tent over the premultiplied half-res result (no depth to respect),
-		// which softens the silhouettes instead of leaving a stair-stepped rim.
-		float4 Acc = 0.0;
-		float FrontAcc = 0.0;
-		float W = 0.0;
-		[unroll] for (int j = -1; j <= 2; ++j)
-		{
-			[unroll] for (int i = -1; i <= 2; ++i)
-			{
-				int2 c = clamp(B + int2(i, j), 0, HalfSize - 1);
-				float2 d = abs(float2(i, j) - F);
-				float w = max(0.0, 1.0 - d.x * 0.5) * max(0.0, 1.0 - d.y * 0.5);
-				float4 Col = CloudColor.Load(int3(c, 0));
-				Acc += Col * w;
-				FrontAcc += CloudDepth.Load(int3(c, 0)).x * w * (1.0 - Col.a);
-				W += w;
-			}
-		}
-		Cloud = Acc / max(W, 1e-4);
-		Front = (1.0 - Cloud.a) > 1e-4 ? FrontAcc / (W * (1.0 - Cloud.a)) : 60.0;
-	}
-	else
-	{
-		// Bilinear taps, down-weighted where the half-res sample saw a different scene depth
-		// (keeps clouds behind a mountain from bleeding onto it).
-		float4 Acc = 0.0;
-		float FrontAcc = 0.0;
-		float W = 0.0;
-		float4 Best = float4(0, 0, 0, 1);
-		float BestFront = 60.0;
-		float BestErr = 1e9;
-		[unroll] for (int j = 0; j < 4; ++j)
-		{
-			int2 o = int2(j & 1, j >> 1);
-			int2 c = clamp(B + o, 0, HalfSize - 1);
-			float wb = (o.x != 0 ? F.x : 1.0 - F.x) * (o.y != 0 ? F.y : 1.0 - F.y);
-			float2 D = CloudDepth.Load(int3(c, 0)).xy;
-			float4 Col = CloudColor.Load(int3(c, 0));
-			float Err = abs(D.y - SceneKm) / max(min(D.y, SceneKm), 0.05);
-			float w = wb * exp(-Err * 8.0);
-			Acc += Col * w;
-			FrontAcc += D.x * w;
-			W += w;
-			if (Err < BestErr)
-			{
-				BestErr = Err;
-				Best = Col;
-				BestFront = D.x;
-			}
-		}
-		Cloud = W > 1e-4 ? Acc / W : Best;
-		Front = W > 1e-4 ? FrontAcc / W : BestFront;
-	}
+	// The accumulation is already full resolution.
+	float4 Cloud = CloudColor.Load(int3(Id, 0));
+	float Front = CloudDepth.Load(int3(Id, 0)).x;
 	float FrontKm = min(Front, SceneKm);
 
 	// Haze in front of the cloud: rgb * T_ap + L_ap * (1 - T).
