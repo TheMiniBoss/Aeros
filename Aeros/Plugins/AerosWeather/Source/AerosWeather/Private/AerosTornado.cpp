@@ -352,9 +352,12 @@ FAerosCloudTornado AAerosTornado::MakeRenderDescriptor(float CloudBaseM, float K
 	// Over water the actor stands on the sea floor (the sea plane has no collision): the funnel starts at
 	// the sea surface (a waterspout)
 	FVector L = GetActorLocation();
+	bool bOverWater = false;
 	if (const UAerosWeatherSubsystem* SeaSub = UAerosWeatherSubsystem::Get(this))
 	{
-		L.Z = FMath::Max(L.Z, double(SeaSub->GetSimulationSettings().SeaLevelZ));
+		const double SeaZ = SeaSub->GetSimulationSettings().SeaLevelZ;
+		bOverWater = L.Z < SeaZ - 100.0;
+		L.Z = FMath::Max(L.Z, SeaZ);
 	}
 	D.GroundKm = FVector3f(float(L.X * 1e-5), float(L.Y * 1e-5), float(L.Z * 1e-5));
 	D.CloudBaseKm = H * 0.001f;
@@ -368,6 +371,8 @@ FAerosCloudTornado AAerosTornado::MakeRenderDescriptor(float CloudBaseM, float K
 	// Violent tornadoes split into orbiting sub-vortices (2 seeds in 3)
 	D.NumSubVortices = (EFRating >= 4 && uint32(Seed) % 3u != 0u) ? 3 + int32(uint32(Seed) % 3u) : 0;
 	D.SubPhase = RenderSubPhase;
+	// Dust whirl colour: sea spray over water, earth on land
+	D.DustTint = bOverWater ? FVector3f(0.85f, 0.88f, 0.92f) : FVector3f(0.45f, 0.38f, 0.3f);
 	return D;
 }
 

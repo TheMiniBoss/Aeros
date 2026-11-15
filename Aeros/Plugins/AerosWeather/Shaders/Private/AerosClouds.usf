@@ -223,7 +223,7 @@ void TraceCS(uint2 Id : SV_DispatchThreadID)
 				float UpOd = OpticalDepthAlong(P, float3(0, 0, 1), t, 1.0, UpSeg, 1);
 				// Side faces still see the horizon sky: the column above only takes away up to 75 %.
 				float3 Amb = SkyAmb * lerp(0.3, 1.0, Smp.Height) * lerp(0.25, 1.0, exp(-UpOd * 0.05));
-				float Albedo = lerp(0.92, 0.55, Smp.Dark);
+				float3 Albedo = lerp(0.92, 0.55, Smp.Dark) * Smp.Tint;
 				float3 Lin = (SunE * S + Amb) * Albedo;
 				float Tr = exp(-Sigma * Step);
 				Scat += T * Lin * (1.0 - Tr);

@@ -38,6 +38,7 @@ struct FAerosCloudSample
 	float Density;   // 0-1 (extinction per km = Density * 80 * (1 + 3 * Dark))
 	float Dark;      // 0-1, rain greying
 	float Height;    // 0 at the cloud base, 1 at its top (ambient light)
+	float3 Tint;     // albedo tint (1 = cloud; earth or spray colour in a tornado's dust whirl)
 };
 
 float AerosCloudOctaves(float DistKm)
@@ -100,6 +101,20 @@ float2 AerosTornadoAxisSlope(uint i, float HKm)
 	return dB / Base;
 }
 
+// Wall cloud of tornado i: a lowered, rotating part of the base around the funnel's top.
+float AerosWallRadiusKm(uint i)
+{
+	return clamp(15.0 * TornadoC[i].w, 1.0, 2.0);
+}
+
+float AerosWallBottomKm(uint i)
+{
+	float Base = TornadoA[i].w;
+	float Strength = saturate(TornadoC[i].z / 60.0);
+	// 0.2-0.6 km lower than the base with strength, but never more than 30 % of the base height
+	return Base - min(lerp(0.2, 0.6, Strength) * Strength, 0.3 * Base);
+}
+
 // Radius (km) of everything tornado i draws at height HKm (funnel + dust near the ground) plus a margin.
 float AerosTornadoBoundAtKm(uint i, float HKm)
 {
@@ -107,7 +122,8 @@ float AerosTornadoBoundAtKm(uint i, float HKm)
 	float Rf = min(AerosFunnelRadiusKm(TornadoC[i].z, RcKm, TornadoA[i].w, TornadoD[i].x, HKm), AerosFunnelCapKm(RcKm));
 	float Dust = HKm < 0.35 ? RcKm * 6.0 : 0.0;
 	float Sub = TornadoD[i].w > 0.0 ? RcKm * 1.0 : 0.0;
-	return max(Rf * 1.15, max(Dust, Sub)) + 0.05;
+	float Wall = HKm > AerosWallBottomKm(i) - 0.05 ? AerosWallRadiusKm(i) : 0.0;
+	return max(max(Rf * 1.15, Wall), max(Dust, Sub)) + 0.05;
 }
 
 // True when PosKm is inside tornado i's bounding volume (ground -> base + 0.6 km, around the leaning axis).
@@ -142,7 +158,7 @@ void AerosTornadoRayInterval(uint i, float3 OriginKm, float3 Dir, out float t0, 
 	float RcKm = max(TornadoC[i].w, 0.005);
 	float2 Mid = TornadoA[i].xy + 0.5 * TornadoC[i].xy;
 	float Lean = 0.5 * length(TornadoC[i].xy) + max(length(TornadoB[i].xy), length(TornadoB[i].zw - 0.5 * TornadoC[i].xy));
-	float R = max(AerosFunnelCapKm(RcKm) * 1.15, RcKm * 6.0) + 0.05 + Lean;
+	float R = max(max(AerosFunnelCapKm(RcKm) * 1.15, RcKm * 6.0), AerosWallRadiusKm(i)) + 0.05 + Lean;
 	t0 = 0.0;
 	t1 = 1e9;
 	// Slab in z
@@ -187,9 +203,9 @@ void AerosTornadoRayInterval(uint i, float3 OriginKm, float3 Dir, out float t0, 
 
 // Rotating striation noise around tornado i's axis: the sample point is turned with the vortex, so the
 // pattern spins rigidly; stretched along the height. Smooth noise only (nothing under ~10 m).
-float AerosTornadoStriation(uint i, float2 Rel, float HKm, float Scale)
+float AerosTornadoStriation(uint i, float2 Rel, float HKm, float Scale, float PhaseScale)
 {
-	float Ph = TornadoD[i].y;
+	float Ph = TornadoD[i].y * PhaseScale;
 	float c = cos(Ph);
 	float s = sin(Ph);
 	float2 R = float2(c * Rel.x + s * Rel.y, -s * Rel.x + c * Rel.y);
@@ -221,7 +237,7 @@ float AerosFunnelDensity(uint i, float3 PosKm, out float Dark)
 	float Dens = 0.0;
 	if (Rf > 0.0)
 	{
-		float n = AerosTornadoStriation(i, Rel, H, max(Rf * 1.5, 0.04));
+		float n = AerosTornadoStriation(i, Rel, H, max(Rf * 1.5, 0.04), 1.0);
 		float RfMod = Rf * (1.0 + 0.2 * (n - 0.5));
 		float Skin = clamp(Rf * 0.1, 0.005, 0.015);
 		// With sub-vortices the parent is only a faint veil of debris and mist around them
@@ -249,11 +265,68 @@ float AerosFunnelDensity(uint i, float3 PosKm, out float Dark)
 	return Dens;
 }
 
-// Density added by the tornadoes at PosKm (funnel; debug bounds with r.AerosClouds.TornadoDebug).
-float AerosTornadoDensity(float3 PosKm, out float Dark)
+// Wall cloud: a bowl hanging under the base (lowest at the funnel, rising to the base at its rim), with a
+// ragged rim and spiral striations turning slower than the funnel.
+float AerosWallDensity(uint i, float3 PosKm)
+{
+	float H = PosKm.z - TornadoA[i].z;
+	float Base = TornadoA[i].w;
+	float Bottom = AerosWallBottomKm(i);
+	if (H < Bottom - 0.05 || H > Base + 0.05)
+	{
+		return 0.0;
+	}
+	float2 C = AerosTornadoAxis(i, Base);
+	float2 Rel = PosKm.xy - C;
+	float Rw = AerosWallRadiusKm(i);
+	float d = length(Rel);
+	float n = AerosTornadoStriation(i, Rel, H, 0.35, 0.15);
+	float Rim = Rw * (1.0 + 0.2 * (n - 0.5));
+	if (d > Rim)
+	{
+		return 0.0;
+	}
+	float x = saturate(d / Rim);
+	float LocalBottom = lerp(Bottom, Base, x * x) + (n - 0.5) * 0.06;
+	float Ang = atan2(Rel.y, Rel.x) - TornadoD[i].y * 0.15;
+	float Spiral = 0.5 + 0.5 * sin(4.0 * Ang + 18.0 * x);
+	float Dens = smoothstep(LocalBottom - 0.02, LocalBottom + 0.04, H) * (1.0 - smoothstep(0.8, 1.0, x));
+	return Dens * (0.45 + 0.15 * Spiral);   // lighter than the funnel, which stands out darker
+}
+
+// Dust whirl at the ground: where the vortex's surface wind passes ~30 m/s, low density, earth or spray tint.
+float AerosDustDensity(uint i, float3 PosKm)
+{
+	float H = PosKm.z - TornadoA[i].z;
+	float Vmax = TornadoC[i].z;
+	// 50-200 m high with the wind, and lower than a third of the cloud base; spray over water stays lower
+	float Spray = TornadoE[i].r > 0.7 ? 0.5 : 1.0;
+	float Top = min(lerp(0.05, 0.2, saturate(Vmax / 100.0)), 0.33 * TornadoA[i].w) * Spray;
+	if (H < 0.0 || H > Top)
+	{
+		return 0.0;
+	}
+	float2 Rel = PosKm.xy - AerosTornadoAxis(i, H);
+	float dM = length(Rel) * 1000.0;
+	float RcM = max(TornadoC[i].w * 1000.0, 5.0);
+	float X = dM / RcM;
+	float V = Vmax * 2.0 * X / (1.0 + X * X);   // Aeros::Funnel::TangentialWindMs
+	if (V < 30.0)
+	{
+		return 0.0;
+	}
+	float n = AerosTornadoStriation(i, Rel, H, 0.06, 1.0);
+	float Fall = 1.0 - smoothstep(0.3 * Top, Top, H);
+	return 0.03 * saturate((V - 30.0) / 20.0) * Fall * (0.5 + n);
+}
+
+// Density added by the tornadoes at PosKm (funnel, wall cloud, dust whirl; debug bounds with
+// r.AerosClouds.TornadoDebug). Tint is the albedo colour of what dominates (dust: earth or spray).
+float AerosTornadoDensity(float3 PosKm, out float Dark, out float3 Tint)
 {
 	float D = 0.0;
 	Dark = 0.0;
+	Tint = 1.0;
 	for (uint i = 0; i < NumTornadoes; ++i)
 	{
 		if (!AerosInTornadoBounds(i, PosKm))
@@ -270,6 +343,21 @@ float AerosTornadoDensity(float3 PosKm, out float Dark)
 		{
 			D = F;
 			Dark = FDark;
+			Tint = 1.0;
+		}
+		float Wl = AerosWallDensity(i, PosKm) * TornadoF[i].x;
+		if (Wl > D)
+		{
+			D = Wl;
+			Dark = 0.35;
+			Tint = 1.0;
+		}
+		float Du = AerosDustDensity(i, PosKm) * TornadoF[i].x;
+		if (Du > D)
+		{
+			D = Du;
+			Dark = 0.0;
+			Tint = TornadoE[i].rgb;
 		}
 	}
 	return D;
@@ -281,6 +369,7 @@ FAerosCloudSample AerosCloudDensity(float3 PosKm, float DistKm, float Octaves)
 	Out.Density = 0.0;
 	Out.Dark = 0.0;
 	Out.Height = 0.5;
+	Out.Tint = 1.0;
 
 	const float AltKm = PosKm.z;
 	const float3 P = PosKm - NoiseOffsetKm;
@@ -304,7 +393,8 @@ FAerosCloudSample AerosCloudDensity(float3 PosKm, float DistKm, float Octaves)
 	const float conv    = Sx.a;
 
 	float TornadoDark = 0.0;
-	const float TornadoDens = NumTornadoes > 0u ? AerosTornadoDensity(PosKm, TornadoDark) : 0.0;
+	float3 TornadoTint = 1.0;
+	const float TornadoDens = NumTornadoes > 0u ? AerosTornadoDensity(PosKm, TornadoDark, TornadoTint) : 0.0;
 
 	// Nothing here: no 2D cloud, no rain, no anvil, no shelf, outside the voxel grid and no tornado.
 	if (cover < 1e-3 && Wx.a < 1e-3 && anvilCv < 1e-3 && gust < 1e-3 && VoxIn < 1e-3 && TornadoDens <= 0.0)
@@ -441,6 +531,7 @@ FAerosCloudSample AerosCloudDensity(float3 PosKm, float DistKm, float Octaves)
 	if (TornadoDens > density)
 	{
 		dark = max(dark, TornadoDark);
+		Out.Tint = TornadoTint;
 	}
 	density = max(density, TornadoDens);
 
