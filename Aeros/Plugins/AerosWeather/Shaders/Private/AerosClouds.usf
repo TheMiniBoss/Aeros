@@ -32,6 +32,10 @@ float VolumeBlend;
 float VolumeWeight;
 float3 NoiseOffsetKm;
 
+Texture3D ShapeNoise;    // RGBA: Perlin-Worley, Worley 8 / 16 / 32 cells (tileable)
+Texture3D DetailNoise;   // RGBA: Worley 4 / 8 / 16 cells, fbm
+SamplerState NoiseSampler;
+
 static const float BaseKm = 0.1;
 static const float TopKm = 16.0;
 static const float SigmaPerKm = 60.0;   // extinction of a dense cumulus core (0.06 / m)
@@ -93,7 +97,8 @@ float CloudDensity(float3 pKm, float Octaves)
 	float vp = VolumePrev.SampleLevel(DataSampler, a, 0).r;
 	float vc = VolumeCur.SampleLevel(DataSampler, b, 0).r;
 	float Inside = (all(b > 0.0) && all(b < 1.0)) ? 1.0 : 0.0;
-	return saturate(lerp(vp, vc, VolumeBlend) * 2.0) * VolumeWeight * Inside;
+	float n = ShapeNoise.SampleLevel(NoiseSampler, (pKm - NoiseOffsetKm) / 6.0, 0).r;   // Task 2: proves the noise binding
+	return saturate(lerp(vp, vc, VolumeBlend) * 2.0) * n * VolumeWeight * Inside;
 }
 
 // ------------------------------------------------------------------ helpers

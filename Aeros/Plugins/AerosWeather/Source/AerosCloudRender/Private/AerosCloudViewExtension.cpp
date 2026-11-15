@@ -2,6 +2,8 @@
 
 #include "AerosCloudViewExtension.h"
 #include "AerosCloudRender.h"
+#include "AerosCloudNoise.h"
+#include "Async/Async.h"
 
 #include "DataDrivenShaderPlatformInfo.h"
 #include "GlobalShader.h"
@@ -53,6 +55,12 @@ namespace AerosCloudRenderInternal
 		SHADER_PARAMETER(FVector3f, NoiseOffsetKm)
 	END_SHADER_PARAMETER_STRUCT()
 
+	BEGIN_SHADER_PARAMETER_STRUCT(FNoiseParameters, )
+		SHADER_PARAMETER_RDG_TEXTURE(Texture3D, ShapeNoise)
+		SHADER_PARAMETER_RDG_TEXTURE(Texture3D, DetailNoise)
+		SHADER_PARAMETER_SAMPLER(SamplerState, NoiseSampler)
+	END_SHADER_PARAMETER_STRUCT()
+
 	class FTraceCS : public FGlobalShader
 	{
 	public:
@@ -63,6 +71,7 @@ namespace AerosCloudRenderInternal
 			SHADER_PARAMETER_STRUCT_REF(FViewUniformShaderParameters, View)
 			SHADER_PARAMETER_STRUCT_INCLUDE(FCommonParameters, Common)
 			SHADER_PARAMETER_STRUCT_INCLUDE(FCloudDataParameters, Data)
+			SHADER_PARAMETER_STRUCT_INCLUDE(FNoiseParameters, Noise)
 			SHADER_PARAMETER_RDG_TEXTURE(Texture2D, SceneDepthTexture)
 			SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float4>, OutColor)
 			SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float2>, OutDepth)
@@ -148,9 +157,59 @@ namespace AerosCloudRenderInternal
 	}
 }
 
+/** CPU-side noise with its mip chains (box filtered, wrapped), ready for upload. */
+struct FAerosCloudNoiseData
+{
+	struct FVolume { int32 Size = 0; TArray<TArray<uint8>> Mips; };
+	FVolume Shape;
+	FVolume Detail;
+	std::atomic<bool> bReady{ false };
+};
+
 namespace AerosCloudRenderInternal
 {
 	TWeakPtr<FAerosCloudViewExtension, ESPMode::ThreadSafe> GExtension;
+
+	void BuildMips(const std::vector<uint8_t>& Level0, int32 Size, FAerosCloudNoiseData::FVolume& Out)
+	{
+		Out.Size = Size;
+		Out.Mips.Reset();
+		Out.Mips.Emplace(Level0.data(), int32(Level0.size()));
+		for (int32 S = Size / 2; S >= 1; S /= 2)
+		{
+			const TArray<uint8>& Src = Out.Mips.Last();
+			const int32 P = S * 2;
+			TArray<uint8> Dst;
+			Dst.SetNumUninitialized(S * S * S * 4);
+			for (int32 Z = 0; Z < S; ++Z) for (int32 Y = 0; Y < S; ++Y) for (int32 X = 0; X < S; ++X) for (int32 C = 0; C < 4; ++C)
+			{
+				int32 Sum = 0;
+				for (int32 K = 0; K < 8; ++K)
+				{
+					const int32 Sx = X * 2 + (K & 1), Sy = Y * 2 + ((K >> 1) & 1), Sz = Z * 2 + (K >> 2);
+					Sum += Src[((Sz * P + Sy) * P + Sx) * 4 + C];
+				}
+				Dst[((Z * S + Y) * S + X) * 4 + C] = uint8((Sum + 4) / 8);
+			}
+			Out.Mips.Add(MoveTemp(Dst));
+		}
+	}
+
+	TRefCountPtr<IPooledRenderTarget> UploadVolume(FRHICommandListImmediate& RHICmdList, const FAerosCloudNoiseData::FVolume& V, const TCHAR* Name)
+	{
+		const FRHITextureCreateDesc Desc = FRHITextureCreateDesc::Create3D(Name, FIntVector(V.Size), PF_R8G8B8A8)
+			.SetNumMips(uint8(V.Mips.Num()))
+			.SetFlags(ETextureCreateFlags::ShaderResource)
+			.SetInitialState(ERHIAccess::SRVMask);
+		FTextureRHIRef Tex = RHICmdList.CreateTexture(Desc);
+		for (int32 Mip = 0; Mip < V.Mips.Num(); ++Mip)
+		{
+			const uint32 S = uint32(FMath::Max(V.Size >> Mip, 1));
+			const FUpdateTextureRegion3D Region(0, 0, 0, 0, 0, 0, S, S, S);
+			RHICmdList.UpdateTexture3D(Tex, Mip, Region, S * 4, S * S * 4, V.Mips[Mip].GetData());
+		}
+		return CreateRenderTarget(Tex, Name);
+	}
 
 	FRDGTextureRef RegisterOr(FRDGBuilder& GraphBuilder, FTextureResource* Resource, const TCHAR* Name, bool bVolume)
 	{
@@ -189,6 +248,31 @@ void FAerosCloudViewExtension::SetGlobal(const TSharedPtr<FAerosCloudViewExtensi
 FAerosCloudViewExtension::FAerosCloudViewExtension(const FAutoRegister& AutoRegister)
 	: FSceneViewExtensionBase(AutoRegister)
 {
+	// About 2 s of work: generate on a worker, the clouds start once it is uploaded.
+	NoiseData = MakeShared<FAerosCloudNoiseData, ESPMode::ThreadSafe>();
+	TSharedPtr<FAerosCloudNoiseData, ESPMode::ThreadSafe> Data = NoiseData;
+	Async(EAsyncExecution::ThreadPool, [Data]()
+	{
+		AerosCloudRenderInternal::BuildMips(AerosCloudNoise::MakeShape(128, 1), 128, Data->Shape);
+		AerosCloudRenderInternal::BuildMips(AerosCloudNoise::MakeDetail(32, 2), 32, Data->Detail);
+		Data->bReady = true;
+	});
+}
+
+bool FAerosCloudViewExtension::UploadNoise_RenderThread(FRHICommandListImmediate& RHICmdList)
+{
+	if (ShapeNoiseRT.IsValid())
+	{
+		return true;
+	}
+	if (!NoiseData.IsValid() || !NoiseData->bReady)
+	{
+		return false;
+	}
+	ShapeNoiseRT = AerosCloudRenderInternal::UploadVolume(RHICmdList, NoiseData->Shape, TEXT("AerosClouds.ShapeNoise"));
+	DetailNoiseRT = AerosCloudRenderInternal::UploadVolume(RHICmdList, NoiseData->Detail, TEXT("AerosClouds.DetailNoise"));
+	NoiseData.Reset();
+	return true;
 }
 
 bool FAerosCloudViewExtension::IsActiveThisFrame_Internal(const FSceneViewExtensionContext& Context) const
@@ -210,7 +294,7 @@ FScreenPassTexture FAerosCloudViewExtension::Render_RenderThread(FRDGBuilder& Gr
 	using namespace AerosCloudRenderInternal;
 
 	const FScreenPassTexture SceneColor = FScreenPassTexture::CopyFromSlice(GraphBuilder, Inputs.GetInput(EPostProcessMaterialInput::SceneColor));
-	if (!SceneColor.IsValid() || !Inputs.SceneTextures.SceneTextures)
+	if (!SceneColor.IsValid() || !Inputs.SceneTextures.SceneTextures || !UploadNoise_RenderThread(GraphBuilder.RHICmdList))
 	{
 		return SceneColor;
 	}
@@ -255,6 +339,9 @@ FScreenPassTexture FAerosCloudViewExtension::Render_RenderThread(FRDGBuilder& Gr
 		P->Data.VolumeBlend = Data.VolumeBlend;
 		P->Data.VolumeWeight = Data.VolumeWeight;
 		P->Data.NoiseOffsetKm = Data.NoiseOffsetKm;
+		P->Noise.ShapeNoise = GraphBuilder.RegisterExternalTexture(ShapeNoiseRT);
+		P->Noise.DetailNoise = GraphBuilder.RegisterExternalTexture(DetailNoiseRT);
+		P->Noise.NoiseSampler = TStaticSamplerState<SF_Trilinear, AM_Wrap, AM_Wrap, AM_Wrap>::GetRHI();
 		P->SceneDepthTexture = SceneDepth;
 		P->OutColor = GraphBuilder.CreateUAV(TraceColor);
 		P->OutDepth = GraphBuilder.CreateUAV(TraceDepth);

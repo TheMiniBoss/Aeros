@@ -8,6 +8,7 @@
 #include "AerosCloudRender.h"
 
 struct FScreenPassTexture;
+struct FAerosCloudNoiseData;
 struct FPostProcessMaterialInputs;
 
 /**
@@ -42,6 +43,12 @@ private:
 	FScreenPassTexture Render_RenderThread(FRDGBuilder& GraphBuilder, const FSceneView& View, const FPostProcessMaterialInputs& Inputs);
 
 	FAerosCloudRenderParams RTParams;
+
+	// Generated noise: built on a worker at startup, uploaded once on the render thread.
+	TSharedPtr<FAerosCloudNoiseData, ESPMode::ThreadSafe> NoiseData;
+	TRefCountPtr<IPooledRenderTarget> ShapeNoiseRT;
+	TRefCountPtr<IPooledRenderTarget> DetailNoiseRT;
+	bool UploadNoise_RenderThread(FRHICommandListImmediate& RHICmdList);
 
 	// Render-thread state (one view is enough for the spike).
 	TRefCountPtr<IPooledRenderTarget> HistoryColor;
