@@ -21,6 +21,7 @@ Les matériaux et les cartes sont des fichiers binaires (`.uasset`, `.umap`) que
 | `Materials/MPC_AerosWeather` | Material Parameter Collection remplie par le plugin à chaque image (mouillé, neige, cendres, crue, secousse…) |
 | `Materials/T_AerosDefaultWeather` | petite texture linéaire par défaut (nécessaire au matériau nuages) |
 | `Materials/M_AerosVolumetricCloud` | nuages volumétriques pilotés par la simulation : champ de cumulus cellulaire (bases plates, sommets en tourelles creusés façon Nubis), tours d'orage, enclumes, nuages en plateau, bruits 3D Perlin-Worley du moteur (un seul canal, étiré sur 0-1) |
+| `Materials/M_AerosCloudShadow` | fonction de lumière du soleil : ombre des nuages du rendu maison (lit la carte de transmittance `AerosCloudShadowMap`, fondu au bord des 100 km) |
 | `Materials/M_AerosGround` | sol du paysage : herbe / sable / roche / neige (masques en couleur de sommet), qui se mouille, s'enneige, blanchit sous la grêle, grisit sous la cendre |
 | `Materials/M_AerosSea` | mer et lacs opaques (un plan au niveau de la mer), petites vagues qui bougent |
 | `Materials/M_AerosWater` | eau translucide des crues, ondes de tempête et tsunamis |
@@ -112,6 +113,7 @@ UAerosWeatherSubsystem (UTickableWorldSubsystem)   <-- cerveau, point d'accès g
  │    └─ AAerosVolcano       (placé dans le niveau : cendres, lave, bombes, nuées ardentes)
  ├─ UAerosLiveWeather                              <-- météo réelle (Open-Meteo, HTTP + JSON)
  └─ UAerosCloudManager                             <-- textures GPU + Material Parameter Collection
+FAerosCloudViewExtension (module AerosCloudRender) <-- rendu maison des nuages (passe avant DOF, r.AerosClouds 1)
 AAerosWeatherController   (dans le niveau : réglages, soleil, brouillard, matériau nuages)
 AAerosWeatherRadar        (radar Doppler rotatif -> texture UI)
 UAerosPrecipitationComponent (pluie/neige/grêle/sable/cendre locales : Niagara ou rendu instancié de secours)
@@ -162,6 +164,30 @@ Blueprint : `Get Aeros Weather`, `Get Weather At`, `Describe Weather`, événeme
 * `TornadoSystem` : `Strength`, `CoreRadius`, `MaxWind`. `LightningSystem` : `Start`, `End`.
 * Sons : pluie, impacts de grêle, tonnerre (retard = distance / 343 m/s), tornade, vent.
 
+### Rendu des nuages (module `AerosCloudRender`, `r.AerosClouds 1` par défaut)
+
+Le `VolumetricCloud` du moteur reprojette son historique avec le seul mouvement de la caméra : le vent, l'évolution des nuages et les éclairs le faisaient scintiller (« dither »). Le plugin trace donc ses nuages lui-même, dans une extension de vue (`FAerosCloudViewExtension`, passe `BeforeDOF`, shaders dans `Shaders/Private/AerosClouds.usf` et `AerosCloudDensity.ush`). Le `VolumetricCloud` est caché tant que `r.AerosClouds` vaut 1 ; à 0 on retrouve l'ancien chemin et son matériau.
+
+* **Densité** : le même champ que l'ancien matériau (cumulus cellulaires, tours, enclumes, nuages en plateau, grille voxel, voile de pluie), sur des bruits 3D générés au démarrage (`AerosCloudNoise`, C++ pur, tuilables, 4 canaux normalisés : Perlin-Worley + Worley 8/16/32 ; détail Worley 4/8/16 + fbm). LOD continu : chaque octave de détail rejoint sa moyenne avec la distance (`AerosCloudOctaves` : 4 près, 1 au-delà de ~11 km), pas de saut de mip.
+* **Tracé** : demi-résolution (quart à `Quality 0`), départ à la caméra quand elle est dans les nuages, pas de 60 m près → 500 m loin, pas doublés dans l'air vide, sortie à T < 0,01.
+* **Lumière** : soleil (phase double lobe g 0,6 / -0,25, 3 ordres de diffusion 0,25ⁿ / 0,8ⁿ), ombre vers le soleil sur 2,6 km (6 segments près, 3 loin), ciel = irradiance SH × couleur de la sky light, assombri en bas du nuage et sous une colonne épaisse ; albédo plus gris sous la pluie ; perspective aérienne du moteur devant le nuage (lointain bleuté).
+* **Temps** : accumulation par vue (historique remis à zéro sur coupure de caméra, saut > 2 km, changement de taille, trou de temps), reprojetée avec la caméra **et** le mouvement des orages (× échelle de temps), découpage par variance en YCoCg, poids plus fort quand l'image bouge ou que la grille voxel change.
+* **Éclairs** : jusqu'à 8 (`Aeros::TFlashList`, les plus brillants), ajoutés à chaque image sans passer par l'historique ; échelle physique plafonnée (discrets de jour, lumineux la nuit, pas de ciel blanchi).
+* **Ombres au sol** : carte 512² de transmittance sur 100 km autour de la caméra (recalée par pas de 1 km, un quart des lignes par image), lue par la fonction de lumière `M_AerosCloudShadow` du soleil ; la sky light baisse sous un ciel couvert.
+* **Coût** (RTX 4060, 1336×751, `Quality 2`) : 2,8-3,5 ms (`profilegpu`), GPU total +0,5 ms par rapport à l'ancien chemin.
+
+| Variable | Rôle |
+|---|---|
+| `r.AerosClouds` | 1 rendu maison (défaut), 0 ancien `VolumetricCloud` |
+| `r.AerosClouds.Quality` | 0-3 : pas max 96 / 128 / 192 / 256, échantillons de soleil 3 / 4 / 6 / 8, tracé au quart de résolution à 0 (défaut 2) |
+| `r.AerosClouds.HistoryBlend` | poids de l'image neuve dans l'accumulation (0,1) |
+| `r.AerosClouds.Ambient`, `r.AerosClouds.Haze` | échelle du ciel et de la perspective aérienne (1 = physique) |
+| `r.AerosClouds.Flash` | > 0 : éclairs de test près de la caméra ; < 0 : aucun éclair (mesures) |
+| `r.AerosClouds.Wind` | test : mouvement imposé pour la reprojection (m/s vers +X) |
+| `r.AerosClouds.LogResets` | 1 : journalise chaque remise à zéro de l'historique |
+
+Mesures dans la visite : `-AerosFlickerShots` (paire à 0,2 s), `-AerosFlickerOnSwap` (paire au moment d'un échange de grille voxel), `-AerosTourStepSeconds=N` (étapes après la première), `-AerosTourExec=profilegpu` (temps GPU dans le log à chaque capture). Script de mesure : `Tests/Visual/flicker.py`.
+
 ### Matériaux
 
 * **Nuages voxel (branche `claude/voxel-clouds`)** : `FAerosCloudVolume` (C++ pur, `Core/`) construit une grille 3D de 320 × 320 × 48 voxels (100 × 100 km × 16 km, voxels de 312 m, recentrée par pas de 10 km) autour de la caméra à partir de la simulation : tour inclinée (LCL → EL), sommet qui dépasse, enclume étalée par le vent de 500 hPa (les enclumes qui se recouvrent mélangent leur hauteur de sommet, s'amincissent vers les bords) avec mammatus irréguliers (bruit de valeurs sur les km monde), cœur de précipitations, nuage-mur, ligne de tours de flanc, nuage en plateau, nappes stratiformes. Reconstruite ≈ 1 fois/s sur un thread de travail, envoyée dans deux textures 3D en alternance (fondu), masquée après un saut > 40 km jusqu'à la nouvelle grille. Le matériau la lit (déformée et érodée par le bruit 3D), garde les cumulus procéduraux, repasse en 2D au-delà de 44-50 km ; au-dessus de 9-11,5 km le nuage est de la glace (enclume, haut des tours) : lisse et fibreux (bruit d'érosion étiré 16 × 16 × 1,5 km) au lieu d'être creusé en bulles ; la lecture verticale de la grille est déformée au-dessus de 6-9 km (±0,5 km de houle, ±0,2 km de bosses) pour donner du relief au dessus des enclumes ; les enclumes divergent et se courbent (`FAerosCloudVolume::AnvilBend` : ±10° au départ, ±25° au bout, bruit de 40 km, même règle en 2D et en 3D) ; les bruits de détail sont lus à un mip choisi selon la distance (LOD) ; ombre des nuages sur 15 km avec 2× les échantillons (25 km / 10 échantillons laissait l'enclume d'un blanc plat), éclairage « Volumetric Advanced » (phase double lobe, 2 octaves de diffusion multiple). Coupes de contrôle : `-AerosDumpMaps` → `Saved/AerosDebug/*_vox_*.png`. Coût GPU (`stat unit`, 1336×751) : ≈ 12 ms vu du sol, 17-20 ms au-dessus d'un champ de cumulus ; réglable par `AAerosWeatherController::CloudSampleScale` (1,25 par défaut) ; `bSharpCloudTracing` (faux par défaut : le tracé demi-résolution, mode 1, scintillait même à x1) et `CloudUpsamplingMode` (-1 = réglage du projet). Mesure du scintillement : `-AerosTourTimeScale=1 -AerosFlickerShots` (deux captures à 0,2 s d'écart, `<étape>_b.png`) ; `-AerosCloudMode=N` essaie un autre `r.VolumetricRenderTarget.Mode`. Le matériau évite tout détail sous ~200 m (bruits au mip 2-3 selon la distance), pilote les déformations par des bruits lisses (dont un second échantillon décorrélé à 9 km par tuile), garde un cœur plein, supprime les miettes hors du contour, et fond le champ de cumulus en couverture douce au-delà de 30-70 km.
@@ -180,7 +206,7 @@ Simulation : x = est, y = nord. Unreal : X = est, **−Y = nord**. Toutes les AP
 ## Tests
 
 * `Session Frontend → Automation → Aeros` : thermodynamique, scénario supercellule, déterminisme, catastrophes (crue, tsunami, haboob, cendres, blizzard).
-* Sans Unreal : `Tests/Standalone` (`./build.sh` ou `build.bat`) compile le cœur et lance les mêmes tests en quelques minutes. Voir `Tests/Standalone/README.md`.
+* Sans Unreal : `Tests/Standalone` (`./build.sh` ou `build.bat`) compile le cœur et lance les mêmes tests en quelques minutes, plus les tests des bruits de nuages (tuilables, étendue, canaux décorrélés, déterminisme) et de la liste d'éclairs. Voir `Tests/Standalone/README.md`.
 
 ## Suite (roadmap)
 

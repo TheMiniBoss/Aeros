@@ -1,17 +1,20 @@
 # TODO Aeros
 
 Cocher `[x]` quand c'est fait, ~~barrer~~ ce qu'on abandonne, ajouter des lignes au fil de l'eau.
-Branche de travail actuelle : `claude/voxel-clouds`.
+Branche de travail actuelle : `claude/clouds-v2` (rendu maison des nuages).
 
 ## Nuages et orages
 
 - [ ] Les nuages sautent à chaque minute de l'horloge. Piste : la simulation ne recalcule les orages qu'une fois par minute simulée (`StormTimer`), mais la grille voxel est reconstruite à chaque état (~30 s), et l'advection repart de zéro.
-- [ ] Bords « salés » sur les images fixes (pixels du tracé au quart de résolution) : plus de scintillement, mais le grain se voit.
+- [x] Bords « salés » sur les images fixes : le rendu maison trace en demi-résolution et lisse les silhouettes contre le ciel.
 - [ ] Vues du sol, les cumulus proches cachent les tours d'orage lointaines.
-- [ ] Il manque une face vraiment sombre du côté opposé au soleil.
+- [x] Face sombre du côté opposé au soleil (rendu maison : ombre vers le soleil + ciel SH × couleur de la sky light).
 - [ ] Nuage-mur des tornades : encore un disque en maillage, devrait venir des nuages volumétriques.
-- [ ] Lueur des éclairs dans les nuages la nuit : réduite (x6 → x2), à vérifier en image.
-- [ ] Re-mesurer le coût GPU, éditeur seul, sans jeu en parallèle.
+- [ ] Lueur des éclairs la nuit (rendu maison, 400 cd/m² plafonné) : vue faible sous un orage, à juger avec l'utilisateur.
+- [ ] Dessus des enclumes en « courbes de niveau » vu d'avion (couches voxel de 333 m + seuil de glace x2,5 + auto-ombrage).
+- [ ] Time-lapse x60 : le détail bulleux glisse (dérive du bruit = vent, pas le mouvement des orages) ; à x600 le flou de mouvement reste.
+- [ ] Tour d'orage très bleutée à 25 km (perspective aérienne du moteur) : à régler avec `r.AerosClouds.Haze` si besoin.
+- [x] Coût GPU du rendu maison mesuré : 2,8-3,5 ms à `Quality 2` (`-AerosTourExec=profilegpu`).
 
 ## Autres effets et décor
 
@@ -33,6 +36,7 @@ Branche de travail actuelle : `claude/voxel-clouds`.
 
 ## Fait récemment
 
+- [x] Rendu maison des nuages (`AerosCloudRender`, `r.AerosClouds 1`) : plus de scintillement ni de dither quand les nuages bougent ou avec les éclairs, LOD continu, ombres au sol, 8 éclairs.
 - [x] Scintillement des nuages (mode 0, bruits lissés, cœur plein, plus de miettes).
 - [x] Enclumes : plus de blocs superposés, glace fibreuse, relief, enclumes qui divergent et se courbent.
 - [x] Orages qui glissent entre deux états (grille advectée, carte de forme en fondu), cumulus sans « pop ».

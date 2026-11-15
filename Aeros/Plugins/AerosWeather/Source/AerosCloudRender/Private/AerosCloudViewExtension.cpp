@@ -21,8 +21,8 @@
 
 namespace AerosCloudRenderInternal
 {
-	TAutoConsoleVariable<int32> CVarEnable(TEXT("r.AerosClouds"), 0,
-		TEXT("Aeros custom cloud renderer (spike). 0 off, 1 on."), ECVF_RenderThreadSafe);
+	TAutoConsoleVariable<int32> CVarEnable(TEXT("r.AerosClouds"), 1,
+		TEXT("Aeros cloud renderer: 1 = custom ray march (default), 0 = engine VolumetricCloud with the old material."), ECVF_RenderThreadSafe);
 	TAutoConsoleVariable<float> CVarWind(TEXT("r.AerosClouds.Wind"), 0.f,
 		TEXT("Test override of the storm motion used for reprojection, m/s along +X (0 = use the simulation)."), ECVF_RenderThreadSafe);
 	TAutoConsoleVariable<float> CVarFlash(TEXT("r.AerosClouds.Flash"), 0.f,
