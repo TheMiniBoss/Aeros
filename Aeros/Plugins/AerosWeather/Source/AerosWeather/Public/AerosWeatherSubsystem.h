@@ -107,6 +107,11 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Aeros|Control")
 	void InjectThermalBubble(FVector WorldLocation, float RadiusKm = 6.f, float DeltaTemperature = 3.f, float DeltaMoisture_gkg = 2.f);
 
+	/** Spontaneous storm initiation (1 = normal, 0 = only from thermal bubbles). bClearExisting removes
+	 *  every running storm (updrafts, clouds, rain, cold pools). Gameplay: "one storm only". */
+	UFUNCTION(BlueprintCallable, Category = "Aeros|Control")
+	void SetConvectionControl(float NaturalInitiation = 1.f, bool bClearExisting = false);
+
 	UFUNCTION(BlueprintCallable, Category = "Aeros|Control")
 	void SpawnHurricane(FVector WorldLocation, float CentralPressure = 975.f, float RadiusMaxWindKm = 35.f);
 

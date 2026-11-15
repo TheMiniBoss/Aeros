@@ -152,6 +152,10 @@ public:
 	void SetClock(int32 DayOfYear, float Hour);
 	/** Warm/moist bubble: starts convection when the atmosphere allows it. */
 	void InjectThermal(const FVector& World, float RadiusKm, float DeltaT, float DeltaQ);
+	/** Scale of spontaneous storm initiation (1 = normal, 0 = storms start only from InjectThermal).
+	 *  bClearConvection removes every running updraft, mesocyclone, cold pool, cloud and rain. */
+	void SetConvectionControl(float NaturalInitiationScale, bool bClearConvection);
+	float GetNaturalInitiation() const { return NaturalInitiation; }
 	/** Spawn a tropical cyclone seed / mature storm at a world location. */
 	int32 SpawnCyclone(const FVector& World, float CentralPressure, float RmaxKm);
 	/** Shift the domain so that it is centred near World (whole cells). */
@@ -210,6 +214,7 @@ private:
 	int32 NX = 0, NY = 0;
 	float DX = 2000.f;     // m
 	float Coriolis = 1e-4f;
+	float NaturalInitiation = 1.f;   // see SetConvectionControl
 
 	TArray<FAerosCell> Cells;
 	TArray<FAerosCell> Prev; // dynamics scratch

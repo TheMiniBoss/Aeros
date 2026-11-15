@@ -29,6 +29,7 @@ enum class EAerosNetCommand : uint8
 	VolcanicEmission,
 	SetLatitude,
 	DesertRegions,
+	ConvectionControl,
 };
 
 USTRUCT()

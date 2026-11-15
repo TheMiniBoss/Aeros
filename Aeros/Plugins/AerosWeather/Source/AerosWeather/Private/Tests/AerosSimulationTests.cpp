@@ -72,6 +72,46 @@ bool FAerosSupercellTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FAerosSingleStormTest, "Aeros.Simulation.SingleStorm",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FAerosSingleStormTest::RunTest(const FString& Parameters)
+{
+	// A game can ask for one storm only: natural initiation off, running convection cleared, then a
+	// single warm bubble. Without the bubble the outbreak stays quiet.
+	FAerosSimulationSettings S;
+	S.GridSizeX = S.GridSizeY = 96;
+	S.Scenario = EAerosScenario::SupercellOutbreak;
+	S.StartDayOfYear = 140;
+	S.StartHour = 12.f;
+	S.LatitudeDeg = 37.f;
+
+	FAerosSimulation Free, Quiet, One;
+	Free.Initialize(S);
+	Quiet.Initialize(S);
+	One.Initialize(S);
+	for (int32 Step = 0; Step < 120; ++Step) { Free.Step(30.f); Quiet.Step(30.f); One.Step(30.f); } // 1 h: storms start
+	float ConvBefore = 0.f;
+	for (const FAerosCell& C : Quiet.GetCells()) ConvBefore = FMath::Max(ConvBefore, C.Conv);
+
+	Quiet.SetConvectionControl(0.f, true);
+	One.SetConvectionControl(0.f, true);
+	float ConvAfterClear = 0.f;
+	for (const FAerosCell& C : Quiet.GetCells()) ConvAfterClear = FMath::Max(ConvAfterClear, C.Conv);
+	One.InjectThermal(FVector::ZeroVector, 6.f, 3.f, 0.002f);
+
+	for (int32 Step = 0; Step < 240; ++Step) { Free.Step(30.f); Quiet.Step(30.f); One.Step(30.f); } // 2 h
+	float QuietConv = 0.f, OneW = 0.f;
+	for (const FAerosCell& C : Quiet.GetCells()) QuietConv = FMath::Max(QuietConv, C.Conv);
+	for (const FAerosCell& C : One.GetCells()) OneW = FMath::Max(OneW, C.W);
+	TestTrue(TEXT("The outbreak starts storms on its own"), ConvBefore > 0.1f && Free.GetStorms().Num() > 2);
+	TestTrue(TEXT("Clearing removes running convection"), ConvAfterClear == 0.f && Quiet.GetStorms().Num() == 0);
+	TestTrue(TEXT("Natural initiation off: no new storm"), QuietConv < 0.05f && Quiet.GetStorms().Num() == 0);
+	TestTrue(TEXT("One bubble: deep convection"), OneW > 20.f);
+	TestTrue(TEXT("One bubble: one storm (a split may add one)"), One.GetStorms().Num() >= 1 && One.GetStorms().Num() <= 2);
+	return true;
+}
+
 #endif
 
 #if WITH_DEV_AUTOMATION_TESTS

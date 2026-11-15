@@ -1066,7 +1066,7 @@ void FAerosSimulation::ColumnPhysics(int32 I, int32 J, FAerosCell& C, float Dt) 
 		{
 			// Compensating subsidence: the more of the domain is convecting, the harder new cells start
 			const float Suppress = FMath::Clamp(1.f - ConvectiveFraction / 0.12f, 0.f, 1.f);
-			const float Chance = FMath::Clamp((ETrig + C.CIN) / FMath::Max(ETrig, 1.f), 0.f, 1.f) * Suppress * Dt / (6.f * 3600.f);
+			const float Chance = FMath::Clamp((ETrig + C.CIN) / FMath::Max(ETrig, 1.f), 0.f, 1.f) * Suppress * NaturalInitiation * Dt / (6.f * 3600.f);
 			// Decided per 3x3 block so a new storm starts ~6 km wide (resolvable), not as one pixel
 			if (Hash01(Settings.Seed ^ 0x5bd1e995, GI / 3, GJ / 3, StepSalt) < Chance) C.Conv = 0.2f;
 		}
@@ -2048,6 +2048,22 @@ void FAerosSimulation::InjectThermal(const FVector& World, float RadiusKm, float
 			if (DeltaT > 0.f && G0 > 0.3f) C.Conv = FMath::Max(C.Conv, 0.25f * G0);
 		}
 	}
+}
+
+void FAerosSimulation::SetConvectionControl(float NaturalInitiationScale, bool bClearConvection)
+{
+	NaturalInitiation = FMath::Clamp(NaturalInitiationScale, 0.f, 1.f);
+	if (!bClearConvection) return;
+	for (FAerosCell& C : Cells)
+	{
+		C.Conv = 0.f;
+		C.Meso = 0.f;
+		C.W = 0.f;
+		C.ColdPool = 0.f;
+		C.Cloud = 0.f;
+		C.Rain = 0.f;
+	}
+	Storms.Reset();
 }
 
 void FAerosSimulation::InjectRain(const FVector& World, float RadiusKm, float Millimetres)

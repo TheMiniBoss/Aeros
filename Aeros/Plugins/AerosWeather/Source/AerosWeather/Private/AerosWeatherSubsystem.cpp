@@ -390,6 +390,9 @@ void UAerosWeatherSubsystem::ApplyNetCommand(uint8 Type, const FVector& Location
 	case EAerosNetCommand::ThermalBubble:
 		Cmd = [Location, Params](FAerosSimulation& Sim) { Sim.InjectThermal(Location, float(Params.X), float(Params.Y), float(Params.Z)); };
 		break;
+	case EAerosNetCommand::ConvectionControl:
+		Cmd = [Params](FAerosSimulation& Sim) { Sim.SetConvectionControl(float(Params.X), Params.Y > 0.5); };
+		break;
 	case EAerosNetCommand::Hurricane:
 		Cmd = [Location, Params](FAerosSimulation& Sim) { Sim.SpawnCyclone(Location, float(Params.X), float(Params.Y)); };
 		break;
@@ -498,6 +501,11 @@ FAerosDateTime UAerosWeatherSubsystem::GetDateTime() const
 void UAerosWeatherSubsystem::SetDateTime(int32 DayOfYear, float Hour)
 {
 	IssueCommand(uint8(EAerosNetCommand::SetClock), FVector::ZeroVector, FVector4(DayOfYear, Hour, 0, 0));
+}
+
+void UAerosWeatherSubsystem::SetConvectionControl(float NaturalInitiation, bool bClearExisting)
+{
+	IssueCommand(uint8(EAerosNetCommand::ConvectionControl), FVector::ZeroVector, FVector4(NaturalInitiation, bClearExisting ? 1.f : 0.f, 0, 0));
 }
 
 void UAerosWeatherSubsystem::SetScenario(EAerosScenario Scenario)
