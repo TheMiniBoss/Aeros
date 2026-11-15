@@ -126,6 +126,7 @@ namespace AerosCloudRenderInternal
 			SHADER_PARAMETER_RDG_TEXTURE(Texture2D, SceneDepthTexture)
 			SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float4>, OutColor)
 			SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float2>, OutDepth)
+			SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float>, OutMask)
 		END_SHADER_PARAMETER_STRUCT()
 
 		static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
@@ -146,6 +147,7 @@ namespace AerosCloudRenderInternal
 			SHADER_PARAMETER_STRUCT_INCLUDE(FCommonParameters, Common)
 			SHADER_PARAMETER_RDG_TEXTURE(Texture2D, CurColor)
 			SHADER_PARAMETER_RDG_TEXTURE(Texture2D, CurDepth)
+			SHADER_PARAMETER_RDG_TEXTURE(Texture2D, CurMask)
 			SHADER_PARAMETER_RDG_TEXTURE(Texture2D, HistColor)
 			SHADER_PARAMETER_RDG_TEXTURE(Texture2D, HistDepth)
 			SHADER_PARAMETER_RDG_TEXTURE(Texture2D, SceneDepthTexture)
@@ -512,6 +514,7 @@ FScreenPassTexture FAerosCloudViewExtension::Render_RenderThread(FRDGBuilder& Gr
 	const FRDGTextureDesc DepthDesc = FRDGTextureDesc::Create2D(HalfSize, PF_G32R32F, FClearValueBinding::Black, TexCreate_ShaderResource | TexCreate_UAV);
 	FRDGTextureRef TraceColor = GraphBuilder.CreateTexture(ColorDesc, TEXT("AerosClouds.TraceColor"));
 	FRDGTextureRef TraceDepth = GraphBuilder.CreateTexture(DepthDesc, TEXT("AerosClouds.TraceDepth"));
+	FRDGTextureRef TraceMask = GraphBuilder.CreateTexture(FRDGTextureDesc::Create2D(HalfSize, PF_R16F, FClearValueBinding::Black, TexCreate_ShaderResource | TexCreate_UAV), TEXT("AerosClouds.TornadoMask"));
 	{
 		FTraceCS::FParameters* P = GraphBuilder.AllocParameters<FTraceCS::FParameters>();
 		P->View = View.ViewUniformBuffer;
@@ -521,6 +524,7 @@ FScreenPassTexture FAerosCloudViewExtension::Render_RenderThread(FRDGBuilder& Gr
 		P->SceneDepthTexture = SceneDepth;
 		P->OutColor = GraphBuilder.CreateUAV(TraceColor);
 		P->OutDepth = GraphBuilder.CreateUAV(TraceDepth);
+		P->OutMask = GraphBuilder.CreateUAV(TraceMask);
 		TShaderMapRef<FTraceCS> Shader(GetGlobalShaderMap(View.GetFeatureLevel()));
 		FComputeShaderUtils::AddPass(GraphBuilder, RDG_EVENT_NAME("Trace %dx%d", HalfSize.X, HalfSize.Y), Shader, P,
 			FComputeShaderUtils::GetGroupCount(HalfSize, 8));
@@ -543,6 +547,7 @@ FScreenPassTexture FAerosCloudViewExtension::Render_RenderThread(FRDGBuilder& Gr
 		P->Common = Common;
 		P->CurColor = TraceColor;
 		P->CurDepth = TraceDepth;
+		P->CurMask = TraceMask;
 		P->HistColor = HistColor;
 		P->HistDepth = HistDepth;
 		P->SceneDepthTexture = SceneDepth;

@@ -447,6 +447,18 @@ void AAerosDemoPawn::TickTour(float DeltaSeconds)
 			if (AController* MoveC = GetController()) MoveC->SetControlRotation(MoveC->GetControlRotation() + FRotator(0.f, YawDs * DeltaSeconds, 0.f));
 		}
 	}
+	// -AerosTourShotEvery=N: an extra shot <Shot>_tNN.png every N seconds of the steps after the first
+	float ShotEvery = 0.f;
+	if (TourStep > 0 && FParse::Value(FCommandLine::Get(), TEXT("AerosTourShotEvery="), ShotEvery) && ShotEvery > 0.f)
+	{
+		if (TourNextExtraShot <= 0.f) TourNextExtraShot = ShotEvery;
+		if (TourTime >= TourNextExtraShot)
+		{
+			const FString Extra = FString::Printf(TEXT("%s_t%03d.png"), *Step.Shot, FMath::RoundToInt(TourNextExtraShot));
+			FScreenshotRequest::RequestScreenshot(FPaths::ScreenShotDir() / TEXT("AerosTour") / Extra, true, false);
+			TourNextExtraShot += ShotEvery;
+		}
+	}
 	// -AerosFlickerOnSwap: the flicker pair is taken when a new voxel grid replaces the old one (after 3 s)
 	const bool bSwapShots = FParse::Param(FCommandLine::Get(), TEXT("AerosFlickerOnSwap"));
 	bool bSwapNow = false;
@@ -516,6 +528,7 @@ void AAerosDemoPawn::TickTour(float DeltaSeconds)
 	bTourShotTaken = false;
 	bTourShotBTaken = false;
 	TourSwapCount = -1;
+	TourNextExtraShot = 0.f;
 	if (!Tour.IsValidIndex(TourStep))
 	{
 		StopTour();

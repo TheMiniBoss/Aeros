@@ -96,6 +96,7 @@ private:
 	bool bTourShotBTaken = false; // -AerosFlickerShots: second picture 0.2 s later
 	float TourShotATime = 0.f;     // step time of the first picture (the second one follows 0.2 s later)
 	int32 TourSwapCount = -1;      // -AerosFlickerOnSwap: voxel grid swaps seen when the step started
+	float TourNextExtraShot = 0.f; // -AerosTourShotEvery=N: step time of the next extra shot
 	bool bQuitAfterTour = false;
 	float AutoTourDelay = -1.f;
 	bool bPausedForShaders = false;

@@ -26,6 +26,7 @@ float  HazeScale;
 Texture2D SceneDepthTexture;
 RWTexture2D<float4> OutColor;
 RWTexture2D<float2> OutDepth;
+RWTexture2D<float> OutMask;   // trace: share of the ray's opacity inside tornado volumes (fast history there)
 
 #include "/Plugin/AerosWeather/Private/AerosCloudDensity.ush"
 
@@ -149,6 +150,7 @@ void TraceCS(uint2 Id : SV_DispatchThreadID)
 	float3 Scat = 0.0;
 	float T = 1.0;
 	float DepthAcc = 0.0;
+	float TornadoOpacity = 0.0;   // opacity gathered inside tornado volumes (OutMask)
 
 	// Slab [0, SlabTopKm]: the march starts at the camera when it is inside the cloud layers.
 	float t0 = 0.0;
@@ -185,7 +187,7 @@ void TraceCS(uint2 Id : SV_DispatchThreadID)
 		float Jitter = IGN(float2(Id), FrameIndex);
 		float t = t0 + AerosCloudStepKm(t0) * Jitter;
 		int FineSteps = 0;
-		[loop] for (int i = 0; i < MaxSteps + 200 && t < t1 && T > 0.01; ++i)
+		[loop] for (int i = 0; i < MaxSteps + 100 && t < t1 && T > 0.01; ++i)
 		{
 			float Step = AerosCloudStepKm(t);
 			bool bInTornado = false;
@@ -195,10 +197,14 @@ void TraceCS(uint2 Id : SV_DispatchThreadID)
 				bInTornado = bInTornado || (t >= Tin[k2] && t <= Tout[k2]);
 				NextIn = (Tin[k2] > t && Tout[k2] >= Tin[k2]) ? min(NextIn, Tin[k2]) : NextIn;
 			}
-			if (bInTornado && FineSteps < 200)
+			bool bNearFunnel = false;
+			if (bInTornado && FineSteps < 100)
 			{
 				++FineSteps;
-				Step = AerosNearTornado(CameraKm + Dir * t) ? 0.02 : 0.06;
+				// Fine steps where the funnel or the dust is, short ones elsewhere in the volume (never
+				// longer than the narrowest funnel bounds, so none is skipped)
+				bNearFunnel = AerosNearTornado(CameraKm + Dir * t);
+				Step = bNearFunnel ? 0.03 : min(Step, 0.08);
 			}
 			float3 P = CameraKm + Dir * t;
 			float Octaves = AerosCloudOctaves(t);
@@ -206,7 +212,8 @@ void TraceCS(uint2 Id : SV_DispatchThreadID)
 			if (Smp.Density > 0.001)
 			{
 				float Sigma = AerosCloudExtinction(Smp);
-				float od = LightOpticalDepth(P, SunDir, t, Octaves);
+				// In a funnel (dark anyway) 3 sun samples are enough
+				float od = bNearFunnel ? OpticalDepthGrowing(P, SunDir, t, min(Octaves, 2.0), 3) : LightOpticalDepth(P, SunDir, t, Octaves);
 				// Three scattering orders: contribution 0.25^n, optical depth 0.8^n, phase flattened 0.5^n.
 				float S = 0.0;
 				float a = 1.0;
@@ -228,6 +235,7 @@ void TraceCS(uint2 Id : SV_DispatchThreadID)
 				float Tr = exp(-Sigma * Step);
 				Scat += T * Lin * (1.0 - Tr);
 				DepthAcc += t * T * (1.0 - Tr);
+				TornadoOpacity += bNearFunnel ? T * (1.0 - Tr) : 0.0;
 				T *= Tr;
 			}
 			else if (!bInTornado)
@@ -246,6 +254,7 @@ void TraceCS(uint2 Id : SV_DispatchThreadID)
 	float Front = (1.0 - T) > 1e-3 ? DepthAcc / (1.0 - T) : min(60.0, SceneKm);
 	OutColor[Id] = float4(Scat * View.PreExposure, T);
 	OutDepth[Id] = float2(Front, SceneKm);
+	OutMask[Id] = (1.0 - T) > 1e-3 ? saturate(TornadoOpacity / (1.0 - T)) : 0.0;
 }
 
 // ------------------------------------------------------------------ shadow map
@@ -291,6 +300,7 @@ void ShadowMapCS(uint2 Id : SV_DispatchThreadID)
 
 Texture2D CurColor;
 Texture2D CurDepth;
+Texture2D CurMask;      // tornado share per traced pixel
 Texture2D HistColor;
 Texture2D HistDepth;
 SamplerState LinearSampler;
@@ -443,6 +453,15 @@ void TemporalCS(uint2 Id : SV_DispatchThreadID)
 	M1 /= 9.0;
 	float3 Sigma = sqrt(max(M2 / 9.0 - M1 * M1, 0.0));
 	float FrontNow = min(FrontSum / FrontW, SceneKm);
+	// A spinning funnel cannot be reprojected (its striations turn): answer fast there
+	float Mask = 0.0;
+	[unroll] for (int my = -1; my <= 1; ++my)
+	{
+		[unroll] for (int mx = -1; mx <= 1; ++mx)
+		{
+			Mask = max(Mask, CurMask.Load(int3(clamp(HalfId + int2(mx, my), 0, HalfSize - 1), 0)).r);
+		}
+	}
 
 	float4 Result = Cur;
 	float FrontOut = min(CurFront, SceneKm);
@@ -480,6 +499,7 @@ void TemporalCS(uint2 Id : SV_DispatchThreadID)
 			float Boost = PixelMotion * 0.0025 + BlendBoost;
 			float w = bFresh ? clamp(NewWeight * float(TraceScale) + Boost, NewWeight, 0.6)
 			                 : clamp(Boost * 0.5, 0.0, 0.3);
+			w = max(w, Mask * (bFresh ? 0.4 : 0.1));   // more would show the half-res steps on the funnel's edge
 			Result = lerp(H, Cur, w);
 		}
 	}
