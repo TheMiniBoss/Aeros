@@ -76,6 +76,7 @@ private:
 	int32 NumShown = 0;
 	bool bBranchesDimmed = false;
 	bool bVisibleChannel = false;
+	double ChannelBaseZ = 0.0;        // where the channel leaves the cloud (world cm): hidden from well above it
 
 	TArray<float> StrokeTimes;   // s after the start
 	TArray<float> StrokeAmps;

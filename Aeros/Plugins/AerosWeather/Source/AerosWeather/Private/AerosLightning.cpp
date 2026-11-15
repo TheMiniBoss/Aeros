@@ -157,6 +157,7 @@ void AAerosLightningFlash::BuildChannel(const FVector& Start, const FVector& End
 	using namespace AerosLightningInternal;
 	Segments.Reset();
 	const bool bIntra = Type == EAerosLightningType::IntraCloud;
+	ChannelBaseZ = bIntra ? FMath::Min(Start.Z, End.Z) : Start.Z;
 	const float Roughness = Type == EAerosLightningType::PositiveCloudToGround ? 0.12f : (bIntra ? 0.2f : 0.17f);
 	TArray<FVector> Main;
 	FractalPath(Start, End, Roughness, 6, Rand, Main); // 64 segments
@@ -363,7 +364,18 @@ void AAerosLightningFlash::Tick(float DeltaSeconds)
 			}
 			Bolt->MarkRenderStateDirty();
 		}
-		if (BoltMID) BoltMID->SetScalarParameterValue(TEXT("Intensity"), BaseIntensity * B);
+		// Translucent meshes draw over the clouds (no depth test against them): seen from above the
+		// storm, the channel showed through the anvil. Fade it when the viewer is more than 1 km above
+		// the cloud base and near the storm; from the side and far away it stays visible under the base.
+		float Hide = 0.f;
+		if (const UAerosWeatherSubsystem* ViewSub = UAerosWeatherSubsystem::Get(this))
+		{
+			const FVector Viewer = ViewSub->GetViewerLocation();
+			const float AboveKm = float(Viewer.Z - ChannelBaseZ) * 1e-5f;
+			const float NearKm = float(FVector::Dist2D(Viewer, GetActorLocation())) * 1e-5f;
+			Hide = FMath::Clamp(AboveKm - 1.f, 0.f, 1.f) * (1.f - FMath::SmoothStep(15.f, 25.f, NearKm));
+		}
+		if (BoltMID) BoltMID->SetScalarParameterValue(TEXT("Intensity"), BaseIntensity * B * (1.f - Hide));
 		if (Age > EndTime && B < 0.01f)
 		{
 			bVisibleChannel = false;
