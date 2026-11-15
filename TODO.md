@@ -9,7 +9,10 @@ Branche de travail actuelle : `claude/clouds-v2` (rendu maison des nuages).
 - [x] Bords « salés » sur les images fixes : le rendu maison trace en demi-résolution et lisse les silhouettes contre le ciel.
 - [ ] Vues du sol, les cumulus proches cachent les tours d'orage lointaines.
 - [x] Face sombre du côté opposé au soleil (rendu maison : ombre vers le soleil + ciel SH × couleur de la sky light).
-- [ ] Nuage-mur des tornades : encore un disque en maillage, devrait venir des nuages volumétriques.
+- [x] Tornades dans les nuages (rendu maison) : entonnoir physique qui descend de la base, nuage-mur qui tourne, poussière / embruns, multi-vortex, corde en fin de vie.
+- [ ] Tornades : voir un entonnoir suspendu sous un orage à base haute (l'orage de la visite a une base à 300 m).
+- [ ] Tornades : à grande vitesse du temps l'acteur avance en temps réel et l'orage en temps simulé (la tornade quitte son orage) ; sur la mer l'acteur est posé sur le fond.
+- [ ] Supercellules variées (peu de pluie / classique / beaucoup de pluie, tours striées), tornades enveloppées de pluie : projet suivant.
 - [ ] Lueur des éclairs la nuit (rendu maison, 400 cd/m² plafonné) : vue faible sous un orage, à juger avec l'utilisateur.
 - [ ] Dessus des enclumes en « courbes de niveau » vu d'avion (couches voxel de 333 m + seuil de glace x2,5 + auto-ombrage).
 - [ ] Time-lapse x60 : le détail bulleux glisse (dérive du bruit = vent, pas le mouvement des orages) ; à x600 le flou de mouvement reste.

@@ -657,11 +657,18 @@ void AAerosDemoPawn::BuildTour()
 		Sub->SetTimeScale(60.f);
 		if (AAerosTornado* T = Sub->ForceTornado(-1))
 		{
+			// The funnel grows down over the first ~12 % of the life (half a minute): the 10 s step shows a
+			// mature tornado unless -AerosTornadoAge asks for another stage
+			if (!FParse::Param(FCommandLine::Get(), TEXT("AerosTornadoAge")) && !FString(FCommandLine::Get()).Contains(TEXT("AerosTornadoAge=")))
+			{
+				T->Age = T->Lifetime * 0.3f;
+			}
 			const FVector At = T->GetActorLocation();
 			// Gallery framing: -AerosTornadoCam=DistKm,AltM,LookAltM (camera that far from the tornado, on the
 			// side away from the storm motion; negative distance = the opposite side, for backlit views)
-			FString CamArg;
-			if (FParse::Value(FCommandLine::Get(), TEXT("AerosTornadoCam="), CamArg, false))
+			// Default: 2 km away, at 60 m, looking 250 m up (outside the rain, close enough to see the funnel)
+			FString CamArg = TEXT("2,60,250");
+			FParse::Value(FCommandLine::Get(), TEXT("AerosTornadoCam="), CamArg, false);
 			{
 				TArray<FString> Parts;
 				CamArg.ParseIntoArray(Parts, TEXT(","));
@@ -673,10 +680,6 @@ void AAerosDemoPawn::BuildTour()
 				FVector Side = FVector(T->TrackVelocity.Y, -T->TrackVelocity.X, 0.0).GetSafeNormal();
 				if (Side.IsNearlyZero()) Side = FVector(1, 0, 0);
 				TeleportLookAt(FVector(At.X, At.Y, Base) + Side * DistCm + FVector(0, 0, AltCm), FVector(At.X, At.Y, Base + LookCm));
-			}
-			else
-			{
-				TeleportLookAt(FVector(At.X + 400000.0, At.Y + 300000.0, 25000.0), FVector(At.X, At.Y, 60000.0));
 			}
 		}
 	};
