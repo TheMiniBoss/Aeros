@@ -20,6 +20,15 @@ public:
 	AAerosDemoGameMode();
 
 	virtual void StartPlay() override;
+	virtual UClass* GetDefaultPawnClassForController_Implementation(AController* InController) override;
+	virtual void InitializeHUDForPlayer_Implementation(APlayerController* NewPlayer) override;
+
+	/** Swap the player between the technical demo (free flight, expert HUD) and the storm chaser
+	 *  (vehicle, its menu and HUD). The new pawn starts where the old one was. */
+	void SwitchDemo(APlayerController* PC, bool bTechDemo);
+
+	/** True when the session starts in the technical demo (-AerosTech, or any guided tour option). */
+	static bool StartsInTechDemo();
 
 	/** Simulation used when the level has no AAerosWeatherController. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Aeros Demo")

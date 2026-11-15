@@ -7,6 +7,9 @@
 #include "AerosWeatherRadar.h"
 #include "AerosVolcano.h"
 #include "AerosDemoTerrain.h"
+#include "AerosChasePawn.h"
+#include "AerosChaseHUD.h"
+#include "Misc/CommandLine.h"
 #include "Engine/DirectionalLight.h"
 #include "Engine/ExponentialHeightFog.h"
 #include "Engine/SkyLight.h"
@@ -69,6 +72,41 @@ AAerosDemoGameMode::AAerosDemoGameMode()
 	Fault.MaxMagnitude = 7.3f;
 	DemoSettings.SeismicZones.Add(Fault);
 	DemoSettings.SeaLevelZ = -150.f;
+}
+
+bool AAerosDemoGameMode::StartsInTechDemo()
+{
+	const FString Cmd = FCommandLine::Get();
+	return FParse::Param(*Cmd, TEXT("AerosTech")) || Cmd.Contains(TEXT("AerosTour"));
+}
+
+UClass* AAerosDemoGameMode::GetDefaultPawnClassForController_Implementation(AController* InController)
+{
+	return StartsInTechDemo() ? AAerosDemoPawn::StaticClass() : AAerosChasePawn::StaticClass();
+}
+
+void AAerosDemoGameMode::InitializeHUDForPlayer_Implementation(APlayerController* NewPlayer)
+{
+	if (NewPlayer) NewPlayer->ClientSetHUD(StartsInTechDemo() ? AAerosDemoHUD::StaticClass() : AAerosChaseHUD::StaticClass());
+}
+
+void AAerosDemoGameMode::SwitchDemo(APlayerController* PC, bool bTechDemo)
+{
+	UWorld* World = GetWorld();
+	if (!PC || !World) return;
+	APawn* Old = PC->GetPawn();
+	FTransform T = Old ? Old->GetActorTransform() : FTransform::Identity;
+	T.SetRotation(FQuat(FRotator(0.f, T.Rotator().Yaw, 0.f)));
+	FActorSpawnParameters P;
+	P.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+	UClass* Cls = bTechDemo ? AAerosDemoPawn::StaticClass() : AAerosChasePawn::StaticClass();
+	APawn* New = World->SpawnActor<APawn>(Cls, T, P);
+	if (!New) return;
+	PC->UnPossess();
+	if (Old) Old->Destroy();
+	PC->Possess(New);
+	PC->SetControlRotation(FRotator(0.f, T.Rotator().Yaw, 0.f));
+	PC->ClientSetHUD(bTechDemo ? AAerosDemoHUD::StaticClass() : AAerosChaseHUD::StaticClass());
 }
 
 void AAerosDemoGameMode::StartPlay()

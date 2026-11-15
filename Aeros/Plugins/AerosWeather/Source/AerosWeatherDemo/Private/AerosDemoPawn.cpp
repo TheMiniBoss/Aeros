@@ -2,6 +2,7 @@
 
 #include "AerosDemoPawn.h"
 #include "AerosDemoHUD.h"
+#include "AerosDemoGameMode.h"
 #include "AerosWeatherSubsystem.h"
 #include "AerosWeatherRadar.h"
 #include "AerosWeatherLibrary.h"
@@ -252,6 +253,11 @@ void AAerosDemoPawn::HandleHotkeys(APlayerController* PC)
 
 	// ---- Travel ------------------------------------------------------------------------
 	if (Pressed({ EKeys::F })) FlyToNearestStorm();
+	// Back to the start menu (the storm chaser's)
+	if (Pressed({ EKeys::BackSpace }) && !IsTourRunning())
+	{
+		if (AAerosDemoGameMode* GM = GetWorld()->GetAuthGameMode<AAerosDemoGameMode>()) { GM->SwitchDemo(PC, false); return; }
+	}
 	if (Pressed({ EKeys::V }))
 	{
 		for (AAerosVolcano* V : Sub->GetVolcanoes())
