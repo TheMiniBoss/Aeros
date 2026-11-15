@@ -157,9 +157,12 @@ void AAerosWeatherController::GatherCloudTornadoes(UAerosWeatherSubsystem* Sub, 
 	const FVector Viewer = Sub->GetViewerLocation();
 	static IConsoleVariable* KVar = IConsoleManager::Get().FindConsoleVariable(TEXT("r.AerosClouds.TornadoK"));
 	const float K = KVar ? KVar->GetFloat() : 2.f;
-	// Gallery overrides (metres, m/s): cloud base and peak wind of every tornado
-	float ForcedBaseM = -1.f, ForcedVmax = -1.f;
+	// Gallery overrides (metres, m/s): cloud base, peak wind and core radius of every tornado
+	float ForcedBaseM = -1.f, ForcedVmax = -1.f, ForcedCoreM = -1.f;
+	int32 ForcedSubs = -1;
+	FParse::Value(FCommandLine::Get(), TEXT("AerosTornadoSubs="), ForcedSubs);
 	FParse::Value(FCommandLine::Get(), TEXT("AerosTornadoLCL="), ForcedBaseM);
+	FParse::Value(FCommandLine::Get(), TEXT("AerosTornadoCore="), ForcedCoreM);
 	FParse::Value(FCommandLine::Get(), TEXT("AerosTornadoVmax="), ForcedVmax);
 
 	// The 4 nearest within 60 km
@@ -198,18 +201,30 @@ void AAerosWeatherController::GatherCloudTornadoes(UAerosWeatherSubsystem* Sub, 
 		}
 		if (P.Tornadoes.Num() >= 4) continue;   // a 5th fading one waits: at most 4 drawn
 
-		// Cloud base: the parent storm's LCL, else the local one
+		// Cloud base: the storm's LCL, as the voxel grid draws it (FAerosCloudVolume: clamped to 0.3-3 km) -
+		// the parent storm, else the nearest one within 30 km, else the local LCL
 		float BaseM = Sub->GetWeatherAtLocation(T->GetActorLocation()).LCL;
 		if (FAerosSnapshotPtr Snap = Sub->GetSnapshot())
 		{
+			double BestD = 3000000.0;
 			for (const FAerosStormData& S : Snap->Storms)
 			{
-				if (S.Id == T->GetParentStormId() && S.LCL > 0.f) { BaseM = S.LCL; break; }
+				const double DS = FVector::Dist2D(S.UpdraftLocation, T->GetActorLocation());
+				if (S.Id == T->GetParentStormId()) { BaseM = S.LCL; break; }
+				if (DS < BestD) { BestD = DS; BaseM = S.LCL; }
 			}
 		}
 		if (ForcedBaseM > 0.f) BaseM = ForcedBaseM;
-		FAerosCloudTornado D = T->MakeRenderDescriptor(FMath::Clamp(BaseM, 150.f, 4000.f), K);
+		FAerosCloudTornado D = T->MakeRenderDescriptor(FMath::Clamp(BaseM, 300.f, 3000.f), K);
 		if (ForcedVmax > 0.f && T->MaxWind > 0.f) D.VmaxMs *= ForcedVmax / T->MaxWind;
+		if (ForcedCoreM > 0.f && T->CoreRadius > 0.f) D.CoreRadiusM *= ForcedCoreM / T->CoreRadius;
+		if (ForcedSubs >= 0) D.NumSubVortices = FMath::Min(ForcedSubs, 6);
+		if (!TornadoBaseLogged.Contains(T))
+		{
+			TornadoBaseLogged.Add(T);
+			UE_LOG(LogTemp, Verbose, TEXT("Aeros clouds: tornado %s base %.0f m, Vmax %.0f m/s, core %.0f m, sub-vortices %d"),
+				*T->GetName(), D.CloudBaseKm * 1000.f, D.VmaxMs, D.CoreRadiusM, D.NumSubVortices);
+		}
 		D.Fade = It.Value();
 		P.Tornadoes.Add(D);
 	}

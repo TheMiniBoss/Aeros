@@ -360,7 +360,7 @@ FAerosCloudTornado AAerosTornado::MakeRenderDescriptor(float CloudBaseM, float K
 	D.CloudBaseKm = H * 0.001f;
 	D.AxisKm = FVector4f(float(P1.X), float(P1.Y), float(P2.X), float(P2.Y)) * 0.001f;
 	D.TopKm = FVector2f(float(Top.X), float(Top.Y)) * 0.001f;
-	D.VmaxMs = MaxWind * Aeros::Funnel::LifeStrength(Age01);
+	D.VmaxMs = Aeros::Funnel::FunnelVmaxMs(MaxWind, Age01);
 	D.CoreRadiusM = Rc;
 	D.K = K;
 	D.RopeOut = Decay;

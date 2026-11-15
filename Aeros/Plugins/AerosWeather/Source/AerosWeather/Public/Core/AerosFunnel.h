@@ -79,5 +79,15 @@ namespace Aeros
 		{
 			return CoreRadiusM * (1.f - 0.6f * RopeOut(Age01));
 		}
+
+		/** Peak wind of the funnel's vortex. Its circulation decays more slowly than the wind at the ground
+		 *  (sqrt of the life strength), and as the core shrinks in the rope-out the wind in it speeds up
+		 *  (v = circulation / core): the rope keeps reaching the ground until late, then lifts. */
+		inline float FunnelVmaxMs(float MaxWindMs, float Age01)
+		{
+			const float Circulation = std::sqrt(FMath::Max(LifeStrength(Age01), 0.f));
+			const float CoreRatio = FMath::Max(CoreRadiusAt(1.f, Age01), 0.1f);
+			return FMath::Min(MaxWindMs * Circulation / CoreRatio, 2.f * MaxWindMs);
+		}
 	}
 }

@@ -210,6 +210,14 @@ namespace FunnelTests
 			T.TestTrue("Funnel_LifeMatchesTornado (0, 0.5, 1, 0.5, 0)", bLife);
 		}
 		{
+			// The funnel's wind follows the circulation: as the core shrinks in the rope-out the wind in it
+			// speeds up, so the rope still reaches the ground late in the life, then lifts at the very end.
+			auto Tip = [](float Age01) { FParams P; P.VmaxMs = FunnelVmaxMs(70.f, Age01); P.CoreRadiusM = CoreRadiusAt(100.f, Age01); P.CloudBaseM = 800.f; P.K = 2.f; return TipHeightM(P); };
+			T.TestTrue("Funnel_RopeTouchesLate (age 0.92 on the ground, 0.985 lifted)", Tip(0.92f) == 0.f && Tip(0.985f) > 200.f);
+			T.TestTrue("Funnel_DescendsAtBirth (tip lower at 0.08 than at 0.03, on the ground at 0.5)", Tip(0.08f) < Tip(0.03f) && Tip(0.03f) > 0.f && Tip(0.5f) == 0.f);
+			T.TestTrue("Funnel_VmaxNeverAboveTwiceMax", FunnelVmaxMs(70.f, 0.99f) <= 140.f && FunnelVmaxMs(70.f, 0.5f) <= 70.f + 1e-3f);
+		}
+		{
 			T.TestTrue("Funnel wind peaks at the core", Near(TangentialWindMs(60.f, 100.f, 100.f), 60.f, 1e-3f) && TangentialWindMs(60.f, 50.f, 100.f) < 60.f && TangentialWindMs(60.f, 200.f, 100.f) < 60.f);
 			T.TestTrue("Funnel pressure deficit 1.1 x V^2 at the centre", Near(PressureDeficitPa(100.f, 0.f, 100.f), 11000.f, 1.f));
 		}

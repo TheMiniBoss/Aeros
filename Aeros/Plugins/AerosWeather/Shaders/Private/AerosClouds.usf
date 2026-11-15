@@ -169,10 +169,37 @@ void TraceCS(uint2 Id : SV_DispatchThreadID)
 	if (t1 > t0)
 	{
 		const float UpSeg[6] = { 2.0, 0.0, 0.0, 0.0, 0.0, 0.0 };   // one sample 1 km above (sky light is low frequency)
-		float t = t0 + AerosCloudStepKm(t0) * IGN(float2(Id), FrameIndex);
-		[loop] for (int i = 0; i < MaxSteps && t < t1 && T > 0.01; ++i)
+		// Tornado volumes along this ray: inside them the march takes fine steps (a funnel is 20-500 m
+		// wide), and a long stride never jumps over one.
+		float Tin[4];
+		float Tout[4];
+		[unroll] for (uint k = 0; k < 4; ++k)
+		{
+			Tin[k] = 1e9;
+			Tout[k] = -1.0;
+			if (k < NumTornadoes)
+			{
+				AerosTornadoRayInterval(k, CameraKm, Dir, Tin[k], Tout[k]);
+			}
+		}
+		float Jitter = IGN(float2(Id), FrameIndex);
+		float t = t0 + AerosCloudStepKm(t0) * Jitter;
+		int FineSteps = 0;
+		[loop] for (int i = 0; i < MaxSteps + 200 && t < t1 && T > 0.01; ++i)
 		{
 			float Step = AerosCloudStepKm(t);
+			bool bInTornado = false;
+			float NextIn = 1e9;
+			[unroll] for (uint k2 = 0; k2 < 4; ++k2)
+			{
+				bInTornado = bInTornado || (t >= Tin[k2] && t <= Tout[k2]);
+				NextIn = (Tin[k2] > t && Tout[k2] >= Tin[k2]) ? min(NextIn, Tin[k2]) : NextIn;
+			}
+			if (bInTornado && FineSteps < 200)
+			{
+				++FineSteps;
+				Step = AerosNearTornado(CameraKm + Dir * t) ? 0.02 : 0.06;
+			}
 			float3 P = CameraKm + Dir * t;
 			float Octaves = AerosCloudOctaves(t);
 			FAerosCloudSample Smp = AerosCloudDensity(P, t, Octaves);
@@ -203,9 +230,14 @@ void TraceCS(uint2 Id : SV_DispatchThreadID)
 				DepthAcc += t * T * (1.0 - Tr);
 				T *= Tr;
 			}
-			else
+			else if (!bInTornado)
 			{
 				Step = min(Step * 2.0, 1.0);   // empty air: longer strides (the jitter keeps edges unbiased)
+			}
+			// Land just inside the next tornado volume instead of striding over it
+			if (!bInTornado && t + Step > NextIn)
+			{
+				Step = max(NextIn - t + 0.02 * Jitter, 0.005);
 			}
 			t += Step;
 		}

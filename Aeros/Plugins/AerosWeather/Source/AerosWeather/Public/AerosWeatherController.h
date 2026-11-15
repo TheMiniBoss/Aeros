@@ -97,6 +97,7 @@ private:
 	/** Tornadoes drawn by the custom renderer (the 4 nearest), each with its fade in / out of the set. */
 	void GatherCloudTornadoes(class UAerosWeatherSubsystem* Sub, float DeltaSeconds, struct FAerosCloudRenderParams& P);
 	TMap<TWeakObjectPtr<class AAerosTornado>, float> TornadoFades;
+	TSet<TWeakObjectPtr<class AAerosTornado>> TornadoBaseLogged;
 	FVector3f NoiseDriftKmS = FVector3f::ZeroVector;
 	bool bCustomCloudsActive = false;
 	/** Cloud shadows of the custom renderer: R16F transmittance map read by the sun's light function. */
