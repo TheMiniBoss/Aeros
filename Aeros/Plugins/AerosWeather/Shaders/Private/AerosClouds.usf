@@ -1,0 +1,348 @@
+// Copyright Aeros. All Rights Reserved.
+// Spike: custom volumetric clouds.
+//   TraceCS     half resolution ray march of a synthetic cloud field, per-frame jitter
+//   TemporalCS  accumulation; history reprojected along camera motion AND wind drift
+//   CompositeCS depth-aware upsample over the scene + fresh lightning term (never stored)
+// World units in km, Unreal axes (z up).
+
+#include "/Engine/Private/Common.ush"
+
+float3 CameraKm;
+float3 WindKmS;
+float  TimeS;
+uint   FrameIndex;
+int2   ViewMin;
+int2   HalfSize;
+int2   FullSize;
+
+Texture2D SceneDepthTexture;
+RWTexture2D<float4> OutColor;
+RWTexture2D<float2> OutDepth;
+
+static const float BaseKm = 1.4;
+static const float TopKm = 12.6;
+static const float SigmaPerKm = 60.0;   // extinction of a dense cumulus core (0.06 / m)
+static const float2 TowerKm = float2(8.0, 0.0);
+
+// ------------------------------------------------------------------ noise
+
+float Hash13(float3 p)
+{
+	p = frac(p * 0.1031);
+	p += dot(p, p.zyx + 31.32);
+	return frac((p.x + p.y) * p.z);
+}
+
+float ValueNoise(float3 p)
+{
+	float3 i = floor(p);
+	float3 f = frac(p);
+	f = f * f * (3.0 - 2.0 * f);
+	float a = Hash13(i);
+	float b = Hash13(i + float3(1, 0, 0));
+	float c = Hash13(i + float3(0, 1, 0));
+	float d = Hash13(i + float3(1, 1, 0));
+	float e = Hash13(i + float3(0, 0, 1));
+	float g = Hash13(i + float3(1, 0, 1));
+	float h = Hash13(i + float3(0, 1, 1));
+	float k = Hash13(i + float3(1, 1, 1));
+	return lerp(lerp(lerp(a, b, f.x), lerp(c, d, f.x), f.y), lerp(lerp(e, g, f.x), lerp(h, k, f.x), f.y), f.z);
+}
+
+// Continuous level of detail: octave i blends from its mean (0.5) to its value as
+// Octaves goes from i to i+1, so detail fades in and out with distance without popping.
+float DetailNoise(float3 p, float Octaves)
+{
+	float Sum = 0.0;
+	float Norm = 0.0;
+	float Amp = 0.5;
+	float Freq = 1.0;
+	[unroll] for (int i = 0; i < 4; ++i)
+	{
+		float n = ValueNoise(p * Freq + float(i) * 17.13);
+		Sum += lerp(0.5, n, saturate(Octaves - float(i))) * Amp;
+		Norm += Amp;
+		Amp *= 0.5;
+		Freq *= 2.03;
+	}
+	return Sum / Norm;
+}
+
+// Cheap large-scale shape (no detail): 0 means empty, lets the march skip work.
+float CloudShape(float3 pKm, float3 q)
+{
+	float cov = ValueNoise(float3(q.xy / 9.0, 0.5)) * 0.65 + ValueNoise(float3(q.xy / 3.5, 7.5)) * 0.35;
+	cov = saturate((cov - 0.52) * 3.5);
+	float d = length(q.xy - TowerKm);
+	float tower = 1.0 - smoothstep(2.0, 4.5, d);
+	float top = BaseKm + 0.4 + cov * 2.6 + tower * 9.4;
+	float h = (pKm.z - BaseKm) / max(top - BaseKm, 0.1);
+	float profile = saturate(h * 8.0) * saturate((1.0 - h) * 2.5);
+	float shape = max(cov, tower) * profile;
+
+	// Anvil: a flat spreading sheet on top of the tower, ragged rim.
+	float rim = 11.0 + 5.0 * ValueNoise(float3(q.xy / 5.0, 3.3));
+	float anvil = (1.0 - smoothstep(3.0, rim, d)) * smoothstep(10.2, 10.9, pKm.z) * (1.0 - smoothstep(11.5, 12.4, pKm.z));
+	return max(shape, anvil * 0.8);
+}
+
+float CloudDensity(float3 pKm, float Octaves)
+{
+	float3 q = pKm - WindKmS * TimeS;
+	float shape = CloudShape(pKm, q);
+	if (shape <= 0.01)
+	{
+		return 0.0;
+	}
+	float det = DetailNoise(q / 1.1, Octaves);
+	float erode = (1.0 - det) * 0.55;
+	return saturate((shape - erode) / max(1.0 - erode, 0.05));
+}
+
+// ------------------------------------------------------------------ helpers
+
+float IGN(float2 p, uint Frame)
+{
+	p += 5.588238 * float(Frame % 64u);
+	return frac(52.9829189 * frac(0.06711056 * p.x + 0.00583715 * p.y));
+}
+
+float3 RayDirFromSvPos(float2 SvPos)
+{
+	float3 T = SvPositionToTranslatedWorld(float4(SvPos, 0.5, 1.0));
+	return normalize(T - View.TranslatedWorldCameraOrigin);
+}
+
+float SceneDistKm(int2 Pix, float3 Dir)
+{
+	float DeviceZ = SceneDepthTexture.Load(int3(Pix, 0)).r;
+	if (DeviceZ <= 1e-7)
+	{
+		return 400.0;   // sky
+	}
+	float DepthCm = ConvertFromDeviceZ(DeviceZ);
+	return min(DepthCm / max(dot(Dir, View.ViewForward), 1e-3) * 1e-5, 400.0);
+}
+
+float HG(float c, float g)
+{
+	float g2 = g * g;
+	return (1.0 - g2) / (4.0 * PI * pow(max(1.0 + g2 - 2.0 * g * c, 1e-4), 1.5));
+}
+
+float StepKm(float t)
+{
+	return clamp(0.06 + t * 0.012, 0.06, 0.5);
+}
+
+float LightOpticalDepth(float3 P, float3 L, float Octaves)
+{
+	const float Seg[6] = { 0.08, 0.16, 0.3, 0.5, 0.9, 1.6 };
+	float od = 0.0;
+	float t = 0.0;
+	[unroll] for (int i = 0; i < 6; ++i)
+	{
+		od += CloudDensity(P + L * (t + Seg[i] * 0.5), min(Octaves, 2.0)) * SigmaPerKm * Seg[i];
+		t += Seg[i];
+	}
+	return od;
+}
+
+// ------------------------------------------------------------------ trace
+
+[numthreads(8, 8, 1)]
+void TraceCS(uint2 Id : SV_DispatchThreadID)
+{
+	if (any(Id >= (uint2)HalfSize))
+	{
+		return;
+	}
+	int2 FullPix = ViewMin + min(int2(Id) * 2, FullSize - 1);
+	float3 Dir = RayDirFromSvPos(float2(ViewMin) + float2(Id) * 2.0 + 1.0);
+	float SceneKm = SceneDistKm(FullPix, Dir);
+
+	float3 SunDir = View.AtmosphereLightDirection[0].xyz;
+	SunDir = dot(SunDir, SunDir) > 1e-4 ? normalize(SunDir) : float3(0, 0, 1);
+	float3 SunE = View.AtmosphereLightIlluminanceOnGroundPostTransmittance[0].rgb;
+	float CosT = dot(Dir, SunDir);
+
+	float3 Scat = 0.0;
+	float T = 1.0;
+	float DepthAcc = 0.0;
+
+	// Flat slab [BaseKm - 0.1, TopKm].
+	float t0 = 0.0;
+	float t1 = 0.0;
+	if (abs(Dir.z) > 1e-5)
+	{
+		float a = (BaseKm - 0.1 - CameraKm.z) / Dir.z;
+		float b = (TopKm - CameraKm.z) / Dir.z;
+		t0 = max(min(a, b), 0.0);
+		t1 = max(a, b);
+	}
+	else if (CameraKm.z > BaseKm - 0.1 && CameraKm.z < TopKm)
+	{
+		t1 = 1e9;
+	}
+	t1 = min(min(t1, SceneKm), 120.0);
+
+	if (t1 > t0)
+	{
+		float t = t0 + StepKm(t0) * IGN(float2(Id), FrameIndex);
+		[loop] for (int i = 0; i < 192 && t < t1 && T > 0.01; ++i)
+		{
+			float Step = StepKm(t);
+			float3 P = CameraKm + Dir * t;
+			// Detail octaves fall off smoothly with distance: 4 near, 1 beyond ~12 km.
+			float Octaves = clamp(4.5 - log2(max(t, 0.5) / 1.0), 1.0, 4.0);
+			float Dens = CloudDensity(P, Octaves);
+			if (Dens > 0.001)
+			{
+				float Sigma = Dens * SigmaPerKm;
+				float od = LightOpticalDepth(P, SunDir, Octaves);
+				// Three scattering orders (Wrenninge): less extinction, wider phase each order.
+				float S = 0.0;
+				float k = 1.0;
+				[unroll] for (int n = 0; n < 3; ++n)
+				{
+					S += k * lerp(HG(CosT, -0.25 * k), HG(CosT, 0.8 * k), 0.7) * exp(-od * k);
+					k *= 0.5;
+				}
+				float Hf = saturate((P.z - BaseKm) / 8.0);
+				float3 Amb = SunE * float3(0.035, 0.05, 0.08) * (0.35 + 0.65 * Hf);
+				float3 Lin = SunE * S + Amb;
+				float Tr = exp(-Sigma * Step);
+				Scat += T * Lin * (1.0 - Tr);
+				DepthAcc += t * T * (1.0 - Tr);
+				T *= Tr;
+			}
+			t += Step;
+		}
+	}
+
+	float Front = (1.0 - T) > 1e-3 ? DepthAcc / (1.0 - T) : min(60.0, SceneKm);
+	OutColor[Id] = float4(Scat * View.PreExposure, T);
+	OutDepth[Id] = float2(Front, SceneKm);
+}
+
+// ------------------------------------------------------------------ temporal
+
+Texture2D CurColor;
+Texture2D CurDepth;
+Texture2D HistColor;
+Texture2D HistDepth;
+SamplerState LinearSampler;
+float4x4 TranslatedToPrevClip;
+float DeltaTime;
+float NewWeight;
+uint bHistoryValid;
+
+[numthreads(8, 8, 1)]
+void TemporalCS(uint2 Id : SV_DispatchThreadID)
+{
+	if (any(Id >= (uint2)HalfSize))
+	{
+		return;
+	}
+	float4 Cur = CurColor.Load(int3(Id, 0));
+	float2 CurD = CurDepth.Load(int3(Id, 0)).xy;
+
+	float4 Mn = Cur;
+	float4 Mx = Cur;
+	[unroll] for (int y = -1; y <= 1; ++y)
+	{
+		[unroll] for (int x = -1; x <= 1; ++x)
+		{
+			float4 c = CurColor.Load(int3(clamp(int2(Id) + int2(x, y), 0, HalfSize - 1), 0));
+			Mn = min(Mn, c);
+			Mx = max(Mx, c);
+		}
+	}
+
+	float4 Result = Cur;
+	if (bHistoryValid != 0u)
+	{
+		float3 Dir = RayDirFromSvPos(float2(ViewMin) + float2(Id) * 2.0 + 1.0);
+		float FrontKm = min(CurD.x, CurD.y);
+		// The cloud at P now was at P - wind * dt last frame.
+		float3 PPrev = View.TranslatedWorldCameraOrigin + Dir * FrontKm * 1e5 - WindKmS * 1e5 * DeltaTime;
+		float4 Clip = mul(float4(PPrev, 1.0), TranslatedToPrevClip);
+		if (Clip.w > 0.0)
+		{
+			float2 Uv = (Clip.xy / Clip.w) * float2(0.5, -0.5) + 0.5;
+			if (all(Uv > 0.0) && all(Uv < 1.0))
+			{
+				float4 H = HistColor.SampleLevel(LinearSampler, Uv, 0);
+				H = clamp(H, Mn, Mx);
+				Result = lerp(H, Cur, NewWeight);
+			}
+		}
+	}
+	OutColor[Id] = Result;
+	OutDepth[Id] = CurD;
+}
+
+// ------------------------------------------------------------------ composite
+
+Texture2D SceneColorTexture;
+Texture2D CloudColor;
+Texture2D CloudDepth;
+float3 FlashKm;
+float3 FlashColor;
+RWTexture2D<float4> OutSceneColor;
+
+[numthreads(8, 8, 1)]
+void CompositeCS(uint2 Id : SV_DispatchThreadID)
+{
+	if (any(Id >= (uint2)FullSize))
+	{
+		return;
+	}
+	int2 Pix = ViewMin + int2(Id);
+	float4 Scene = SceneColorTexture.Load(int3(Pix, 0));
+	float3 Dir = RayDirFromSvPos(float2(Pix) + 0.5);
+	float SceneKm = SceneDistKm(Pix, Dir);
+
+	// Bilinear taps, down-weighted where the half-res sample saw a different scene depth
+	// (keeps clouds behind a mountain from bleeding onto it).
+	float2 HP = (float2(Id) + 0.5) * 0.5 - 0.5;
+	int2 B = int2(floor(HP));
+	float2 F = HP - float2(B);
+	float4 Acc = 0.0;
+	float FrontAcc = 0.0;
+	float W = 0.0;
+	float4 Best = float4(0, 0, 0, 1);
+	float BestFront = 60.0;
+	float BestErr = 1e9;
+	[unroll] for (int j = 0; j < 4; ++j)
+	{
+		int2 o = int2(j & 1, j >> 1);
+		int2 c = clamp(B + o, 0, HalfSize - 1);
+		float wb = (o.x != 0 ? F.x : 1.0 - F.x) * (o.y != 0 ? F.y : 1.0 - F.y);
+		float2 D = CloudDepth.Load(int3(c, 0)).xy;
+		float4 Col = CloudColor.Load(int3(c, 0));
+		float Err = abs(D.y - SceneKm) / max(min(D.y, SceneKm), 0.05);
+		float w = wb * exp(-Err * 8.0);
+		Acc += Col * w;
+		FrontAcc += D.x * w;
+		W += w;
+		if (Err < BestErr)
+		{
+			BestErr = Err;
+			Best = Col;
+			BestFront = D.x;
+		}
+	}
+	float4 Cloud = W > 1e-4 ? Acc / W : Best;
+	float Front = W > 1e-4 ? FrontAcc / W : BestFront;
+
+	float3 Out = Scene.rgb * Cloud.a + Cloud.rgb;
+
+	if (any(FlashColor > 0.0))
+	{
+		float3 P = CameraKm + Dir * min(Front, SceneKm);
+		float g = exp(-length(P - FlashKm) / 2.5) * (1.0 - Cloud.a);
+		Out += FlashColor * g * View.PreExposure;
+	}
+	OutSceneColor[Pix] = float4(Out, Scene.a);
+}

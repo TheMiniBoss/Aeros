@@ -22,6 +22,11 @@
 			"LoadingPhase": "Default"
 		},
 		{
+			"Name": "AerosCloudRender",
+			"Type": "Runtime",
+			"LoadingPhase": "PostConfigInit"
+		},
+		{
 			"Name": "AerosWeatherDemo",
 			"Type": "Runtime",
 			"LoadingPhase": "Default"
