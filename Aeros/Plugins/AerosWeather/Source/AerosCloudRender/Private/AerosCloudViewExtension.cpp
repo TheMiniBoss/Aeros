@@ -332,7 +332,8 @@ FScreenPassTexture FAerosCloudViewExtension::Render_RenderThread(FRDGBuilder& Gr
 	using namespace AerosCloudRenderInternal;
 
 	const FScreenPassTexture SceneColor = FScreenPassTexture::CopyFromSlice(GraphBuilder, Inputs.GetInput(EPostProcessMaterialInput::SceneColor));
-	if (!SceneColor.IsValid() || !Inputs.SceneTextures.SceneTextures || !UploadNoise_RenderThread(GraphBuilder.RHICmdList))
+	// No weather (no running simulation in this world, e.g. an editor viewport): nothing to draw.
+	if (!SceneColor.IsValid() || !Inputs.SceneTextures.SceneTextures || !RTParams.WeatherMap || !UploadNoise_RenderThread(GraphBuilder.RHICmdList))
 	{
 		return SceneColor;
 	}
@@ -459,6 +460,7 @@ FScreenPassTexture FAerosCloudViewExtension::Render_RenderThread(FRDGBuilder& Gr
 		P->ShadowRowStep = bFull ? 1u : 4u;
 		P->ShadowRowPhase = bFull ? 0u : (Frame & 3u);
 		P->OutShadow = GraphBuilder.CreateUAV(ShadowTex);
+		GraphBuilder.SetTextureAccessFinal(ShadowTex, ERHIAccess::SRVMask);   // read by the sun's light function
 		const FIntPoint Threads(ShadowSize.X, FMath::DivideAndRoundUp(ShadowSize.Y, int32(P->ShadowRowStep)));
 		TShaderMapRef<FShadowMapCS> Shader(GetGlobalShaderMap(View.GetFeatureLevel()));
 		FComputeShaderUtils::AddPass(GraphBuilder, RDG_EVENT_NAME("ShadowMap %dx%d", Threads.X, Threads.Y), Shader, P,

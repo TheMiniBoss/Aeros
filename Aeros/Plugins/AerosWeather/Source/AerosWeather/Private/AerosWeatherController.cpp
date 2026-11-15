@@ -64,6 +64,16 @@ void AAerosWeatherController::BeginPlay()
 	BindCloudMaterial();
 }
 
+void AAerosWeatherController::EndPlay(const EEndPlayReason::Type EndPlayReason)
+{
+	// The renderer keeps the last parameters on the render thread: hand it empty ones before this
+	// world's textures are released (queued ahead of their release), so no other view (editor
+	// viewport after PIE, next map) samples freed resources.
+	AerosCloudRender::SetParams(FAerosCloudRenderParams());
+	if (bCustomCloudsActive) SetCustomCloudShadows(false);
+	Super::EndPlay(EndPlayReason);
+}
+
 void AAerosWeatherController::UpdateCustomClouds(UAerosWeatherSubsystem* Sub)
 {
 	const bool bOn = AerosCloudRender::IsEnabled();
