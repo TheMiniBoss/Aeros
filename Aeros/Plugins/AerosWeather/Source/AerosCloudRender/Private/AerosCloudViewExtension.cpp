@@ -1,6 +1,7 @@
 // Copyright Aeros. All Rights Reserved.
 
 #include "AerosCloudViewExtension.h"
+#include "AerosCloudRender.h"
 
 #include "DataDrivenShaderPlatformInfo.h"
 #include "GlobalShader.h"
@@ -13,13 +14,15 @@
 #include "SceneView.h"
 #include "ScreenPass.h"
 #include "ShaderParameterStruct.h"
+#include "SystemTextures.h"
+#include "TextureResource.h"
 
 namespace AerosCloudRenderInternal
 {
 	TAutoConsoleVariable<int32> CVarEnable(TEXT("r.AerosClouds"), 0,
 		TEXT("Aeros custom cloud renderer (spike). 0 off, 1 on."), ECVF_RenderThreadSafe);
-	TAutoConsoleVariable<float> CVarWind(TEXT("r.AerosClouds.Wind"), 10.f,
-		TEXT("Cloud drift speed in m/s (600 ~ a x60 time-lapse of a 10 m/s wind)."), ECVF_RenderThreadSafe);
+	TAutoConsoleVariable<float> CVarWind(TEXT("r.AerosClouds.Wind"), 0.f,
+		TEXT("Test override of the storm motion used for reprojection, m/s along +X (0 = use the simulation)."), ECVF_RenderThreadSafe);
 	TAutoConsoleVariable<float> CVarFlash(TEXT("r.AerosClouds.Flash"), 0.f,
 		TEXT("Test lightning: flashes per second inside the test tower (0 off)."), ECVF_RenderThreadSafe);
 	TAutoConsoleVariable<float> CVarBlend(TEXT("r.AerosClouds.HistoryBlend"), 0.1f,
@@ -27,12 +30,27 @@ namespace AerosCloudRenderInternal
 
 	BEGIN_SHADER_PARAMETER_STRUCT(FCommonParameters, )
 		SHADER_PARAMETER(FVector3f, CameraKm)
-		SHADER_PARAMETER(FVector3f, WindKmS)
+		SHADER_PARAMETER(FVector3f, MotionKmS)
 		SHADER_PARAMETER(float, TimeS)
 		SHADER_PARAMETER(uint32, FrameIndex)
 		SHADER_PARAMETER(FIntPoint, ViewMin)
 		SHADER_PARAMETER(FIntPoint, HalfSize)
 		SHADER_PARAMETER(FIntPoint, FullSize)
+	END_SHADER_PARAMETER_STRUCT()
+
+	// Simulation data, same layout as the old cloud material parameters.
+	BEGIN_SHADER_PARAMETER_STRUCT(FCloudDataParameters, )
+		SHADER_PARAMETER_RDG_TEXTURE(Texture2D, WeatherMap)
+		SHADER_PARAMETER_RDG_TEXTURE(Texture2D, ShapeMap)
+		SHADER_PARAMETER_RDG_TEXTURE(Texture3D, VolumePrev)
+		SHADER_PARAMETER_RDG_TEXTURE(Texture3D, VolumeCur)
+		SHADER_PARAMETER_SAMPLER(SamplerState, DataSampler)
+		SHADER_PARAMETER(FVector4f, DomainCm)
+		SHADER_PARAMETER(FVector4f, RectPrevCm)
+		SHADER_PARAMETER(FVector4f, RectCurCm)
+		SHADER_PARAMETER(float, VolumeBlend)
+		SHADER_PARAMETER(float, VolumeWeight)
+		SHADER_PARAMETER(FVector3f, NoiseOffsetKm)
 	END_SHADER_PARAMETER_STRUCT()
 
 	class FTraceCS : public FGlobalShader
@@ -44,6 +62,7 @@ namespace AerosCloudRenderInternal
 		BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
 			SHADER_PARAMETER_STRUCT_REF(FViewUniformShaderParameters, View)
 			SHADER_PARAMETER_STRUCT_INCLUDE(FCommonParameters, Common)
+			SHADER_PARAMETER_STRUCT_INCLUDE(FCloudDataParameters, Data)
 			SHADER_PARAMETER_RDG_TEXTURE(Texture2D, SceneDepthTexture)
 			SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float4>, OutColor)
 			SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float2>, OutDepth)
@@ -129,6 +148,44 @@ namespace AerosCloudRenderInternal
 	}
 }
 
+namespace AerosCloudRenderInternal
+{
+	TWeakPtr<FAerosCloudViewExtension, ESPMode::ThreadSafe> GExtension;
+
+	FRDGTextureRef RegisterOr(FRDGBuilder& GraphBuilder, FTextureResource* Resource, const TCHAR* Name, bool bVolume)
+	{
+		FRHITexture* RHI = Resource ? Resource->TextureRHI.GetReference() : nullptr;
+		if (RHI)
+		{
+			return RegisterExternalTexture(GraphBuilder, RHI, Name);
+		}
+		return bVolume ? GSystemTextures.GetVolumetricBlackDummy(GraphBuilder) : GSystemTextures.GetBlackDummy(GraphBuilder);
+	}
+}
+
+void AerosCloudRender::SetParams(const FAerosCloudRenderParams& Params)
+{
+	TSharedPtr<FAerosCloudViewExtension, ESPMode::ThreadSafe> Ext = AerosCloudRenderInternal::GExtension.Pin();
+	if (!Ext.IsValid())
+	{
+		return;
+	}
+	ENQUEUE_RENDER_COMMAND(AerosCloudSetParams)([Ext, Params](FRHICommandListImmediate&)
+	{
+		Ext->SetParams_RenderThread(Params);
+	});
+}
+
+bool AerosCloudRender::IsEnabled()
+{
+	return AerosCloudRenderInternal::CVarEnable.GetValueOnGameThread() > 0;
+}
+
+void FAerosCloudViewExtension::SetGlobal(const TSharedPtr<FAerosCloudViewExtension, ESPMode::ThreadSafe>& Extension)
+{
+	AerosCloudRenderInternal::GExtension = Extension;
+}
+
 FAerosCloudViewExtension::FAerosCloudViewExtension(const FAutoRegister& AutoRegister)
 	: FSceneViewExtensionBase(AutoRegister)
 {
@@ -167,10 +224,11 @@ FScreenPassTexture FAerosCloudViewExtension::Render_RenderThread(FRDGBuilder& Gr
 	const double Time = View.Family ? View.Family->Time.GetWorldTimeSeconds() : 0.0;
 	const float DeltaTime = PrevTime >= 0.0 ? (float)FMath::Clamp(Time - PrevTime, 0.0, 0.5) : 0.f;
 	const float WindMs = CVarWind.GetValueOnRenderThread();
+	const FAerosCloudRenderParams& Data = RTParams;
 
 	FCommonParameters Common;
 	Common.CameraKm = FVector3f(View.ViewMatrices.GetViewOrigin() / 100000.0);
-	Common.WindKmS = FVector3f(WindMs / 1000.f, 0.f, 0.f);
+	Common.MotionKmS = WindMs > 0.f ? FVector3f(WindMs / 1000.f, 0.f, 0.f) : Data.MotionKmS;
 	Common.TimeS = (float)FMath::Fmod(Time, 4096.0);
 	Common.FrameIndex = FrameIndex++;
 	Common.ViewMin = ViewRect.Min;
@@ -186,6 +244,17 @@ FScreenPassTexture FAerosCloudViewExtension::Render_RenderThread(FRDGBuilder& Gr
 		FTraceCS::FParameters* P = GraphBuilder.AllocParameters<FTraceCS::FParameters>();
 		P->View = View.ViewUniformBuffer;
 		P->Common = Common;
+		P->Data.WeatherMap = RegisterOr(GraphBuilder, Data.WeatherMap, TEXT("AerosClouds.WeatherMap"), false);
+		P->Data.ShapeMap = RegisterOr(GraphBuilder, Data.ShapeMap, TEXT("AerosClouds.ShapeMap"), false);
+		P->Data.VolumePrev = RegisterOr(GraphBuilder, Data.VolumePrev, TEXT("AerosClouds.VolumePrev"), true);
+		P->Data.VolumeCur = RegisterOr(GraphBuilder, Data.VolumeCur, TEXT("AerosClouds.VolumeCur"), true);
+		P->Data.DataSampler = TStaticSamplerState<SF_Bilinear, AM_Clamp, AM_Clamp, AM_Clamp>::GetRHI();
+		P->Data.DomainCm = Data.DomainCm;
+		P->Data.RectPrevCm = Data.RectPrevCm;
+		P->Data.RectCurCm = Data.RectCurCm;
+		P->Data.VolumeBlend = Data.VolumeBlend;
+		P->Data.VolumeWeight = Data.VolumeWeight;
+		P->Data.NoiseOffsetKm = Data.NoiseOffsetKm;
 		P->SceneDepthTexture = SceneDepth;
 		P->OutColor = GraphBuilder.CreateUAV(TraceColor);
 		P->OutDepth = GraphBuilder.CreateUAV(TraceDepth);
@@ -235,7 +304,17 @@ FScreenPassTexture FAerosCloudViewExtension::Render_RenderThread(FRDGBuilder& Gr
 	FRDGTextureRef Output = GraphBuilder.CreateTexture(OutDesc, TEXT("AerosClouds.SceneColor"));
 	{
 		FVector3f FlashKm(0.f);
-		const bool bFlash = TestFlash(Time, CVarFlash.GetValueOnRenderThread(), FlashKm);
+		float FlashIntensity = 0.f;
+		if (TestFlash(Time, CVarFlash.GetValueOnRenderThread(), FlashKm))
+		{
+			FlashKm += FVector3f(Common.CameraKm.X, Common.CameraKm.Y, 0.f);   // test flash near the camera
+			FlashIntensity = 1.f;
+		}
+		else if (Data.Flashes.Num() > 0)
+		{
+			FlashKm = Data.Flashes[0].PosKm;
+			FlashIntensity = Data.Flashes[0].Intensity;
+		}
 
 		FCompositeCS::FParameters* P = GraphBuilder.AllocParameters<FCompositeCS::FParameters>();
 		P->View = View.ViewUniformBuffer;
@@ -244,8 +323,8 @@ FScreenPassTexture FAerosCloudViewExtension::Render_RenderThread(FRDGBuilder& Gr
 		P->SceneDepthTexture = SceneDepth;
 		P->CloudColor = AccumColor;
 		P->CloudDepth = AccumDepth;
-		P->FlashKm = FlashKm + FVector3f(Common.WindKmS) * Common.TimeS;
-		P->FlashColor = bFlash ? FVector3f(0.75f, 0.8f, 1.f) * 4000.f : FVector3f(0.f);
+		P->FlashKm = FlashKm;
+		P->FlashColor = FVector3f(0.75f, 0.8f, 1.f) * 4000.f * FlashIntensity;
 		P->OutSceneColor = GraphBuilder.CreateUAV(Output);
 		TShaderMapRef<FCompositeCS> Shader(GetGlobalShaderMap(View.GetFeatureLevel()));
 		FComputeShaderUtils::AddPass(GraphBuilder, RDG_EVENT_NAME("Composite"), Shader, P,

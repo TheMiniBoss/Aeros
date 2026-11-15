@@ -3,6 +3,8 @@
 #include "AerosWeatherController.h"
 #include "AerosWeatherSubsystem.h"
 #include "AerosCloudManager.h"
+#include "AerosCloudRender.h"
+#include "TextureResource.h"
 #include "Engine/DirectionalLight.h"
 #include "Engine/ExponentialHeightFog.h"
 #include "Engine/SkyLight.h"
@@ -58,6 +60,51 @@ void AAerosWeatherController::BeginPlay()
 	}
 	if (HeightFog && HeightFog->GetComponent()) BaseFogDensity = FMath::Max(BaseFogDensity, HeightFog->GetComponent()->FogDensity);
 	BindCloudMaterial();
+}
+
+void AAerosWeatherController::UpdateCustomClouds(UAerosWeatherSubsystem* Sub)
+{
+	const bool bOn = AerosCloudRender::IsEnabled();
+	if (bOn != bCustomCloudsActive)
+	{
+		bCustomCloudsActive = bOn;
+		if (UVolumetricCloudComponent* Cloud = VolumetricCloud ? VolumetricCloud->FindComponentByClass<UVolumetricCloudComponent>() : nullptr)
+		{
+			Cloud->SetVisibility(!bOn);
+		}
+	}
+	if (!bOn || !Sub)
+	{
+		return;
+	}
+
+	FAerosCloudRenderParams P;
+	auto Res = [](UTexture* T) { return T ? T->GetResource() : nullptr; };
+	P.WeatherMap = Res(Sub->GetWeatherMapTexture());
+	const FVector4 D = Sub->GetDomainRect();
+	P.DomainCm = FVector4f(float(D.X), float(D.Y), float(D.Z), float(D.W));
+	if (UAerosCloudManager* Clouds = Sub->GetCloudManager())
+	{
+		P.ShapeMap = Res(Clouds->GetCloudShapeMap());
+		P.VolumePrev = Res(Clouds->GetCloudVolume(0));
+		P.VolumeCur = Res(Clouds->GetCloudVolume(1));
+		const FVector4 RP = Clouds->GetCloudVolumeRect(0);
+		const FVector4 RC = Clouds->GetCloudVolumeRect(1);
+		P.RectPrevCm = FVector4f(float(RP.X), float(RP.Y), float(RP.Z), float(RP.W));
+		P.RectCurCm = FVector4f(float(RC.X), float(RC.Y), float(RC.Z), float(RC.W));
+		P.VolumeBlend = Clouds->GetCloudVolumeBlend();
+		P.VolumeWeight = Clouds->GetCloudVolumeWeight();
+		P.NoiseOffsetKm = FVector3f(Clouds->GetCloudNoiseOffsetKm());
+		P.MotionKmS = FVector3f(Clouds->GetCloudMotionCmS() / 100000.0);
+		if (Clouds->GetLightningFlash() > 0.f)
+		{
+			FAerosCloudFlash F;
+			F.PosKm = FVector3f(Clouds->GetLightningLocation() / 100000.0);
+			F.Intensity = Clouds->GetLightningFlash();
+			P.Flashes.Add(F);
+		}
+	}
+	AerosCloudRender::SetParams(P);
 }
 
 void AAerosWeatherController::BindCloudMaterial()
@@ -174,6 +221,8 @@ void AAerosWeatherController::Tick(float DeltaSeconds)
 			CloudMID->SetVectorParameterValue(TEXT("AerosLightningPos"), FLinearColor(float(L.X), float(L.Y), float(L.Z), 1.f));
 		}
 	}
+
+	UpdateCustomClouds(Sub);
 
 	if (SkyRecaptureInterval > 0.f && SkyLight && SkyLight->GetLightComponent())
 	{

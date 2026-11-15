@@ -5,6 +5,7 @@
 #include "CoreMinimal.h"
 #include "RendererInterface.h"
 #include "SceneViewExtension.h"
+#include "AerosCloudRender.h"
 
 struct FScreenPassTexture;
 struct FPostProcessMaterialInputs;
@@ -25,6 +26,12 @@ public:
 	virtual void SetupView(FSceneViewFamily& InViewFamily, FSceneView& InView) override {}
 	virtual void BeginRenderViewFamily(FSceneViewFamily& InViewFamily) override {}
 
+	/** Render thread: latest simulation data (see AerosCloudRender::SetParams). */
+	void SetParams_RenderThread(const FAerosCloudRenderParams& InParams) { RTParams = InParams; }
+
+	/** The module registers the live extension here so SetParams can reach it. */
+	static void SetGlobal(const TSharedPtr<FAerosCloudViewExtension, ESPMode::ThreadSafe>& Extension);
+
 	virtual void SubscribeToPostProcessingPass(EPostProcessingPass Pass, const FSceneView& InView,
 		FPostProcessingPassDelegateArray& InOutPassCallbacks, bool bIsPassEnabled) override;
 
@@ -33,6 +40,8 @@ protected:
 
 private:
 	FScreenPassTexture Render_RenderThread(FRDGBuilder& GraphBuilder, const FSceneView& View, const FPostProcessMaterialInputs& Inputs);
+
+	FAerosCloudRenderParams RTParams;
 
 	// Render-thread state (one view is enough for the spike).
 	TRefCountPtr<IPooledRenderTarget> HistoryColor;

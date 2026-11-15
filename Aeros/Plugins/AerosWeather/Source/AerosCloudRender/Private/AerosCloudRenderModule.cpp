@@ -24,12 +24,14 @@ public:
 		PostEngineInitHandle = FCoreDelegates::GetOnPostEngineInit().AddLambda([this]()
 		{
 			Extension = FSceneViewExtensions::NewExtension<FAerosCloudViewExtension>();
+			FAerosCloudViewExtension::SetGlobal(Extension);
 		});
 	}
 
 	virtual void ShutdownModule() override
 	{
 		FCoreDelegates::GetOnPostEngineInit().Remove(PostEngineInitHandle);
+		FAerosCloudViewExtension::SetGlobal(nullptr);
 		Extension.Reset();
 	}
 

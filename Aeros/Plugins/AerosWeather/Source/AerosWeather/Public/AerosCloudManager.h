@@ -51,6 +51,9 @@ public:
 	UVolumeTexture* GetCloudVolume(int32 Index) const { return CloudVolumes[Index == 0 ? 1 - CurVolume : CurVolume]; }
 	/** (CenterX cm, CenterY cm, Size cm, Height km) of the previous (0) or current (1) grid. */
 	FVector4 GetCloudVolumeRect(int32 Index) const;
+
+	/** Mean storm motion (cm/s, Unreal XY) stored with the current voxel grid. */
+	FVector GetCloudMotionCmS() const { return VolumeDescs[CurVolume].MotionCmS; }
 	/** 0 = previous grid, 1 = current grid (ramps over 1 s after each upload). */
 	float GetCloudVolumeBlend() const { return VolumeBlend; }
 	/** 0 after a jump of more than 40 km until the grid at the new place is uploaded, else 1. */

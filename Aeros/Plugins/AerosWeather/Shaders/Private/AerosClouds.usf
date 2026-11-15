@@ -8,7 +8,7 @@
 #include "/Engine/Private/Common.ush"
 
 float3 CameraKm;
-float3 WindKmS;
+float3 MotionKmS;       // mean storm motion (reprojection only: the data is already advected)
 float  TimeS;
 uint   FrameIndex;
 int2   ViewMin;
@@ -19,10 +19,22 @@ Texture2D SceneDepthTexture;
 RWTexture2D<float4> OutColor;
 RWTexture2D<float2> OutDepth;
 
-static const float BaseKm = 1.4;
-static const float TopKm = 12.6;
+// Simulation data (same layout as the old cloud material parameters)
+Texture2D WeatherMap;
+Texture2D ShapeMap;
+Texture3D VolumePrev;
+Texture3D VolumeCur;
+SamplerState DataSampler;
+float4 DomainCm;
+float4 RectPrevCm;
+float4 RectCurCm;
+float VolumeBlend;
+float VolumeWeight;
+float3 NoiseOffsetKm;
+
+static const float BaseKm = 0.1;
+static const float TopKm = 16.0;
 static const float SigmaPerKm = 60.0;   // extinction of a dense cumulus core (0.06 / m)
-static const float2 TowerKm = float2(8.0, 0.0);
 
 // ------------------------------------------------------------------ noise
 
@@ -68,35 +80,20 @@ float DetailNoise(float3 p, float Octaves)
 	return Sum / Norm;
 }
 
-// Cheap large-scale shape (no detail): 0 means empty, lets the march skip work.
-float CloudShape(float3 pKm, float3 q)
+float3 VoxelUVW(float3 pKm, float4 RectCm)
 {
-	float cov = ValueNoise(float3(q.xy / 9.0, 0.5)) * 0.65 + ValueNoise(float3(q.xy / 3.5, 7.5)) * 0.35;
-	cov = saturate((cov - 0.52) * 3.5);
-	float d = length(q.xy - TowerKm);
-	float tower = 1.0 - smoothstep(2.0, 4.5, d);
-	float top = BaseKm + 0.4 + cov * 2.6 + tower * 9.4;
-	float h = (pKm.z - BaseKm) / max(top - BaseKm, 0.1);
-	float profile = saturate(h * 8.0) * saturate((1.0 - h) * 2.5);
-	float shape = max(cov, tower) * profile;
-
-	// Anvil: a flat spreading sheet on top of the tower, ragged rim.
-	float rim = 11.0 + 5.0 * ValueNoise(float3(q.xy / 5.0, 3.3));
-	float anvil = (1.0 - smoothstep(3.0, rim, d)) * smoothstep(10.2, 10.9, pKm.z) * (1.0 - smoothstep(11.5, 12.4, pKm.z));
-	return max(shape, anvil * 0.8);
+	return float3((pKm.xy * 1e5 - RectCm.xy) / RectCm.z + 0.5, pKm.z / RectCm.w);
 }
 
+// Task 1 debug density: the voxel grids only (proves the data path; replaced by the ported field).
 float CloudDensity(float3 pKm, float Octaves)
 {
-	float3 q = pKm - WindKmS * TimeS;
-	float shape = CloudShape(pKm, q);
-	if (shape <= 0.01)
-	{
-		return 0.0;
-	}
-	float det = DetailNoise(q / 1.1, Octaves);
-	float erode = (1.0 - det) * 0.55;
-	return saturate((shape - erode) / max(1.0 - erode, 0.05));
+	float3 a = VoxelUVW(pKm, RectPrevCm);
+	float3 b = VoxelUVW(pKm, RectCurCm);
+	float vp = VolumePrev.SampleLevel(DataSampler, a, 0).r;
+	float vc = VolumeCur.SampleLevel(DataSampler, b, 0).r;
+	float Inside = (all(b > 0.0) && all(b < 1.0)) ? 1.0 : 0.0;
+	return saturate(lerp(vp, vc, VolumeBlend) * 2.0) * VolumeWeight * Inside;
 }
 
 // ------------------------------------------------------------------ helpers
@@ -265,7 +262,7 @@ void TemporalCS(uint2 Id : SV_DispatchThreadID)
 		float3 Dir = RayDirFromSvPos(float2(ViewMin) + float2(Id) * 2.0 + 1.0);
 		float FrontKm = min(CurD.x, CurD.y);
 		// The cloud at P now was at P - wind * dt last frame.
-		float3 PPrev = View.TranslatedWorldCameraOrigin + Dir * FrontKm * 1e5 - WindKmS * 1e5 * DeltaTime;
+		float3 PPrev = View.TranslatedWorldCameraOrigin + Dir * FrontKm * 1e5 - MotionKmS * 1e5 * DeltaTime;
 		float4 Clip = mul(float4(PPrev, 1.0), TranslatedToPrevClip);
 		if (Clip.w > 0.0)
 		{

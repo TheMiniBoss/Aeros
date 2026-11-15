@@ -90,6 +90,9 @@ public:
 
 private:
 	void BindCloudMaterial();
+	/** Feeds the custom cloud renderer and hides the engine VolumetricCloud while it is on. */
+	void UpdateCustomClouds(class UAerosWeatherSubsystem* Sub);
+	bool bCustomCloudsActive = false;
 
 	UPROPERTY(Transient)
 	TObjectPtr<UMaterialInstanceDynamic> CloudMID;
