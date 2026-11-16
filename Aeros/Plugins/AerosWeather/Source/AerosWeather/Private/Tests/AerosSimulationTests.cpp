@@ -116,6 +116,19 @@ bool FAerosStormTrackTest::RunTest(const FString& Parameters)
 	}
 	TestTrue(TEXT("Updraft followed over 30+ minutes"), Samples >= 30);
 	{
+		// The domain follows the player (Recenter, whole cells): the tracked updraft must not move with it
+		FAerosSnapshot Before, After;
+		Sim.FillSnapshot(Before);
+		const FAerosStormData* B0 = Before.Storms.Num() > 0 ? &Before.Storms[0] : nullptr;
+		Sim.Recenter(Before.DomainCenter + FVector(400000.0, -200000.0, 0.0));   // 4 km east, 2 km north: under the filter's 8 km
+		Sim.Step(30.f);
+		Sim.FillSnapshot(After);
+		const FAerosStormData* A0 = nullptr;
+		for (const FAerosStormData& C : After.Storms) if (B0 && C.Id == B0->Id) A0 = &C;
+		const double Moved = (B0 && A0) ? FVector::Dist2D(A0->UpdraftLocation, B0->UpdraftLocation + B0->Velocity * 100.0 * 30.0) : 1e9;
+		TestTrue(TEXT("Recenter keeps the tracked updraft in place (< 1.5 km off its motion)"), Moved < 150000.0);
+	}
+	{
 		// Every published state has its own tracking, so the display can interpolate t -> t+1
 		FAerosSnapshot A, B;
 		Sim.FillSnapshot(A);
@@ -415,6 +428,17 @@ bool FAerosCloudVolumeTest::RunTest(const FString& Parameters)
 	TArray<uint8> SingleGrid;
 	FAerosCloudVolume::Build(Single, Desc, SingleGrid);
 	TestTrue(TEXT("No anvil far upwind"), FAerosCloudVolume::SampleDensity(SingleGrid, Desc, Upwind, ELkm - 0.8f) < 0.05f);
+	// Over mountains the cloud base stands on the ground: LCL is a height above the ground (it was drawn
+	// above sea level, inside the mountain)
+	{
+		FAerosSnapshot High = Single;
+		for (FAerosSnapCell& C : High.Cells) C.Elev = 2500.f;
+		TArray<uint8> HighGrid;
+		FAerosCloudVolume::Build(High, Desc, HighGrid);
+		const float Below = FAerosCloudVolume::SampleDensity(HighGrid, Desc, St.UpdraftLocation, LCLkm + 0.6f);
+		const float Above = FAerosCloudVolume::SampleDensity(HighGrid, Desc, St.UpdraftLocation, 2.5f + LCLkm + 1.5f);
+		TestTrue(TEXT("Storm base raised by the ground height (none at LCL above sea, dense at ground + LCL)"), Below < 0.05f && Above > 0.5f);
+	}
 	TestTrue(TEXT("Clear below the cloud base away from storms"), FAerosCloudVolume::SampleDensity(SingleGrid, Desc, Upwind, 0.3f) < 0.05f);
 	// Rain shaft under the precipitation core: no cloud density (R) below the base, rain amount in G
 	{

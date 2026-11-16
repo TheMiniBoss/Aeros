@@ -12,6 +12,7 @@
 
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
+#include "AerosTypes.h"
 #include "AerosTornado.generated.h"
 
 class UNiagaraComponent;
@@ -70,6 +71,16 @@ public:
 
 	UFUNCTION(BlueprintPure, Category = "Aeros|Tornado")
 	int32 GetParentStormId() const { return ParentStormId; }
+
+	/** Where a storm's tornado stands: just behind and right of the updraft (~1 km), under the wall cloud
+	 *  the cloud grid draws there. 3.4 km away (as before) it was often out of the tower, under clear sky. */
+	static FVector AnchorFor(const FAerosStormData& Storm, const FVector& FallbackMotion)
+	{
+		FVector Motion = Storm.Velocity.Size2D() > 1.0 ? Storm.Velocity.GetSafeNormal2D() : FallbackMotion.GetSafeNormal2D();
+		if (Motion.IsNearlyZero()) Motion = FVector(1.0, 0.0, 0.0);
+		const FVector Right(-Motion.Y, Motion.X, 0.0);
+		return Storm.UpdraftLocation - Motion * 100000.0 + Right * 50000.0;
+	}
 
 	UPROPERTY(Replicated, BlueprintReadOnly, Category = "Aeros|Tornado") int32 ParentStormId = -1;
 	UPROPERTY(Replicated, BlueprintReadOnly, Category = "Aeros|Tornado") int32 EFRating = 0;

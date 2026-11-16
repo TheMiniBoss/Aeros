@@ -2225,7 +2225,14 @@ void FAerosSimulation::Recenter(const FVector& World)
 	for (FAerosVortex& V : Vortices) { V.X -= SX * DX; V.Y -= SY * DX; }
 	for (FAerosEmitter& E : Emitters) { E.X -= SX * DX; E.Y -= SY * DX; }
 	RecomputeSlopes();
-	for (FAerosTrackedStorm& S : Storms) { S.X -= SX * DX; S.Y -= SY * DX; }
+	// The updraft and hail core too: left behind, the track filter pulled the tower by the shift (a jump after
+	// every fast travel or respawn that moved the domain)
+	for (FAerosTrackedStorm& S : Storms)
+	{
+		S.X -= SX * DX; S.Y -= SY * DX;
+		S.UX -= SX * DX; S.UY -= SY * DX;
+		S.HX -= SX * DX; S.HY -= SY * DX;
+	}
 }
 
 // =====================================================================

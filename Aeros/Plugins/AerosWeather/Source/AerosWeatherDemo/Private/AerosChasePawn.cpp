@@ -564,9 +564,12 @@ void AAerosChasePawn::TickDriving(APlayerController* PC, float DeltaSeconds)
 		if (UAerosCloudManager* CM = Sub->GetCloudManager()) Rect = CM->GetCloudVolumeRect(1);
 		for (const FAerosStormData& S : Sub->GetStorms())
 		{
-			UE_LOG(LogTemp, Display, TEXT("Aeros chase: car (%.1f, %.1f) storm %d updraft (%.1f, %.1f) location (%.1f, %.1f) core (%.1f, %.1f) top %.0f m | grid (%.1f, %.1f) | domain (%.1f, %.1f)"),
+			// Density of the 3D cloud grid in the tower, half-way up, and its ground (orographic) height
+			float Tower = -1.f;
+			if (UAerosCloudManager* CM = Sub->GetCloudManager()) Tower = CM->DebugSampleVolume(S.UpdraftLocation, 0.5f * (S.CloudTop + S.LCL) * 0.001f);
+			UE_LOG(LogTemp, Display, TEXT("Aeros chase: car (%.1f, %.1f) storm %d updraft (%.1f, %.1f) location (%.1f, %.1f) core (%.1f, %.1f) top %.0f m lcl %.0f m tower density %.2f | grid (%.1f, %.1f) | domain (%.1f, %.1f)"),
 				L.X * 1e-5, L.Y * 1e-5, S.Id, S.UpdraftLocation.X * 1e-5, S.UpdraftLocation.Y * 1e-5, S.Location.X * 1e-5, S.Location.Y * 1e-5,
-				S.HailCoreLocation.X * 1e-5, S.HailCoreLocation.Y * 1e-5, S.CloudTop, Rect.X * 1e-5, Rect.Y * 1e-5, Dom.X * 1e-5, Dom.Y * 1e-5);
+				S.HailCoreLocation.X * 1e-5, S.HailCoreLocation.Y * 1e-5, S.CloudTop, S.LCL, Tower, Rect.X * 1e-5, Rect.Y * 1e-5, Dom.X * 1e-5, Dom.Y * 1e-5);
 		}
 	}
 	// The day is the storm's life: it ends once the storm has died
@@ -577,6 +580,20 @@ void AAerosChasePawn::TickDriving(APlayerController* PC, float DeltaSeconds)
 	if (KeyPressed(PC, { EKeys::BackSpace })) { GoToMenu(); return; }
 
 	if (bAutopilot) TickAutopilot(DeltaSeconds);
+	else if (FParse::Param(FCommandLine::Get(), TEXT("AerosChaseAimStorm")))
+	{
+		// Test option: stand still and look at the strongest storm's tower, half-way up
+		float BestI = -1.f;
+		for (const FAerosStormData& S : Sub->GetStorms())
+		{
+			if (S.Intensity <= BestI) continue;
+			BestI = S.Intensity;
+			const FRotator Aim = (S.UpdraftLocation + FVector(0, 0, 0.5 * (S.CloudTop + S.LCL) * 100.0) - Camera->GetComponentLocation()).Rotation();
+			LookYaw = FMath::Clamp(FRotator::NormalizeAxis(Aim.Yaw - HeadingDeg), -170.f, 170.f);
+			LookPitch = FMath::Clamp(Aim.Pitch, -30.f, 70.f);
+		}
+		SpeedMs = 0.f;
+	}
 	else
 	{
 		Drive(PC, DeltaSeconds);

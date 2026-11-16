@@ -123,6 +123,20 @@ void FAerosCloudVolume::Build(const FAerosSnapshot& Snap, const FAerosCloudVolum
 	Anvil.SetNum(NX * NY);
 	// Storms are tracked once a simulated minute, the grid is built at every snapshot (~30 s): move them on
 	// to the snapshot's time, or the clouds jumped ~1 km at each tracking (every minute of the clock)
+	// Ground height (km above sea level) under a point, bilinear: cloud bases and tops are heights above
+	// the ground in the simulation, and the grid's z is above sea level
+	auto GroundKm = [&Snap](const FVector& World)
+	{
+		float GX = 0.f, GY = 0.f;
+		if (!Snap.WorldToGrid(World, GX, GY)) return 0.f;
+		const float FX = GX - 0.5f, FY = GY - 0.5f;
+		const int32 I = FMath::FloorToInt(FX), J = FMath::FloorToInt(FY);
+		const float TX = FX - I, TY = FY - J;
+		const float E = Snap.At(I, J).Elev * (1.f - TX) * (1.f - TY) + Snap.At(I + 1, J).Elev * TX * (1.f - TY)
+			+ Snap.At(I, J + 1).Elev * (1.f - TX) * TY + Snap.At(I + 1, J + 1).Elev * TX * TY;
+		return FMath::Max(E, 0.f) * 0.001f;
+	};
+
 	for (int32 StormIndex = 0; StormIndex < Snap.Storms.Num(); ++StormIndex)
 	{
 		const FAerosStormData S = Snap.StormAt(StormIndex, Snap.SimTime);
@@ -130,8 +144,10 @@ void FAerosCloudVolume::Build(const FAerosSnapshot& Snap, const FAerosCloudVolum
 		ToLocal(S.UpdraftLocation, Sh.UX, Sh.UY);
 		ToLocal(S.HailCoreLocation.IsZero() ? S.UpdraftLocation : S.HailCoreLocation, Sh.HX, Sh.HY);
 		if (FMath::Abs(Sh.UX) > HalfKm + 90.f || FMath::Abs(Sh.UY) > HalfKm + 90.f) continue;
-		Sh.LCL = FMath::Clamp(S.LCL * 0.001f, 0.3f, 3.f);
-		Sh.EL = FMath::Clamp(S.CloudTop * 0.001f, Sh.LCL + 1.f, Desc.HeightKm - 1.f);
+		// Orographic: the storm stands on the ground under its updraft
+		const float Ground = GroundKm(S.UpdraftLocation);
+		Sh.LCL = Ground + FMath::Clamp(S.LCL * 0.001f, 0.3f, 3.f);
+		Sh.EL = FMath::Clamp(Ground + S.CloudTop * 0.001f, Sh.LCL + 1.f, Desc.HeightKm - 1.f);
 		Sh.TowerR = FMath::Clamp(S.RadiusKm * 0.35f, 2.f, 6.f);
 		Sh.CoreR = FMath::Max(S.RadiusKm * 0.6f, 3.f);
 		Sh.Overshoot = FMath::Clamp((S.MaxUpdraft - 30.f) / 20.f, 0.f, 1.f) * 2.f;
@@ -237,8 +253,10 @@ void FAerosCloudVolume::Build(const FAerosSnapshot& Snap, const FAerosCloudVolum
 				StratDensity = 0.5f * Smooth(0.7f, 0.95f, Cover) * (1.f - Smooth(0.1f, 0.25f, Conv));
 				if (StratDensity > 0.f)
 				{
-					StratBase = Mix(C00.CloudBase, C10.CloudBase, C01.CloudBase, C11.CloudBase) * 0.001f;
-					StratTop = FMath::Max(Mix(C00.CloudTop, C10.CloudTop, C01.CloudTop, C11.CloudTop) * 0.001f, StratBase + 0.3f);
+					// Heights above the ground: the deck follows the terrain (orographic)
+					const float Ground = FMath::Max(Mix(C00.Elev, C10.Elev, C01.Elev, C11.Elev), 0.f) * 0.001f;
+					StratBase = Ground + Mix(C00.CloudBase, C10.CloudBase, C01.CloudBase, C11.CloudBase) * 0.001f;
+					StratTop = FMath::Max(Ground + Mix(C00.CloudTop, C10.CloudTop, C01.CloudTop, C11.CloudTop) * 0.001f, StratBase + 0.3f);
 				}
 				Gust = Mix(GustFront(Snap, I, J), GustFront(Snap, I + 1, J), GustFront(Snap, I, J + 1), GustFront(Snap, I + 1, J + 1));
 			}

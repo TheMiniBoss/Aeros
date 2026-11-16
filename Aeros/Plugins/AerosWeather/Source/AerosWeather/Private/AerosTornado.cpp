@@ -265,19 +265,28 @@ void AAerosTornado::Tick(float DeltaSeconds)
 			ParentCheckTimer = 0.f;
 			bool bParentNear = false;
 			{
-				// Moved on from their tracking (once a simulated minute): the anchor no longer jumps
-				for (const FAerosStormData& S : Sub->GetStorms())
+				// Storms as displayed (interpolated between states). A storm re-tracked under another id
+				// (cells merging) is adopted if its updraft is within 15 km: the tornado used to lose its
+				// parent and wander off on its own under clear sky.
+				const TArray<FAerosStormData> Storms = Sub->GetStorms();
+				const FAerosStormData* Parent = nullptr;
+				double Nearest = 1500000.0;
+				for (const FAerosStormData& S : Storms)
 				{
-					if (S.Id != ParentStormId) continue;
+					if (S.Id == ParentStormId) { Parent = &S; break; }
+					const double D = FVector::Dist2D(S.UpdraftLocation, GetActorLocation());
+					if (D < Nearest) { Nearest = D; Parent = &S; }
+				}
+				if (Parent)
+				{
+					const FAerosStormData& S = *Parent;
+					ParentStormId = S.Id;
 					bParentNear = FVector::Dist2D(S.UpdraftLocation, GetActorLocation()) < 2000000.0;
 					// Same place as at birth (UAerosStormManager::SpawnTornado), moving with the storm
-					const FVector Motion = S.Velocity.Size2D() > 1.0 ? S.Velocity.GetSafeNormal2D() : TrackVelocity.GetSafeNormal2D();
-					const FVector Right(-Motion.Y, Motion.X, 0.0);
-					Anchor = S.UpdraftLocation - Motion * 300000.0 + Right * 150000.0;
+					Anchor = AnchorFor(S, TrackVelocity);
 					AnchorVelocity = FVector(S.Velocity.X, S.Velocity.Y, 0.0) * 100.0 * (Sub->IsPaused() ? 0.f : Sub->GetTimeScale());
 					if (S.Velocity.Size2D() > 1.0) TrackVelocity = S.Velocity;
 					bHasAnchor = true;
-					break;
 				}
 			}
 			if (!bParentNear) { Age = FMath::Max(Age, Lifetime * 0.8f); bHasAnchor = false; } // rope out over the last 20 %
@@ -287,11 +296,14 @@ void AAerosTornado::Tick(float DeltaSeconds)
 		const FVector Perp(-Dir.Y, Dir.X, 0.0);
 		if (bHasAnchor)
 		{
-			// Under the mesocyclone, wandering up to ~1 km around it (looping paths are common)
+			// Under the mesocyclone, wandering up to ~0.5 km around it (looping paths are common). It moves
+			// with the storm and the pull only takes up the gap: pulled alone (time constant 4 s) it trailed
+			// v x 4 s behind, 3.6 km at x60, out of the cloud.
 			Anchor += AnchorVelocity * DeltaSeconds;
-			const FVector Wander = Perp * (100000.0 * FMath::Sin(Age * 0.05f + Seed)) + Dir * (60000.0 * FMath::Sin(Age * 0.031f + Seed * 1.7f));
+			const FVector Wander = Perp * (50000.0 * FMath::Sin(Age * 0.05f + Seed)) + Dir * (30000.0 * FMath::Sin(Age * 0.031f + Seed * 1.7f));
 			const FVector Target(Anchor.X + Wander.X, Anchor.Y + Wander.Y, Here.Z);
-			SetActorLocation(Here + (Target - Here) * (1.0 - FMath::Exp(-DeltaSeconds / 4.0)));
+			const FVector Carried = Here + AnchorVelocity * DeltaSeconds;
+			SetActorLocation(Carried + (Target - Carried) * (1.0 - FMath::Exp(-DeltaSeconds / 2.0)));
 		}
 		else
 		{

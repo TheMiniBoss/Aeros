@@ -171,7 +171,7 @@ AAerosTornado* UAerosStormManager::SpawnTornado(const FAerosStormData& Storm, fl
 
 	// Tornado sits under the rear flank of the updraft (mesocyclone)
 	const FVector Motion = Storm.Velocity.GetSafeNormal2D();
-	const FVector Location = Storm.UpdraftLocation - Motion * 300000.0 + FVector(-Motion.Y, Motion.X, 0.0) * 150000.0;
+	const FVector Location = AAerosTornado::AnchorFor(Storm, Motion);
 
 	FActorSpawnParameters Params;
 	Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;

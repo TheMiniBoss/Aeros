@@ -248,8 +248,11 @@ void UAerosWeatherSubsystem::PullSnapshot(float DeltaTime)
 	FAerosSnapshotPtr Latest = SimThread->GetLatestSnapshot();
 	if (Latest && (History.Num() == 0 || Latest.Get() != History.Last().Get()))
 	{
-		// A state from the past (re-initialised simulation) starts the history over
-		if (History.Num() > 0 && Latest->SimTime <= History.Last()->SimTime) History.Reset();
+		// The same time again (the domain recentred on the player republishes its state): replace it. Only a
+		// state from the past (re-initialised simulation) starts the history over; resetting on a recentre
+		// threw the display onto the newest state, up to two steps ahead (a jump after every fast travel).
+		if (History.Num() > 0 && Latest->SimTime == History.Last()->SimTime) History.Pop();
+		else if (History.Num() > 0 && Latest->SimTime < History.Last()->SimTime) History.Reset();
 		History.Add(Latest);
 		while (History.Num() > 6) History.RemoveAt(0);
 	}

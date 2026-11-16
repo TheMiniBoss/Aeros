@@ -59,6 +59,8 @@ public:
 	float GetCloudVolumeBlend() const { return VolumeBlend; }
 	/** Number of times a new voxel grid replaced the current one (tests time their pictures on it). */
 	int32 GetCloudVolumeSwaps() const { return VolumeSwaps; }
+	/** Debug: density of the current 3D cloud grid at a world point (CPU copy, nearest voxel), -1 if none. */
+	float DebugSampleVolume(const FVector& World, float AltKm) const;
 	/** Real seconds since the voxel grid was last swapped for a new build (debug overlay), -1 before any. */
 	float GetSecondsSinceVolumeSwap() const { return LastSwapRealTime < 0.0 ? -1.f : float(FPlatformTime::Seconds() - LastSwapRealTime); }
 	/** 0 after a jump of more than 40 km until the grid at the new place is uploaded, else 1. */

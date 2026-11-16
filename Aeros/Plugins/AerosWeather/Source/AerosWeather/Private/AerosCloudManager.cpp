@@ -112,6 +112,16 @@ void UAerosCloudManager::Tick(float DeltaTime)
 	UpdateCloudVolume(DeltaTime);
 }
 
+float UAerosCloudManager::DebugSampleVolume(const FVector& World, float AltKm) const
+{
+	if (!CurVolumeData.IsValid()) return -1.f;
+	// The grid content moved with the storms since it was built: sample where the point was then
+	const FVector4 R = GetCloudVolumeRect(1);
+	const FAerosCloudVolumeDesc& D = VolumeDescs[CurVolume];
+	const FVector Shift(R.X - D.Center.X, R.Y - D.Center.Y, 0.0);
+	return FAerosCloudVolume::SampleDensity(*CurVolumeData, D, World - Shift, AltKm);
+}
+
 FVector4 UAerosCloudManager::GetCloudVolumeRect(int32 Index) const
 {
 	const FAerosCloudVolumeDesc& D = VolumeDescs[Index == 0 ? 1 - CurVolume : CurVolume];
@@ -260,8 +270,11 @@ void UAerosCloudManager::UpdateTextures()
 			const FAerosSnapCell& C = Cur->Cells[I + J * NX];
 			auto L = [A](float X, float Y) { return X + (Y - X) * A; };
 			const float Cover = L(P.CloudCover, C.CloudCover);
-			const float Base = L(P.CloudBase, C.CloudBase);
-			const float Top = L(P.CloudTop, C.CloudTop);
+			// Base and top are heights above the ground in the simulation; the renderer wants them above
+			// sea level, so the clouds rise over hills and mountains (orographic) instead of sitting in them
+			const float Ground = FMath::Max(L(P.Elev, C.Elev), 0.f);
+			const float Base = Ground + L(P.CloudBase, C.CloudBase);
+			const float Top = Ground + L(P.CloudTop, C.CloudTop);
 			const float Rain = L(P.PrecipRate, C.PrecipRate);
 			WeatherPixels[Row + I] = FColor(Byte(Cover), Byte(Base / 5000.f), Byte(Top / 16000.f), Byte(FMath::Sqrt(Rain / 100.f)));
 			SurfacePixels[Row + I] = FColor(Byte(L(P.Wet, C.Wet)), Byte(L(P.Snow, C.Snow) / 50.f), Byte(L(P.HailCover, C.HailCover)), Byte((L(P.T, C.T) + 40.f) / 90.f));
