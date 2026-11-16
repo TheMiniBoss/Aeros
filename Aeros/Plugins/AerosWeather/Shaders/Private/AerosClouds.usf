@@ -187,6 +187,7 @@ void TraceCS(uint2 Id : SV_DispatchThreadID)
 		float Jitter = IGN(float2(Id), FrameIndex);
 		float t = t0 + AerosCloudStepKm(t0) * Jitter;
 		int FineSteps = 0;
+		float LastEmptyStride = 0.0;   // length of the previous step when it crossed empty air
 		[loop] for (int i = 0; i < MaxSteps + 100 && t < t1 && T > 0.01; ++i)
 		{
 			float Step = AerosCloudStepKm(t);
@@ -209,6 +210,18 @@ void TraceCS(uint2 Id : SV_DispatchThreadID)
 			float3 P = CameraKm + Dir * t;
 			float Octaves = AerosCloudOctaves(t);
 			FAerosCloudSample Smp = AerosCloudDensity(P, t, Octaves);
+			if (Smp.Density > 0.001 && LastEmptyStride > 0.0)
+			{
+				// Came into a cloud on a double stride: back up and come in at the normal step, jittered.
+				// The start jitter only spans one normal step, so entries landed in the same half of every
+				// double stride, and grazing flat tops (anvils seen from above) showed fixed bands. Backing
+				// up to a random point of the stride instead was cheaper but let faint bands back in.
+				// Cost: about +1 ms at Quality 2 (3.5-4.1 -> 4.5-7 ms, view of a supercell from 25 km).
+				t = t - LastEmptyStride + Step * max(Jitter, 0.05);
+				LastEmptyStride = 0.0;
+				continue;
+			}
+			LastEmptyStride = 0.0;
 			if (Smp.Density > 0.001)
 			{
 				float Sigma = AerosCloudExtinction(Smp);
@@ -240,13 +253,14 @@ void TraceCS(uint2 Id : SV_DispatchThreadID)
 			}
 			else if (!bInTornado)
 			{
-				Step = min(Step * 2.0, 1.0);   // empty air: longer strides (the jitter keeps edges unbiased)
+				Step = min(Step * 2.0, 1.0);   // empty air: longer strides (backed up on entry, see above)
 			}
 			// Land just inside the next tornado volume instead of striding over it
 			if (!bInTornado && t + Step > NextIn)
 			{
 				Step = max(NextIn - t + 0.02 * Jitter, 0.005);
 			}
+			LastEmptyStride = (Smp.Density <= 0.001 && !bInTornado) ? Step : 0.0;
 			t += Step;
 		}
 	}

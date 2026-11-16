@@ -270,9 +270,12 @@ void FAerosCloudVolume::Build(const FAerosSnapshot& Snap, const FAerosCloudVolum
 					const float Pouch = Smooth(0.45f, 0.85f, ValueNoise(WX, WY, 1.6f, 11u) * 0.7f + ValueNoise(WX, WY, 0.7f, 12u) * 0.3f);
 					const float Lobes = 0.7f * A.NearCore * Pouch;
 					const float Base = A.TopKm - Thick - Lobes;
-					if (Alt > Base && Alt < A.TopKm + 0.2f)
+					// Ramps over ~3-4 voxels (333 m each): a 300 m fall-off put the top in one layer or the
+					// next, and seen from above the anvil showed terraces like contour lines. The shader's
+					// threshold (voxIce) keeps the visible surface crisp.
+					if (Alt > Base - 0.4f && Alt < A.TopKm + 0.8f)
 					{
-						Dens = FMath::Max(Dens, 0.8f * A.Strength * Smooth(Base, Base + 0.25f, Alt) * (1.f - Smooth(A.TopKm - 0.1f, A.TopKm + 0.2f, Alt)));
+						Dens = FMath::Max(Dens, 0.8f * A.Strength * Smooth(Base - 0.4f, Base + 0.5f, Alt) * (1.f - Smooth(A.TopKm - 0.6f, A.TopKm + 0.8f, Alt)));
 					}
 				}
 

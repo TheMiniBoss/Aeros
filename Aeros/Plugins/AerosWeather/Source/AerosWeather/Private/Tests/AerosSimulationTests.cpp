@@ -274,6 +274,20 @@ bool FAerosCloudVolumeTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("Tower is dense at mid height"), FAerosCloudVolume::SampleDensity(Grid, Desc, St.UpdraftLocation, 0.5f * (LCLkm + ELkm)) > 0.5f);
 	TestTrue(TEXT("Nothing 2.5 km above the EL"), FAerosCloudVolume::SampleDensity(Grid, Desc, St.UpdraftLocation, ELkm + 2.5f) < 0.05f);
 	TestTrue(TEXT("Anvil downwind near the EL"), FAerosCloudVolume::SampleDensity(Grid, Desc, Downwind, ELkm - 0.8f) > 0.2f);
+	// The anvil top fades over more than one voxel layer (333 m): a sharper top fell into one layer or the
+	// next, and seen from above the anvil showed terraces like contour lines
+	{
+		float Peak = 0.f;
+		for (float Z = ELkm - 3.f; Z <= ELkm + 2.f; Z += 0.05f) Peak = FMath::Max(Peak, FAerosCloudVolume::SampleDensity(Grid, Desc, Downwind, Z));
+		float Z90 = -1.f, Z10 = -1.f;
+		for (float Z = ELkm + 2.f; Z >= ELkm - 3.f; Z -= 0.05f)
+		{
+			const float D = FAerosCloudVolume::SampleDensity(Grid, Desc, Downwind, Z);
+			if (Z10 < 0.f && D >= 0.1f * Peak) Z10 = Z;
+			if (Z90 < 0.f && D >= 0.9f * Peak) { Z90 = Z; break; }
+		}
+		TestTrue(TEXT("Anvil top fades over >= 0.5 km (no terraces)"), Peak > 0.2f && Z10 > 0.f && Z90 > 0.f && Z10 - Z90 >= 0.5f);
+	}
 	// Upwind checks on this storm alone: in an outbreak another storm upwind legitimately spreads its anvil there
 	FAerosSnapshot Single = Snap;
 	Single.Storms.Reset();

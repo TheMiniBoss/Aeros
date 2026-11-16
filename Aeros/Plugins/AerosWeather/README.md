@@ -229,7 +229,7 @@ Avec le rendu maison, l'entonnoir, le nuage-mur et la poussière font partie du 
 
 | Variable / option | Rôle |
 |---|---|
-| `r.AerosClouds.TornadoK` | calibrage de la condensation (2 par défaut) : plus haut, les entonnoirs descendent plus bas |
+| `r.AerosClouds.TornadoK` | calibrage de la condensation, valeur minimale (2 par défaut) : chaque tornade prend au moins le K qui fait toucher le sol à son entonnoir mûr (`Aeros::Funnel::TouchdownK`, 1,3 x le contact). Il pend sous le nuage pendant la naissance et remonte à la fin de la corde. La tornade suit le mésocyclone de son orage (même à x60) |
 | `r.AerosClouds.TornadoDebug` | 1 : dessine le volume de chaque tornade en nuage léger |
 | `-AerosTornadoCam=Dist,Alt,LookAlt` | cadrage de l'étape tornade (km, m, m ; distance négative = l'autre côté) ; défaut 2 km, 60 m, 250 m |
 | `-AerosTornadoVmax=`, `-AerosTornadoCore=`, `-AerosTornadoSubs=`, `-AerosTornadoAge=` | galerie : vent max (m/s), cœur (m), sous-tourbillons, âge (0-1) ; l'étape de la visite démarre à 0,3 |
