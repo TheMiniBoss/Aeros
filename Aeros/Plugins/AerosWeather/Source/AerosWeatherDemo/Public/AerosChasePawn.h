@@ -172,6 +172,7 @@ private:
 	float AutoShotTimer = 0.f;
 	float QuitAfter = -1.f;
 	float EndDayAfter = -1.f;
+	float AutoTornadoKm = 3.f;   // -AerosChaseNear=km: how close the autopilot keeps to a tornado
 	float DrivingTime = 0.f;
 	float AutoTravelTimer = 0.f;
 	/** Tornado-genesis settings saved while the chase tunes them (negative = not tuned). */

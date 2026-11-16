@@ -154,6 +154,11 @@ private:
 	float SpinSign = 1.f;        // cyclonic: counter-clockwise in the north
 
 	float ParentCheckTimer = 0.f;
+	// Stays under its parent's mesocyclone (behind the updraft, on its right flank, where it was born):
+	// the storm moves in simulated time, so at x60 a tornado on its own track was left under clear sky.
+	bool bHasAnchor = false;
+	FVector Anchor = FVector::ZeroVector;          // cm, world (z unused)
+	FVector AnchorVelocity = FVector::ZeroVector;  // cm per real second
 	EAerosTornadoShape Shape = EAerosTornadoShape::Cone;
 	int32 NumSubVortices = 0;
 	TArray<int32> TubeSectionsCreated;

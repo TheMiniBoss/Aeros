@@ -268,16 +268,38 @@ void AAerosTornado::Tick(float DeltaSeconds)
 			{
 				for (const FAerosStormData& S : Snap->Storms)
 				{
-					if (S.Id == ParentStormId) { bParentNear = FVector::Dist2D(S.UpdraftLocation, GetActorLocation()) < 2000000.0; break; }
+					if (S.Id != ParentStormId) continue;
+					bParentNear = FVector::Dist2D(S.UpdraftLocation, GetActorLocation()) < 2000000.0;
+					// Same place as at birth (UAerosStormManager::SpawnTornado), moving with the storm
+					const FVector Motion = S.Velocity.Size2D() > 1.0 ? S.Velocity.GetSafeNormal2D() : TrackVelocity.GetSafeNormal2D();
+					const FVector Right(-Motion.Y, Motion.X, 0.0);
+					Anchor = S.UpdraftLocation - Motion * 300000.0 + Right * 150000.0;
+					AnchorVelocity = FVector(S.Velocity.X, S.Velocity.Y, 0.0) * 100.0 * (Sub->IsPaused() ? 0.f : Sub->GetTimeScale());
+					if (S.Velocity.Size2D() > 1.0) TrackVelocity = S.Velocity;
+					bHasAnchor = true;
+					break;
 				}
 			}
-			if (!bParentNear) Age = FMath::Max(Age, Lifetime * 0.8f); // rope out over the last 20 %
+			if (!bParentNear) { Age = FMath::Max(Age, Lifetime * 0.8f); bHasAnchor = false; } // rope out over the last 20 %
 		}
-		// Track: storm motion + slow meander (looping paths are common)
-		const FVector Perp(-TrackVelocity.Y, TrackVelocity.X, 0.0);
-		const float Meander = FMath::Sin(Age * 0.05f + Seed) * 0.35f;
-		const FVector Vel = TrackVelocity + Perp * Meander;
-		SetActorLocation(GetActorLocation() + Vel * 100.0 * DeltaSeconds);
+		const FVector Here = GetActorLocation();
+		const FVector Dir = TrackVelocity.Size2D() > 0.1 ? TrackVelocity.GetSafeNormal2D() : FVector(1, 0, 0);
+		const FVector Perp(-Dir.Y, Dir.X, 0.0);
+		if (bHasAnchor)
+		{
+			// Under the mesocyclone, wandering up to ~1 km around it (looping paths are common)
+			Anchor += AnchorVelocity * DeltaSeconds;
+			const FVector Wander = Perp * (100000.0 * FMath::Sin(Age * 0.05f + Seed)) + Dir * (60000.0 * FMath::Sin(Age * 0.031f + Seed * 1.7f));
+			const FVector Target(Anchor.X + Wander.X, Anchor.Y + Wander.Y, Here.Z);
+			SetActorLocation(Here + (Target - Here) * (1.0 - FMath::Exp(-DeltaSeconds / 4.0)));
+		}
+		else
+		{
+			// Track: storm motion + slow meander
+			const float Meander = FMath::Sin(Age * 0.05f + Seed) * 0.35f;
+			const FVector Vel = TrackVelocity + Perp * TrackVelocity.Size2D() * Meander;
+			SetActorLocation(Here + Vel * 100.0 * DeltaSeconds);
+		}
 
 		GroundTimer += DeltaSeconds;
 		if (GroundTimer > 0.5f) { GroundTimer = 0.f; UpdateGround(); }
@@ -365,7 +387,7 @@ FAerosCloudTornado AAerosTornado::MakeRenderDescriptor(float CloudBaseM, float K
 	D.TopKm = FVector2f(float(Top.X), float(Top.Y)) * 0.001f;
 	D.VmaxMs = Aeros::Funnel::FunnelVmaxMs(MaxWind, Age01);
 	D.CoreRadiusM = Rc;
-	D.K = K;
+	D.K = Aeros::Funnel::TouchdownK(MaxWind, H, K);   // the mature funnel reaches the ground
 	D.RopeOut = Decay;
 	D.SpinPhase = RenderSpin;
 	// Violent tornadoes split into orbiting sub-vortices (2 seeds in 3)

@@ -179,6 +179,24 @@ namespace FunnelTests
 			T.TestTrue("Funnel_RadiusMonotonic (Vmax up, core up, base down -> wider)", bV && bRc && bBase);
 		}
 		{
+			// A mature tornado's funnel reaches the ground (EF1 under a 1.5 km base too), it hangs from the
+			// cloud while it spins up, and lifts again at the very end of the rope-out
+			bool bTouch = true, bSpinUp = true, bLift = true;
+			const float Winds[] = { 30.f, 55.f, 90.f };
+			const float Bases[] = { 300.f, 1500.f, 3000.f };
+			for (float W : Winds) for (float Base : Bases)
+			{
+				FParams P; P.CoreRadiusM = 100.f; P.CloudBaseM = Base; P.K = TouchdownK(W, Base, 2.f);
+				P.VmaxMs = FunnelVmaxMs(W, 0.4f);  bTouch &= TipHeightM(P) == 0.f && RadiusAtM(P, 0.f) > 30.f;
+				P.VmaxMs = FunnelVmaxMs(W, 0.03f); bSpinUp &= TipHeightM(P) > 0.f;
+				P.VmaxMs = FunnelVmaxMs(W, 0.995f); bLift &= TipHeightM(P) > 0.f;
+			}
+			T.TestTrue("Funnel_MatureTouchesGround", bTouch);
+			T.TestTrue("Funnel_SpinUpHangsFromCloud", bSpinUp);
+			T.TestTrue("Funnel_RopeOutLiftsAtTheEnd", bLift);
+			T.TestTrue("Funnel_TouchdownKKeepsLargerK", TouchdownK(90.f, 300.f, 5.f) == 5.f);
+		}
+		{
 			FParams P; P.VmaxMs = 70.f; P.CoreRadiusM = 100.f; P.CloudBaseM = 1000.f; P.K = 1.5f;
 			const float Tip = TipHeightM(P);
 			T.TestTrue("Funnel_NarrowsDownward", RadiusAtM(P, 900.f) > RadiusAtM(P, 500.f) && RadiusAtM(P, 500.f) > RadiusAtM(P, Tip + 1.f)

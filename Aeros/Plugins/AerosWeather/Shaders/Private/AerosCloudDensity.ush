@@ -324,8 +324,9 @@ float AerosWallDensity(uint i, float3 PosKm)
 	float x = saturate(d / Rim);
 	float LocalBottom = lerp(Bottom, Base, x * x) + (n - 0.5) * 0.06;
 	float Ang = atan2(Rel.y, Rel.x) - TornadoD[i].y * 0.15;
-	float Spiral = 0.5 + 0.5 * sin(4.0 * Ang + 18.0 * x);
-	float Dens = smoothstep(LocalBottom - 0.02, LocalBottom + 0.04, H) * (1.0 - smoothstep(0.8, 1.0, x));
+	float Spiral = 0.5 + 0.5 * sin(3.0 * Ang + 6.0 * x);
+	// A soft underside (200 m): a 60 m skin under 80 m ray steps came out as stacked rings
+	float Dens = smoothstep(LocalBottom - 0.06, LocalBottom + 0.14, H) * (1.0 - smoothstep(0.7, 1.0, x));
 	return Dens * (0.45 + 0.15 * Spiral);   // lighter than the funnel, which stands out darker
 }
 

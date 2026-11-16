@@ -89,5 +89,16 @@ namespace Aeros
 			const float CoreRatio = FMath::Max(CoreRadiusAt(1.f, Age01), 0.1f);
 			return FMath::Min(MaxWindMs * Circulation / CoreRatio, 2.f * MaxWindMs);
 		}
+
+		/** K for which this tornado's mature funnel (Vmax = MaxWind) reaches the ground, 1.3x over the
+		 *  touch so its foot is ~0.55 core radii wide; never below KMin. The bare model leaves the moist,
+		 *  cooled inflow out: with a fixed K of 2 an EF3 under a 1.5 km base hung 900 m above the ground,
+		 *  while most photographed tornadoes show a condensation funnel down to the debris cloud. It still
+		 *  hangs from the cloud while it spins up and lifts at the end of the rope-out. */
+		inline float TouchdownK(float MaxWindMs, float CloudBaseM, float KMin)
+		{
+			const float V = FMath::Max(MaxWindMs, 1.f);
+			return FMath::Max(KMin, 1.3f * Gravity * FMath::Max(CloudBaseM, 0.f) / (V * V));
+		}
 	}
 }

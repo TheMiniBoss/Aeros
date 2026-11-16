@@ -82,10 +82,12 @@ void AAerosChasePawn::BeginPlay()
 	}
 	// Test options: -AerosChase starts the day at once, -AerosChaseAuto drives itself (photos included),
 	// -AerosChaseShots=N saves a screenshot every N s, -AerosChaseQuitAfter=S quits,
-	// -AerosChaseEndAfter=S ends the day after S s of driving (summary screen)
+	// -AerosChaseEndAfter=S ends the day after S s of driving (summary screen), -AerosChaseNear=km
+	// sets how close the autopilot keeps to a tornado (3 km)
 	bAutopilot = FParse::Param(FCommandLine::Get(), TEXT("AerosChaseAuto"));
 	FParse::Value(FCommandLine::Get(), TEXT("AerosChaseQuitAfter="), QuitAfter);
 	FParse::Value(FCommandLine::Get(), TEXT("AerosChaseEndAfter="), EndDayAfter);
+	FParse::Value(FCommandLine::Get(), TEXT("AerosChaseNear="), AutoTornadoKm);
 	if (FParse::Param(FCommandLine::Get(), TEXT("AerosChase")) || bAutopilot) StartChase();
 }
 
@@ -844,7 +846,7 @@ void AAerosChasePawn::TickAutopilot(float DeltaSeconds)
 	{
 		if (It->GetStrength() < 0.15f) continue;
 		const float D = float(FVector::Dist2D(It->GetActorLocation(), L)) * 1e-5f;
-		if (D < BestD && D < 40.f) { BestD = D; Target = It->GetActorLocation() + FVector(0, 0, 30000.0); Want = 3.f; bHave = true; }
+		if (D < BestD && D < 40.f) { BestD = D; Target = It->GetActorLocation() + FVector(0, 0, 30000.0); Want = AutoTornadoKm; bHave = true; }
 	}
 	if (!bHave)
 	{
