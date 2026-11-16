@@ -401,6 +401,7 @@ bool FAerosCloudVolumeTest::RunTest(const FString& Parameters)
 		Moving.Velocity = FVector(20.0, 0.0, 0.0);   // m/s, world
 		Fresh.Storms.Add(Moving);
 		Fresh.StormSimTime = Fresh.SimTime;
+		for (FAerosSnapCell& C : Fresh.Cells) { C.Conv = 0.f; C.CloudCover = 0.f; }   // the storm shape alone (the cells' clouds do not move)
 		FAerosSnapshot Stale = Fresh;
 		Stale.StormSimTime = Stale.SimTime - 60.0;   // positions one minute old: 1.2 km behind
 		TArray<uint8> FreshGrid, StaleGrid;
@@ -428,6 +429,28 @@ bool FAerosCloudVolumeTest::RunTest(const FString& Parameters)
 	TArray<uint8> SingleGrid;
 	FAerosCloudVolume::Build(Single, Desc, SingleGrid);
 	TestTrue(TEXT("No anvil far upwind"), FAerosCloudVolume::SampleDensity(SingleGrid, Desc, Upwind, ELkm - 0.8f) < 0.05f);
+	// Wherever the simulation convects, the grid has cloud, tracked storm or not: a convective area away from
+	// the towers was drawn as clear sky (the HUD said violent storm, 100 % cloud, under a blue sky)
+	{
+		FAerosSnapshot Conv = Single;
+		Conv.Storms.Reset();
+		for (FAerosSnapCell& C : Conv.Cells) { C.Conv = 0.f; C.CloudCover = 0.f; C.Elev = 0.f; }
+		int32 CI = 0, CJ = 0;
+		float GX = 0.f, GY = 0.f;
+		const FVector Spot = Upwind;
+		if (Conv.WorldToGrid(Spot, GX, GY)) { CI = int32(GX); CJ = int32(GY); }
+		for (int32 J = CJ - 2; J <= CJ + 2; ++J)
+			for (int32 I = CI - 2; I <= CI + 2; ++I)
+			{
+				FAerosSnapCell& C = Conv.Cells[I + J * Conv.NX];
+				C.Conv = 0.8f; C.CloudCover = 1.f; C.CloudBase = 1000.f; C.CloudTop = 10000.f;
+			}
+		TArray<uint8> ConvGrid;
+		FAerosCloudVolume::Build(Conv, Desc, ConvGrid);
+		TestTrue(TEXT("Convective cells get cloud in the grid (no tracked storm)"), FAerosCloudVolume::SampleDensity(ConvGrid, Desc, Spot, 5.f) > 0.5f);
+		TestTrue(TEXT("Not below their base"), FAerosCloudVolume::SampleDensity(ConvGrid, Desc, Spot, 0.5f) < 0.05f);
+		TestTrue(TEXT("Clear 30 km away"), FAerosCloudVolume::SampleDensity(ConvGrid, Desc, Spot + FVector(3000000.0, 0.0, 0.0), 5.f) < 0.05f);
+	}
 	// Over mountains the cloud base stands on the ground: LCL is a height above the ground (it was drawn
 	// above sea level, inside the mountain)
 	{

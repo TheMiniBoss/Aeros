@@ -260,7 +260,7 @@ void AAerosTornado::Tick(float DeltaSeconds)
 
 		// A tornado cannot outlive its parent storm (or drift away from it)
 		ParentCheckTimer += DeltaSeconds;
-		if (Sub && ParentStormId >= 0 && ParentCheckTimer > 1.f)
+		if (Sub && ParentStormId >= 0 && ParentCheckTimer > 0.1f)   // 10 times a second: tied to the displayed storm
 		{
 			ParentCheckTimer = 0.f;
 			bool bParentNear = false;

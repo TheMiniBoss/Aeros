@@ -234,6 +234,7 @@ void FAerosCloudVolume::Build(const FAerosSnapshot& Snap, const FAerosCloudVolum
 
 			// Column from the simulation (nearest cell): stratiform deck, gust front, convection
 			float StratDensity = 0.f, StratBase = 0.f, StratTop = 0.f, Gust = 0.f, Conv = 0.f;
+			float ConvBase = 0.f, ConvTop = 0.f, ConvRain = 0.f;
 			float GX = 0.f, GY = 0.f;
 			if (Snap.WorldToGrid(World, GX, GY))
 			{
@@ -259,6 +260,15 @@ void FAerosCloudVolume::Build(const FAerosSnapshot& Snap, const FAerosCloudVolum
 					StratTop = FMath::Max(Ground + Mix(C00.CloudTop, C10.CloudTop, C01.CloudTop, C11.CloudTop) * 0.001f, StratBase + 0.3f);
 				}
 				Gust = Mix(GustFront(Snap, I, J), GustFront(Snap, I + 1, J), GustFront(Snap, I, J + 1), GustFront(Snap, I + 1, J + 1));
+				// Convective column wherever the simulation convects (tracked storm or not), from the cell's
+				// base to its top above the ground, with its rain under the base
+				if (Conv > 0.15f)
+				{
+					const float Ground = FMath::Max(Mix(C00.Elev, C10.Elev, C01.Elev, C11.Elev), 0.f) * 0.001f;
+					ConvBase = Ground + Mix(C00.CloudBase, C10.CloudBase, C01.CloudBase, C11.CloudBase) * 0.001f;
+					ConvTop = FMath::Max(Ground + Mix(C00.CloudTop, C10.CloudTop, C01.CloudTop, C11.CloudTop) * 0.001f, ConvBase + 1.f);
+					ConvRain = FMath::Clamp(FMath::Sqrt(FMath::Max(Mix(C00.PrecipRate, C10.PrecipRate, C01.PrecipRate, C11.PrecipRate), 0.f) / 100.f), 0.f, 1.f);
+				}
 			}
 
 			Near.Reset();
@@ -268,12 +278,21 @@ void FAerosCloudVolume::Build(const FAerosSnapshot& Snap, const FAerosCloudVolum
 				if (FMath::Square(PX - Sh.UX) + FMath::Square(PY - Sh.UY) < FMath::Square(Sh.Reach)) Near.Add(K);
 			}
 			const FAnvilColumn& A = Anvil[X + Y * NX];
-			if (Near.Num() == 0 && A.Strength <= 0.f && StratDensity <= 0.f && Gust <= 0.01f) continue;
+			if (Near.Num() == 0 && A.Strength <= 0.f && StratDensity <= 0.f && Gust <= 0.01f && ConvTop <= 0.f) continue;
 
 			for (int32 Z = 0; Z < NZ; ++Z)
 			{
 				const float Alt = (Z + 0.5f) * VZ;
 				float Dens = 0.f, Dark = 0.f, RainAmount = 0.f;
+
+				// Convective column (multicell areas away from the towers were clear sky)
+				if (ConvTop > 0.f)
+				{
+					const float Col = 0.9f * Smooth(0.15f, 0.5f, Conv) * Smooth(ConvBase - 0.1f, ConvBase + 0.25f, Alt) * (1.f - Smooth(ConvTop - 0.6f, ConvTop + 0.5f, Alt));
+					Dens = FMath::Max(Dens, Col);
+					if (Col > 0.f) Dark = FMath::Max(Dark, ConvRain * Col);
+					if (Alt < ConvBase && ConvRain > 0.05f) RainAmount = FMath::Max(RainAmount, ConvRain * Smooth(0.15f, 0.5f, Conv));
+				}
 
 				// Stratiform deck
 				if (StratDensity > 0.f && Alt > StratBase && Alt < StratTop) Dens = StratDensity * Smooth(StratBase, StratBase + 0.2f, Alt);

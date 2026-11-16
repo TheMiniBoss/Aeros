@@ -211,11 +211,29 @@ void UAerosCloudManager::UpdateCloudVolume(float DeltaTime)
 	// The storms as they are shown (interpolated between two states, like the markers and tornadoes),
 	// at the displayed time: Build does not move them
 	TArray<FAerosStormData> Shown = Owner->GetStorms();
-	VolumeTask = UE::Tasks::Launch(UE_SOURCE_LOCATION, [Snap, Desc, Out, Shown = MoveTemp(Shown)]()
+	// The cells' clouds too (the convective columns): blended between the two states like the weather map
+	FAerosSnapshotPtr PrevSnap = Owner->GetPreviousSnapshot();
+	const float Alpha = Owner->GetSnapshotAlpha();
+	VolumeTask = UE::Tasks::Launch(UE_SOURCE_LOCATION, [Snap, PrevSnap, Alpha, Desc, Out, Shown = MoveTemp(Shown)]()
 	{
 		FAerosSnapshot Copy = *Snap;
 		Copy.Storms = Shown;
 		Copy.StormSimTime = Copy.SimTime;
+		if (PrevSnap && PrevSnap.Get() != Snap.Get() && PrevSnap->NX == Snap->NX && PrevSnap->NY == Snap->NY
+			&& PrevSnap->DomainCenter == Snap->DomainCenter && Alpha < 1.f)
+		{
+			for (int32 K = 0; K < Copy.Cells.Num(); ++K)
+			{
+				const FAerosSnapCell& P = PrevSnap->Cells[K];
+				FAerosSnapCell& C = Copy.Cells[K];
+				auto L = [Alpha](float A, float B) { return A + (B - A) * Alpha; };
+				C.Conv = L(P.Conv, C.Conv);
+				C.CloudCover = L(P.CloudCover, C.CloudCover);
+				C.CloudBase = L(P.CloudBase, C.CloudBase);
+				C.CloudTop = L(P.CloudTop, C.CloudTop);
+				C.PrecipRate = L(P.PrecipRate, C.PrecipRate);
+			}
+		}
 		FAerosCloudVolume::Build(Copy, Desc, *Out);
 	});
 }
