@@ -59,6 +59,8 @@ public:
 	float GetCloudVolumeBlend() const { return VolumeBlend; }
 	/** Number of times a new voxel grid replaced the current one (tests time their pictures on it). */
 	int32 GetCloudVolumeSwaps() const { return VolumeSwaps; }
+	/** Real seconds since the voxel grid was last swapped for a new build (debug overlay), -1 before any. */
+	float GetSecondsSinceVolumeSwap() const { return LastSwapRealTime < 0.0 ? -1.f : float(FPlatformTime::Seconds() - LastSwapRealTime); }
 	/** 0 after a jump of more than 40 km until the grid at the new place is uploaded, else 1. */
 	float GetCloudVolumeWeight() const { return VolumeWeight; }
 	/** Debug: grid slices as PNGs (horizontal at 2 km and 10 km, vertical west-east through the centre). */
@@ -127,6 +129,7 @@ private:
 	float VolumeWeight = 0.f;
 	float VolumeTimer = 0.f;
 	int32 VolumeSwaps = 0;
+	double LastSwapRealTime = -1.0;
 	uint64 VolumeGeneration = MAX_uint64;
 	bool bVolumeBuilding = false;
 	FAerosCloudVolumeDesc BuildingDesc;

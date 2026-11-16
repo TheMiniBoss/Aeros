@@ -1635,9 +1635,78 @@ void FAerosSimulation::DetectAndTrackStorms(float Interval)
 		D.STP = Comp.MaxSTP; D.SCP = Comp.MaxSCP; D.Mesocyclone = Comp.MaxMeso;
 		D.Intensity = FMath::Clamp(FMath::Max((Comp.MaxDBZ - 30.f) / 35.f, Comp.MaxW / 50.f), 0.f, 1.f);
 		D.Type = Comp.MaxMeso > 0.5f ? EAerosStormType::Supercell : (Comp.Count >= 8 ? EAerosStormType::Multicell : EAerosStormType::SingleCell);
-		auto CellWorld = [this](int32 Idx) { return DomainToWorld((Idx % NX + 0.5f) * DX, (Idx / NX + 0.5f) * DX); };
-		D.HailCoreLocation = Comp.HailIdx >= 0 ? CellWorld(Comp.HailIdx) : D.Location;
-		D.UpdraftLocation = Comp.WIdx >= 0 ? CellWorld(Comp.WIdx) : D.Location;
+		// Updraft and hail core between cells: weighted centre of the 3x3 cells round the maximum (the
+		// strongest cell's centre jumped 2-2.8 km whenever the maximum changed cell)
+		auto Peak = [this](int32 Idx, bool bHail, float& OutX, float& OutY)
+		{
+			const int32 I0 = Idx % NX, J0 = Idx / NX;
+			const float Top = bHail ? Cells[Idx].Hail : Cells[Idx].W;
+			float SW = 0.f, SX = 0.f, SY = 0.f;
+			for (int32 J = FMath::Max(J0 - 1, 0); J <= FMath::Min(J0 + 1, NY - 1); ++J)
+			{
+				for (int32 I = FMath::Max(I0 - 1, 0); I <= FMath::Min(I0 + 1, NX - 1); ++I)
+				{
+					const float V = bHail ? Cells[I + J * NX].Hail : Cells[I + J * NX].W;
+					const float Wt = FMath::Max(V - 0.5f * Top, 0.f);
+					SW += Wt; SX += Wt * (I + 0.5f) * DX; SY += Wt * (J + 0.5f) * DX;
+				}
+			}
+			OutX = SW > 0.f ? SX / SW : (I0 + 0.5f) * DX;
+			OutY = SW > 0.f ? SY / SW : (J0 + 0.5f) * DX;
+		};
+		// A tracked storm keeps following its own updraft (and hail core): the strongest cell within 6 km of
+		// where it should be now, unless that one has collapsed (under half the storm's maximum). Taking the
+		// storm's maximum anywhere made the tower jump 10 km and more when a flanking cell took over.
+		int32 WIdx = Comp.WIdx, HIdx = Comp.HailIdx;
+		if (BestIdx >= 0)
+		{
+			const FAerosTrackedStorm& Old = Storms[BestIdx];
+			const float PUX = Old.UX + float(Old.Data.Velocity.X) * Interval, PUY = Old.UY - float(Old.Data.Velocity.Y) * Interval;
+			const float PHX = Old.HX + float(Old.Data.Velocity.X) * Interval, PHY = Old.HY - float(Old.Data.Velocity.Y) * Interval;
+			int32 LocalW = -1, LocalH = -1;
+			for (int32 C = Comp.Start; C < Comp.Start + Comp.Count; ++C)
+			{
+				const int32 Cell = CompCells[C];
+				const float CX = (Cell % NX + 0.5f) * DX, CY = (Cell / NX + 0.5f) * DX;
+				if (FMath::Square(CX - PUX) + FMath::Square(CY - PUY) < FMath::Square(6000.f) && (LocalW < 0 || Cells[Cell].W > Cells[LocalW].W)) LocalW = Cell;
+				if (FMath::Square(CX - PHX) + FMath::Square(CY - PHY) < FMath::Square(6000.f) && (LocalH < 0 || Cells[Cell].Hail > Cells[LocalH].Hail)) LocalH = Cell;
+			}
+			if (LocalW >= 0 && Cells[LocalW].W >= 0.5f * Comp.MaxW) WIdx = LocalW;
+			if (LocalH >= 0 && Cells[LocalH].Hail >= 0.5f * Comp.MaxHail) HIdx = LocalH;
+		}
+		float UX = X, UY = Y, HX = X, HY = Y;
+		if (WIdx >= 0) Peak(WIdx, false, UX, UY);
+		if (HIdx >= 0) Peak(HIdx, true, HX, HY);
+		else { HX = UX; HY = UY; }
+		// Track filter: the motion predicted from the last tracking, corrected by 30 % of the measure (the
+		// updraft pulses from cell to cell); a jump of more than 8 km (a new updraft taking over) is taken
+		// as it is. The storm's velocity then follows its filtered updraft: a supercell's tower deviates from
+		// the mean flow, and this velocity is what everything extrapolates between trackings.
+		if (BestIdx >= 0)
+		{
+			const FAerosTrackedStorm& Old = Storms[BestIdx];
+			const float VXo = float(Old.Data.Velocity.X), VYo = -float(Old.Data.Velocity.Y);   // world -> domain (y north)
+			auto Filter = [Interval, VXo, VYo](float OldX, float OldY, float& InOutX, float& InOutY)
+			{
+				const float PX = OldX + VXo * Interval, PY = OldY + VYo * Interval;
+				if (FMath::Square(InOutX - PX) + FMath::Square(InOutY - PY) > FMath::Square(8000.f)) return;
+				InOutX = PX + 0.3f * (InOutX - PX);
+				InOutY = PY + 0.3f * (InOutY - PY);
+			};
+			Filter(Old.UX, Old.UY, UX, UY);
+			Filter(Old.HX, Old.HY, HX, HY);
+			if (FMath::Square(UX - Old.UX) + FMath::Square(UY - Old.UY) < FMath::Square(8000.f))
+			{
+				FVector2D UTrack((UX - Old.UX) / Interval, (UY - Old.UY) / Interval);
+				if (UTrack.Size() > 25.0) UTrack = UTrack.GetSafeNormal() * 25.0;
+				VX = 0.6f * VXo + 0.4f * float(UTrack.X);
+				VY = 0.6f * VYo + 0.4f * float(UTrack.Y);
+				D.Velocity = FAerosSnapshot::SimToWorldDir(VX, VY);
+			}
+		}
+		T.UX = UX; T.UY = UY; T.HX = HX; T.HY = HY;
+		D.HailCoreLocation = Comp.HailIdx >= 0 ? DomainToWorld(HX, HY) : D.Location;
+		D.UpdraftLocation = Comp.WIdx >= 0 ? DomainToWorld(UX, UY) : D.Location;
 		Next.Add(T);
 		CompOfStorm.Add(FIntPoint(Comp.Start, Comp.Count));
 	}

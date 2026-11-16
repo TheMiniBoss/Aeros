@@ -117,6 +117,8 @@ struct FAerosTrackedStorm
 {
 	FAerosStormData Data;
 	float X = 0.f, Y = 0.f;    // m, domain frame
+	float UX = 0.f, UY = 0.f;  // m, domain frame: updraft, sub-cell and filtered (UpdraftLocation)
+	float HX = 0.f, HY = 0.f;  // m, domain frame: hail core, same
 	bool bMatched = false;
 };
 

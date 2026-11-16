@@ -1,6 +1,7 @@
 // Copyright Aeros. All Rights Reserved.
 
 #include "AerosChaseHUD.h"
+#include "AerosDebugUpdates.h"
 #include "AerosChasePawn.h"
 #include "AerosChaseRules.h"
 #include "AerosWeatherSubsystem.h"
@@ -308,6 +309,9 @@ void AAerosChaseHUD::DrawDriving(AAerosChasePawn* P, UAerosWeatherSubsystem* Sub
 		Text(TEXT("Z/S avancer-freiner   Q/D tourner   souris regarder   clic droit zoom   clic gauche ou Espace photo   T trajet rapide (+10 min)   \u00C9chap pause"),
 			SW * 0.5f, SH - 40.f, FLinearColor(Dim.R, Dim.G, Dim.B, FMath::Clamp(25.f - P->StateTime, 0.f, 1.f)), 0.9f, true);
 	}
+
+	// aeros.DebugUpdates 1 / -AerosDebugUpdates: when the weather on screen is next updated
+	AerosDebugUpdatesInternal::Draw(this, Canvas, Sub, 30.f, SH - 140.f);
 }
 
 void AAerosChaseHUD::DrawViewfinder(AAerosChasePawn* P)

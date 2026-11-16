@@ -72,6 +72,54 @@ bool FAerosSupercellTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FAerosStormTrackTest, "Aeros.Simulation.SmoothStormTrack",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FAerosStormTrackTest::RunTest(const FString& Parameters)
+{
+	// The updraft and hail core move smoothly from one tracking to the next: they were the centre of the
+	// strongest 2 km cell and jumped by a whole cell (2-2.8 km) when the maximum changed cell
+	FAerosSimulationSettings S;
+	S.GridSizeX = S.GridSizeY = 96;
+	S.Scenario = EAerosScenario::SupercellOutbreak;
+	S.StartDayOfYear = 140;
+	S.StartHour = 12.f;
+	S.LatitudeDeg = 37.f;
+	FAerosSimulation Sim;
+	Sim.Initialize(S);
+	Sim.SetConvectionControl(0.f, true);
+	Sim.InjectThermal(FVector::ZeroVector, 6.f, 3.f, 0.002f);
+	for (int32 Step = 0; Step < 120; ++Step) Sim.Step(30.f);   // 1 h: a mature storm
+	int32 Id = -1;
+	FVector Prev = FVector::ZeroVector, PrevVel = FVector::ZeroVector;
+	float WorstKm = 0.f;
+	int32 Samples = 0;
+	for (int32 Minute = 0; Minute < 40; ++Minute)
+	{
+		Sim.Step(30.f);
+		Sim.Step(30.f);
+		FAerosSnapshot Snap;
+		Sim.FillSnapshot(Snap);
+		const FAerosStormData* St = nullptr;
+		for (const FAerosStormData& C : Snap.Storms) if (C.Id == Id || (Id < 0 && (!St || C.Intensity > St->Intensity))) St = &C;
+		if (!St) { Id = -1; continue; }
+		if (Id == St->Id)
+		{
+			// Error against the motion predicted from the previous tracking (what the renderer extrapolates)
+			const FVector Pred = Prev + PrevVel * 100.0 * 60.0;
+			WorstKm = FMath::Max(WorstKm, float(FVector::Dist2D(St->UpdraftLocation, Pred)) * 1e-5f);
+			++Samples;
+		}
+		Id = St->Id;
+		Prev = St->UpdraftLocation;
+		PrevVel = St->Velocity;
+	}
+	TestTrue(TEXT("Updraft followed over 30+ minutes"), Samples >= 30);
+	// The rest (an updraft pulsing between cells) is glided out on display by UAerosWeatherSubsystem
+	TestTrue(TEXT("Updraft moves smoothly (error vs predicted motion < 1.5 km per minute, was > 12)"), WorstKm < 1.5f);
+	return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FAerosSingleStormTest, "Aeros.Simulation.SingleStorm",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 

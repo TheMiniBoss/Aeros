@@ -1,6 +1,7 @@
 // Copyright Aeros. All Rights Reserved.
 
 #include "AerosDemoHUD.h"
+#include "AerosDebugUpdates.h"
 #include "AerosDemoPawn.h"
 #include "AerosWeatherSubsystem.h"
 #include "AerosWeatherLibrary.h"
@@ -311,6 +312,8 @@ void AAerosDemoHUD::DrawHUD()
 		}
 	}
 	DrawCaption();
+	// aeros.DebugUpdates 1 / -AerosDebugUpdates: when the weather on screen is next updated
+	AerosDebugUpdatesInternal::Draw(this, Canvas, Sub, 20.f, SH - 40.f);
 	if (Mode == EAerosHudMode::Hidden) return;
 	if (Mode == EAerosHudMode::Help) { DrawHelp(20, 20); return; }
 

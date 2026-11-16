@@ -324,6 +324,25 @@ private:
 	double DisplayTime = 0.0;
 	bool bPaused = false;
 
+	// Storms on display glide over each new tracking (once a simulated minute) instead of jumping: the gap
+	// between where they were shown and where the new tracking puts them fades out in a few seconds
+	TMap<int32, FVector> StormGlide;     // cm, added to the storm's positions
+	double GlideTrackTime = -1.0;
+	double LastTrackRealTime = -1.0;     // FPlatformTime::Seconds() of the last new tracking (debug overlay)
+	float LastTrackGlideKm = 0.f;        // biggest gap absorbed at that tracking (debug overlay)
+	void UpdateStormGlide(float DeltaTime);
+	FAerosStormData DisplayedStorm(int32 Index) const;
+
+public:
+	/** Debug: what updates the weather on screen and when the next one comes (simulated seconds). */
+	struct FUpdateTimes
+	{
+		double DisplayTime = 0.0, NextSnapshot = 0.0, NextTracking = 0.0;
+		float TimeScale = 1.f, SinceTrackingReal = -1.f, LastGlideKm = 0.f;
+	};
+	FUpdateTimes GetUpdateTimes() const;
+private:
+
 	FVector ViewerLocation = FVector::ZeroVector;
 	EAerosPhenomenon ViewerPhenomenon = EAerosPhenomenon::Clear;
 	float PhenomenonCheckTimer = 0.f;

@@ -160,6 +160,7 @@ void UAerosCloudManager::UpdateCloudVolume(float DeltaTime)
 			VolumeBlend = VolumeWeight > 0.f ? 0.f : 1.f;
 			VolumeWeight = 1.f;
 			++VolumeSwaps;
+			LastSwapRealTime = FPlatformTime::Seconds();
 			UE_LOG(LogTemp, Verbose, TEXT("Aeros clouds: voxel grid swap %d (blend %s)"), VolumeSwaps, VolumeBlend > 0.5f ? TEXT("instant") : TEXT("1 s"));
 		}
 	}
@@ -196,9 +197,16 @@ void UAerosCloudManager::UpdateCloudVolume(float DeltaTime)
 	bVolumeBuilding = true;
 	TSharedPtr<TArray<uint8>, ESPMode::ThreadSafe> Out = BuildingData;
 	const FAerosCloudVolumeDesc Desc = BuildingDesc;
-	VolumeTask = UE::Tasks::Launch(UE_SOURCE_LOCATION, [Snap, Desc, Out]()
+	// The storms as they are shown (moved on from their tracking and glided over its gaps, like the
+	// markers and tornadoes): Build moves them on from the displayed time to the snapshot's
+	TArray<FAerosStormData> Shown = Owner->GetStorms();
+	const double ShownTime = Owner->GetSimulationTime();
+	VolumeTask = UE::Tasks::Launch(UE_SOURCE_LOCATION, [Snap, Desc, Out, Shown = MoveTemp(Shown), ShownTime]()
 	{
-		FAerosCloudVolume::Build(*Snap, Desc, *Out);
+		FAerosSnapshot Copy = *Snap;
+		Copy.Storms = Shown;
+		Copy.StormSimTime = ShownTime;
+		FAerosCloudVolume::Build(Copy, Desc, *Out);
 	});
 }
 

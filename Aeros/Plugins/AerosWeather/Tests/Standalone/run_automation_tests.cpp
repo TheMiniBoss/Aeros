@@ -301,6 +301,7 @@ int main()
 	{ FAerosPhysicsTest T;   std::printf("Physics\n");   T.RunTest(""); Fails += T.Fails; }
 	{ FAerosSupercellTest T; std::printf("Supercell\n"); T.RunTest(""); Fails += T.Fails; }
 	{ FAerosSingleStormTest T; std::printf("Single storm\n"); T.RunTest(""); Fails += T.Fails; }
+	{ FAerosStormTrackTest T; std::printf("Storm track\n"); T.RunTest(""); Fails += T.Fails; }
 	{ FAerosHazardTest T;    std::printf("Disasters\n"); T.RunTest(""); Fails += T.Fails; }
 	{ FAerosCloudVolumeTest T; std::printf("Cloud voxels\n"); T.RunTest(""); Fails += T.Fails; }
 	{ std::printf("Cloud noise\n"); Fails += CloudNoiseTests::Run(); }
