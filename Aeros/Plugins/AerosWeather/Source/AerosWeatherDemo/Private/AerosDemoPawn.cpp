@@ -99,11 +99,56 @@ void AAerosDemoPawn::Tick(float DeltaSeconds)
 		WaitForShaders(Pending > 0);
 		if (Pending == 0 && (AutoTourDelay -= DeltaSeconds) <= 0.f) StartTour();
 	}
-	TickTour(DeltaSeconds);
 	APlayerController* PC = Cast<APlayerController>(GetController());
+	if (bPauseMenu)
+	{
+		if (PC && PC->IsLocalController()) TickPauseMenu(PC);
+		return;   // the tour waits too
+	}
+	TickTour(DeltaSeconds);
 	if (!PC || !PC->IsLocalController()) return;
+	if (PC->WasInputKeyJustPressed(EKeys::Escape))
+	{
+		UAerosWeatherSubsystem* Sub = UAerosWeatherSubsystem::Get(this);
+		bWasPausedBeforeMenu = Sub && Sub->IsPaused();
+		if (Sub) Sub->SetPaused(true);
+		bPauseMenu = true;
+		PauseIndex = 0;
+		return;
+	}
 	HandleMovement(PC, DeltaSeconds);
 	HandleHotkeys(PC);
+}
+
+void AAerosDemoPawn::TickPauseMenu(APlayerController* PC)
+{
+	auto Pressed = [PC](std::initializer_list<FKey> Keys)
+	{
+		for (const FKey& K : Keys) if (PC->WasInputKeyJustPressed(K)) return true;
+		return false;
+	};
+	UAerosWeatherSubsystem* Sub = UAerosWeatherSubsystem::Get(this);
+	if (Pressed({ EKeys::Up, EKeys::Z })) PauseIndex = (PauseIndex + 2) % 3;
+	if (Pressed({ EKeys::Down, EKeys::S })) PauseIndex = (PauseIndex + 1) % 3;
+	const bool bResume = Pressed({ EKeys::Escape }) || (PauseIndex == 0 && Pressed({ EKeys::Enter, EKeys::SpaceBar }));
+	if (bResume)
+	{
+		bPauseMenu = false;
+		if (Sub) Sub->SetPaused(bWasPausedBeforeMenu);
+		return;
+	}
+	if (!Pressed({ EKeys::Enter, EKeys::SpaceBar })) return;
+	bPauseMenu = false;
+	if (Sub) Sub->SetPaused(false);
+	if (PauseIndex == 1)
+	{
+		if (IsTourRunning()) StopTour();
+		if (AAerosDemoGameMode* GM = GetWorld()->GetAuthGameMode<AAerosDemoGameMode>()) GM->SwitchDemo(PC, false);
+	}
+	else
+	{
+		UKismetSystemLibrary::QuitGame(this, PC, EQuitPreference::Quit, false);
+	}
 }
 
 void AAerosDemoPawn::HandleMovement(APlayerController* PC, float DeltaSeconds)

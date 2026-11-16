@@ -88,6 +88,7 @@ void AAerosChasePawn::BeginPlay()
 	FParse::Value(FCommandLine::Get(), TEXT("AerosChaseQuitAfter="), QuitAfter);
 	FParse::Value(FCommandLine::Get(), TEXT("AerosChaseEndAfter="), EndDayAfter);
 	FParse::Value(FCommandLine::Get(), TEXT("AerosChaseNear="), AutoTornadoKm);
+	FParse::Value(FCommandLine::Get(), TEXT("AerosChaseFromMenu="), MenuEnterAfter);
 	if (FParse::Param(FCommandLine::Get(), TEXT("AerosChase")) || bAutopilot) StartChase();
 }
 
@@ -284,7 +285,9 @@ void AAerosChasePawn::TickMenu(APlayerController* PC)
 	using namespace AerosChasePawnInternal;
 	if (KeyPressed(PC, { EKeys::Up, EKeys::Z })) MenuIndex = (MenuIndex + 2) % 3;
 	if (KeyPressed(PC, { EKeys::Down, EKeys::S })) MenuIndex = (MenuIndex + 1) % 3;
-	if (KeyPressed(PC, { EKeys::Enter, EKeys::SpaceBar }))
+	const bool bTestEnter = MenuEnterAfter >= 0.f && StateTime > MenuEnterAfter;
+	if (bTestEnter) MenuEnterAfter = -1.f;
+	if (bTestEnter || KeyPressed(PC, { EKeys::Enter, EKeys::SpaceBar }))
 	{
 		if (MenuIndex == 0) StartChase();
 		else if (MenuIndex == 1) GoToTechDemo();
@@ -357,7 +360,9 @@ void AAerosChasePawn::TickBriefing(float DeltaSeconds)
 	if (BriefingSetup < 2 && (BriefingSetupTimer -= DeltaSeconds) <= 0.f)
 	{
 		const float Now = Sub->GetDateTime().Hour;
-		if (BriefingSetup == 1 && Now >= BriefingStartHour - 0.05f && Now < DayStartHour + 0.5f)
+		// Only our own clock counts: from the menu the clock may already be close to 16:00, and the
+		// day started 4 s after the storm's seed, before any storm had grown
+		if (BriefingSetup == 1 && FMath::Abs(Now - BriefingStartHour) < 0.2f)
 		{
 			BriefingSetup = 2;
 		}
@@ -376,23 +381,65 @@ void AAerosChasePawn::TickBriefing(float DeltaSeconds)
 		}
 	}
 	if (BriefingSetup < 2) return;
-	// The storm's seed: a warm bubble 20 km west of the player (inland), again if nothing grew
+	// The storm's seed: a warm bubble on land 15-25 km from the player where the air is the most
+	// unstable, again (stronger) if nothing grew
 	BubbleTimer += DeltaSeconds;
 	if (BubbleTries == 0 || (Sub->GetStorms().Num() == 0 && BubbleTimer > 8.f && BubbleTries < 4))
 	{
-		Sub->InjectThermalBubble(GetActorLocation() + FVector(-2000000.0, 500000.0, 0.0), 6.f, 3.5f, 2.f);
+		if (BubbleTries == 0) BubbleAt = PickBubbleSpot(Sub);
+		Sub->InjectThermalBubble(BubbleAt, 6.f + 1.f * BubbleTries, 3.5f + 0.5f * BubbleTries, 2.f);
+		UE_LOG(LogTemp, Display, TEXT("Aeros chase: bubble %d at (%.0f, %.0f) km, CAPE %.0f"), BubbleTries + 1,
+			BubbleAt.X * 1e-5, BubbleAt.Y * 1e-5, Sub->GetWeatherAtLocation(BubbleAt).CAPE);
 		++BubbleTries;
 		BubbleTimer = 0.f;
+	}
+	if ((BriefingLogTimer += DeltaSeconds) > 5.f)
+	{
+		BriefingLogTimer = 0.f;
+		float Meso = 0.f;
+		for (const FAerosStormData& S : Sub->GetStorms()) Meso = FMath::Max(Meso, S.Mesocyclone);
+		UE_LOG(LogTemp, Display, TEXT("Aeros chase: briefing %.2f h, %d storms, mesocyclone %.2f"), Sub->GetDateTime().Hour, Sub->GetStorms().Num(), Meso);
 	}
 	const float Hour = Sub->GetDateTime().Hour;
 	BriefingProgress = FMath::Clamp((Hour - BriefingStartHour) / (DayStartHour - BriefingStartHour), 0.f, 1.f);
 	bBriefingReady = false;
-	for (const FAerosStormData& S : Sub->GetStorms()) bBriefingReady |= S.Type == EAerosStormType::Supercell && S.Mesocyclone > 0.5f;
+	// Ready = a mature supercell: rotating, its anvil spread at the tropopause, an hour old at least
+	for (const FAerosStormData& S : Sub->GetStorms())
+	{
+		bBriefingReady |= S.Type == EAerosStormType::Supercell && S.Mesocyclone > 0.5f && S.CloudTop > 10000.f && Hour >= BriefingStartHour + 1.f;
+	}
 	APlayerController* PC = Cast<APlayerController>(GetController());
 	const bool bSkip = bBriefingReady && StateTime > 2.f && PC
 		&& AerosChasePawnInternal::KeyPressed(PC, { EKeys::Enter, EKeys::SpaceBar, EKeys::LeftMouseButton });
 	const bool bAutoSkip = bAutopilot && bBriefingReady && StateTime > 3.f;
-	if (bSkip || bAutoSkip || (Hour >= DayStartHour - 0.02f && StateTime > 4.f)) BeginDay();
+	// The day starts once the supercell rotates, not at a fixed hour: with one storm the simulation
+	// really runs x600, 15:15 -> 16:00 took 4 s and the day began on a newborn cumulus that needed
+	// another 15 real minutes at x2. The clock just keeps running; after 2 minutes it starts anyway.
+	const bool bReadyAtFour = bBriefingReady && Hour >= DayStartHour - 0.02f && StateTime > 4.f;
+	if (bSkip || bAutoSkip || bReadyAtFour || StateTime > 120.f) BeginDay();
+}
+
+FVector AAerosChasePawn::PickBubbleSpot(UAerosWeatherSubsystem* Sub) const
+{
+	// The player may stand anywhere (the technical demo hands over its position: at sea, by the
+	// volcano...): try points 8-16 km around, keep low plains (on the mountains, 20 km west, the cloud
+	// base was under the ground and nothing could be seen), the most unstable air, west first (the
+	// storm moves north-east and the coast is east)
+	const FVector L = GetActorLocation();
+	const double SeaZ = Sub->GetSimulationSettings().SeaLevelZ;
+	FVector Best = L + FVector(-1000000.0, 300000.0, 0.0);
+	float BestScore = -1e9f;
+	for (int32 K = 0; K < 24; ++K)
+	{
+		const float A = 2.f * PI * (K % 12) / 12.f;
+		const double R = K < 12 ? 800000.0 : 1600000.0;
+		const FVector P = L + FVector(FMath::Cos(A), FMath::Sin(A), 0.0) * R;
+		const double Z = GroundZAt(P.X, P.Y);
+		if (Z < SeaZ + 500.0 || Z > SeaZ + 30000.0) continue;
+		const float Rank = Sub->GetWeatherAtLocation(P).CAPE - (P.X > L.X ? 1500.f : 0.f);
+		if (Rank > BestScore) { BestScore = Rank; Best = P; }
+	}
+	return FVector(Best.X, Best.Y, 0.0);
 }
 
 void AAerosChasePawn::BeginDay()
@@ -400,12 +447,13 @@ void AAerosChasePawn::BeginDay()
 	UAerosWeatherSubsystem* Sub = UAerosWeatherSubsystem::Get(this);
 	if (!Sub) return;
 	Sub->SetTimeScale(DayTimeScale);
-	TuneTornadoGenesis(2);
+	TuneTornadoGenesis(1);   // no tornado for the first 45 s: the player gets to see the first one come down
+	bTornadoesOn = false;
 	SetRadarZoom(true);
 	NoStormTime = 0.f;
 	bStormSeen = false;
-	// Start 8 km from the strongest storm, on land, out of the rain, facing it
-	SetActorLocation(FindSafeStart(Sub, 8.f));
+	// Start 20 km from the strongest storm (its echo spreads 20 km and more), on its right flank, dry
+	SetActorLocation(FindSafeStart(Sub, 20.f));
 	PlaceOnGround();
 	float BestI = -1.f;
 	FVector Target = GetActorLocation() + FVector(100000.0, 0.0, 0.0);
@@ -416,6 +464,7 @@ void AAerosChasePawn::BeginDay()
 	HeadingDeg = (Target - GetActorLocation()).Rotation().Yaw;
 	State = EAerosChaseState::Driving;
 	StateTime = 0.f;
+	UE_LOG(LogTemp, Display, TEXT("Aeros chase: day starts at %.2f h with %d storms"), Sub->GetDateTime().Hour, Sub->GetStorms().Num());
 	ShowToast(TEXT("C'est parti ! Le radar en haut \u00E0 droite montre la pluie, les losanges les orages."));
 }
 
@@ -429,21 +478,44 @@ FVector AAerosChasePawn::FindSafeStart(UAerosWeatherSubsystem* Sub, float Distan
 	}
 	if (Around) Center = *Around;
 	const double SeaZ = Sub->GetSimulationSettings().SeaLevelZ;
-	// Try directions around the storm (west first: the ocean is east), keep the first point on dry land
-	// outside heavy rain
+	// Try directions around the storm, its right flank first, keep the first point on dry land out of
+	// the rain
+	const float A0 = FlankAngle(Sub);
 	for (int32 K = 0; K < 16; ++K)
 	{
-		const float A = PI + (K % 2 == 0 ? 1.f : -1.f) * float((K + 1) / 2) * (PI / 8.f);
+		const float A = A0 + (K % 2 == 0 ? 1.f : -1.f) * float((K + 1) / 2) * (PI / 8.f);
 		for (float D = DistanceKm; D <= DistanceKm * 2.f; D += FMath::Max(1.f, DistanceKm / 6.f))
 		{
 			const FVector P = Center + FVector(FMath::Cos(A), FMath::Sin(A), 0.0) * double(D) * 100000.0;
-			if (GroundZAt(P.X, P.Y) < SeaZ + 300.0) continue;
-			const FAerosWeatherSample W = Sub->GetWeatherAtLocation(P);
-			if (W.PrecipitationRate > 10.f || W.HailDiameter > 5.f) continue;
+			const double GZ = GroundZAt(P.X, P.Y);
+			if (GZ < SeaZ + 300.0 || GZ > SeaZ + 60000.0) continue;   // dry land, no mountains
+			// Dry here and 5 km around: a supercell's rain reaches 20 km and more from its centre
+			bool bDry = true;
+			for (int32 R = 0; R < 5 && bDry; ++R)
+			{
+				const FVector Q = R == 0 ? P : P + FVector(FMath::Cos(R * HALF_PI), FMath::Sin(R * HALF_PI), 0.0) * 500000.0;
+				const FAerosWeatherSample W = Sub->GetWeatherAtLocation(Q);
+				bDry = W.PrecipitationRate <= 0.5f && W.HailDiameter <= 0.f && W.Visibility >= 10000.f;
+			}
+			if (!bDry) continue;
 			return FVector(P.X, P.Y, 0.0);
 		}
 	}
 	return FVector(Center.X - DistanceKm * 100000.0, Center.Y, 0.0);
+}
+
+float AAerosChasePawn::FlankAngle(UAerosWeatherSubsystem* Sub) const
+{
+	const FAerosStormData* Best = nullptr;
+	for (const FAerosStormData& S : Sub->GetStorms())
+	{
+		if (!Best || S.Intensity > Best->Intensity) Best = &S;
+	}
+	if (!Best || Best->Velocity.Size2D() < 1.0) return PI;   // west (the coast is east)
+	const FVector M = Best->Velocity.GetSafeNormal2D();
+	const FVector Right(-M.Y, M.X, 0.0);                      // as UAerosStormManager::SpawnTornado
+	const FVector D = (Right - 0.3 * M).GetSafeNormal2D();
+	return FMath::Atan2(float(D.Y), float(D.X));
 }
 
 void AAerosChasePawn::EndDay()
@@ -480,6 +552,7 @@ void AAerosChasePawn::TickDriving(APlayerController* PC, float DeltaSeconds)
 	UAerosWeatherSubsystem* Sub = UAerosWeatherSubsystem::Get(this);
 	if (!Sub) return;
 	if (Sub->GetDateTime().Hour >= DayEndHour) { EndReason = TEXT("Le soleil s'est couch\u00E9."); EndDay(); return; }
+	if (!bTornadoesOn && DrivingTime > 45.f) { TuneTornadoGenesis(2); bTornadoesOn = true; }
 	// The day is the storm's life: it ends once the storm has died
 	if (Sub->GetStorms().Num() > 0) { bStormSeen = true; NoStormTime = 0.f; }
 	else NoStormTime += DeltaSeconds;

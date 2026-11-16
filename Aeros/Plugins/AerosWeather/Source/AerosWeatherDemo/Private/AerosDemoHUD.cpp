@@ -257,6 +257,31 @@ void AAerosDemoHUD::DrawWindRose(float CX, float CY, float R, const FVector& Win
 //  Main
 // =====================================================================
 
+void AAerosDemoHUD::DrawPauseMenu(AAerosDemoPawn* Pawn)
+{
+	const float SW = Canvas->ClipX, SH = Canvas->ClipY;
+	DrawRect(FLinearColor(0.f, 0.f, 0.f, 0.55f), 0, 0, SW, SH);
+	UFont* Big = GEngine->GetLargeFont();
+	UFont* Small = GEngine->GetMediumFont();
+	const FLinearColor Accent(1.f, 0.78f, 0.35f, 1.f), Ink(0.92f, 0.94f, 0.97f, 1.f), Dim(0.65f, 0.7f, 0.78f, 1.f);
+	auto Centered = [&](const FString& S, float Y, const FLinearColor& C, UFont* F, float Scale)
+	{
+		float W = 0.f, H = 0.f;
+		GetTextSize(S, W, H, F, Scale);
+		DrawText(S, C, (SW - W) * 0.5f, Y, F, Scale);
+	};
+	const float Y0 = SH * 0.32f;
+	Centered(TEXT("PAUSE"), Y0, Accent, Big, 2.2f);
+	Centered(TEXT("La m\u00E9t\u00E9o est arr\u00EAt\u00E9e."), Y0 + 60.f, Dim, Small, 1.f);
+	const TCHAR* Items[3] = { TEXT("Reprendre"), TEXT("Menu principal (chasseur d'orages)"), TEXT("Quitter") };
+	for (int32 K = 0; K < 3; ++K)
+	{
+		const bool bSel = Pawn->PauseIndex == K;
+		Centered(bSel ? FString::Printf(TEXT("> %s <"), Items[K]) : FString(Items[K]), Y0 + 120.f + K * 44.f, bSel ? Accent : Ink, Big, 1.f);
+	}
+	Centered(TEXT("Z / S ou fl\u00E8ches : choisir     Entr\u00E9e : valider     \u00C9chap : reprendre"), Y0 + 270.f, Dim, Small, 0.9f);
+}
+
 void AAerosDemoHUD::DrawHUD()
 {
 	Super::DrawHUD();
@@ -277,6 +302,14 @@ void AAerosDemoHUD::DrawHUD()
 		return;
 	}
 
+	if (const APlayerController* PausePC = GetOwningPlayerController())
+	{
+		if (AAerosDemoPawn* PausePawn = Cast<AAerosDemoPawn>(PausePC->GetPawn()); PausePawn && PausePawn->bPauseMenu)
+		{
+			DrawPauseMenu(PausePawn);
+			return;
+		}
+	}
 	DrawCaption();
 	if (Mode == EAerosHudMode::Hidden) return;
 	if (Mode == EAerosHudMode::Help) { DrawHelp(20, 20); return; }

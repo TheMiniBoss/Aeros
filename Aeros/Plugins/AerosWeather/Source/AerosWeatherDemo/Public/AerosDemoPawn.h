@@ -64,6 +64,10 @@ public:
 	void StopTour();
 	bool IsTourRunning() const { return TourStep >= 0; }
 
+	/** Pause menu (Escape): the weather stops, Resume / Main menu (storm chaser) / Quit. */
+	bool bPauseMenu = false;
+	int32 PauseIndex = 0;
+
 private:
 	struct FTourStep
 	{
@@ -91,6 +95,8 @@ private:
 
 	TArray<FTourStep> Tour;
 	int32 TourStep = -1;
+	bool bWasPausedBeforeMenu = false;
+	void TickPauseMenu(APlayerController* PC);
 	float TourTime = 0.f;
 	bool bTourShotTaken = false;
 	bool bTourShotBTaken = false; // -AerosFlickerShots: second picture 0.2 s later

@@ -66,6 +66,7 @@ private:
 	void DrawWarning(UAerosWeatherSubsystem* Sub, const FAerosWeatherSample& S);
 	void DrawFeed();
 	void DrawCaption();
+	void DrawPauseMenu(class AAerosDemoPawn* Pawn);
 	void DrawHelp(float X, float Y);
 
 	FString Explain(UAerosWeatherSubsystem* Sub, const FAerosWeatherSample& S) const;

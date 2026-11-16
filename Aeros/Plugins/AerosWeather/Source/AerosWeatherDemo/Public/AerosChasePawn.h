@@ -106,7 +106,7 @@ public:
 	float ToastTime = 0.f;
 	FString BriefingText;
 
-	static constexpr float BriefingStartHour = 15.25f;
+	static constexpr float BriefingStartHour = 14.5f;   // 1.5 h for the storm to mature (~10 s at x600)
 	static constexpr float DayStartHour = 16.f;
 	static constexpr float DayEndHour = 20.5f;
 	/** x2: supercells move at ~15 m/s, ~30 m/s on screen, a 50 m/s car can catch them (at x20 they
@@ -148,6 +148,9 @@ private:
 	void UpdateAlerts(UAerosWeatherSubsystem* Sub);
 	void PlaceOnGround();
 	FVector FindSafeStart(UAerosWeatherSubsystem* Sub, float DistanceKm, const FVector* Around = nullptr) const;
+	/** Angle (rad, world) of the storm's right flank, a little behind it: rain-free, facing the wall cloud. */
+	float FlankAngle(UAerosWeatherSubsystem* Sub) const;
+	bool bTornadoesOn = false;
 	void FastTravel();
 	void CapturePhoto();
 	double GroundZAt(double X, double Y) const;
@@ -172,7 +175,11 @@ private:
 	float AutoShotTimer = 0.f;
 	float QuitAfter = -1.f;
 	float EndDayAfter = -1.f;
-	float AutoTornadoKm = 3.f;   // -AerosChaseNear=km: how close the autopilot keeps to a tornado
+	float AutoTornadoKm = 3.f;
+	float MenuEnterAfter = -1.f;   // -AerosChaseFromMenu=S: test of the menu path (Enter after S s)
+	float BriefingLogTimer = 0.f;
+	FVector BubbleAt = FVector::ZeroVector;
+	FVector PickBubbleSpot(UAerosWeatherSubsystem* Sub) const;   // -AerosChaseNear=km: how close the autopilot keeps to a tornado
 	float DrivingTime = 0.f;
 	float AutoTravelTimer = 0.f;
 	/** Tornado-genesis settings saved while the chase tunes them (negative = not tuned). */
