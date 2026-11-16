@@ -288,6 +288,24 @@ bool FAerosCloudVolumeTest::RunTest(const FString& Parameters)
 		}
 		TestTrue(TEXT("Anvil top fades over >= 0.5 km (no terraces)"), Peak > 0.2f && Z10 > 0.f && Z90 > 0.f && Z10 - Z90 >= 0.5f);
 	}
+	// Storms read at any time are moved on from their tracking by their velocity (markers, tornadoes, chase):
+	// read raw, they jumped once a simulated minute
+	{
+		FAerosSnapshot Moved = Snap;
+		Moved.Storms.Reset();
+		FAerosStormData M = St;
+		M.Velocity = FVector(10.0, -5.0, 0.0);   // m/s, world
+		Moved.Storms.Add(M);
+		Moved.StormSimTime = 1000.0;
+		const FAerosStormData At = Moved.StormAt(0, 1030.0);
+		const FAerosStormData Before = Moved.StormAt(0, 900.0);   // older than the tracking: not moved back
+		const FAerosStormData Far = Moved.StormAt(0, 5000.0);     // capped: a stale snapshot does not fling storms away
+		TestTrue(TEXT("StormAt moves location, updraft and core by velocity x age"),
+			FVector::Dist2D(At.Location, M.Location + FVector(30000.0, -15000.0, 0.0)) < 1.0
+			&& FVector::Dist2D(At.UpdraftLocation, M.UpdraftLocation + FVector(30000.0, -15000.0, 0.0)) < 1.0
+			&& FVector::Dist2D(Before.Location, M.Location) < 1.0
+			&& FVector::Dist2D(Far.Location, M.Location) < 180.0 * 11.2 * 100.0 + 1.0);
+	}
 	// Storms are tracked once a simulated minute but the grid is rebuilt at every snapshot (~30 s): their
 	// positions are moved on by their velocity x the age of the tracking, or the clouds jumped ~1 km at
 	// each tracking (every minute of the clock)

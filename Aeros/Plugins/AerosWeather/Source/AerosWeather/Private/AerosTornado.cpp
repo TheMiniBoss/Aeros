@@ -264,9 +264,9 @@ void AAerosTornado::Tick(float DeltaSeconds)
 		{
 			ParentCheckTimer = 0.f;
 			bool bParentNear = false;
-			if (FAerosSnapshotPtr Snap = Sub->GetSnapshot())
 			{
-				for (const FAerosStormData& S : Snap->Storms)
+				// Moved on from their tracking (once a simulated minute): the anchor no longer jumps
+				for (const FAerosStormData& S : Sub->GetStorms())
 				{
 					if (S.Id != ParentStormId) continue;
 					bParentNear = FVector::Dist2D(S.UpdraftLocation, GetActorLocation()) < 2000000.0;

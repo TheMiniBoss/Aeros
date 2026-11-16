@@ -743,7 +743,13 @@ EAerosPhenomenon UAerosWeatherSubsystem::GetPhenomenonAtLocation(FVector WorldLo
 
 TArray<FAerosStormData> UAerosWeatherSubsystem::GetStorms() const
 {
-	return Current ? Current->Storms : TArray<FAerosStormData>();
+	// Storms are tracked once a simulated minute: moved on to the displayed time by their velocity, or
+	// every marker, tornado and chase target jumped by ~1 km each minute of the clock
+	TArray<FAerosStormData> Out;
+	if (!Current) return Out;
+	Out.Reserve(Current->Storms.Num());
+	for (int32 K = 0; K < Current->Storms.Num(); ++K) Out.Add(Current->StormAt(K, DisplayTime));
+	return Out;
 }
 
 TArray<FAerosCycloneData> UAerosWeatherSubsystem::GetCyclones() const
@@ -756,8 +762,9 @@ bool UAerosWeatherSubsystem::GetNearestStorm(FVector WorldLocation, FAerosStormD
 	if (!Current) return false;
 	double Best = FMath::Square(MaxDistanceKm * 100000.0);
 	bool bFound = false;
-	for (const FAerosStormData& S : Current->Storms)
+	for (int32 K = 0; K < Current->Storms.Num(); ++K)
 	{
+		const FAerosStormData S = Current->StormAt(K, DisplayTime);
 		const double D = FVector::DistSquared2D(S.Location, WorldLocation);
 		if (D < Best) { Best = D; OutStorm = S; bFound = true; }
 	}

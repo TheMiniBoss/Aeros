@@ -10,6 +10,7 @@
 #include "AerosTornado.h"
 #include "AerosWeatherSettings.h"
 #include "AerosWeatherRadar.h"
+#include "AerosCloudManager.h"
 #include "Core/AerosFunnel.h"
 #include "Camera/CameraComponent.h"
 #include "GameFramework/PlayerController.h"
@@ -459,7 +460,7 @@ void AAerosChasePawn::BeginDay()
 	FVector Target = GetActorLocation() + FVector(100000.0, 0.0, 0.0);
 	for (const FAerosStormData& S : Sub->GetStorms())
 	{
-		if (S.Intensity > BestI) { BestI = S.Intensity; Target = S.Location; }
+		if (S.Intensity > BestI) { BestI = S.Intensity; Target = S.UpdraftLocation; }
 	}
 	HeadingDeg = (Target - GetActorLocation()).Rotation().Yaw;
 	State = EAerosChaseState::Driving;
@@ -474,7 +475,7 @@ FVector AAerosChasePawn::FindSafeStart(UAerosWeatherSubsystem* Sub, float Distan
 	float BestI = -1.f;
 	for (const FAerosStormData& S : Sub->GetStorms())
 	{
-		if (S.Intensity > BestI) { BestI = S.Intensity; Center = S.Location; }
+		if (S.Intensity > BestI) { BestI = S.Intensity; Center = S.UpdraftLocation; }
 	}
 	if (Around) Center = *Around;
 	const double SeaZ = Sub->GetSimulationSettings().SeaLevelZ;
@@ -553,6 +554,21 @@ void AAerosChasePawn::TickDriving(APlayerController* PC, float DeltaSeconds)
 	if (!Sub) return;
 	if (Sub->GetDateTime().Hour >= DayEndHour) { EndReason = TEXT("Le soleil s'est couch\u00E9."); EndDay(); return; }
 	if (!bTornadoesOn && DrivingTime > 45.f) { TuneTornadoGenesis(2); bTornadoesOn = true; }
+	// -AerosChaseLogStorm: where the storm, the 3D cloud grid and the 2D weather map are (km)
+	if (FParse::Param(FCommandLine::Get(), TEXT("AerosChaseLogStorm")) && (BriefingLogTimer += DeltaSeconds) > 5.f)
+	{
+		BriefingLogTimer = 0.f;
+		const FVector L = GetActorLocation();
+		const FVector4 Dom = Sub->GetDomainRect();
+		FVector4 Rect(0, 0, 0, 0);
+		if (UAerosCloudManager* CM = Sub->GetCloudManager()) Rect = CM->GetCloudVolumeRect(1);
+		for (const FAerosStormData& S : Sub->GetStorms())
+		{
+			UE_LOG(LogTemp, Display, TEXT("Aeros chase: car (%.1f, %.1f) storm %d updraft (%.1f, %.1f) location (%.1f, %.1f) core (%.1f, %.1f) top %.0f m | grid (%.1f, %.1f) | domain (%.1f, %.1f)"),
+				L.X * 1e-5, L.Y * 1e-5, S.Id, S.UpdraftLocation.X * 1e-5, S.UpdraftLocation.Y * 1e-5, S.Location.X * 1e-5, S.Location.Y * 1e-5,
+				S.HailCoreLocation.X * 1e-5, S.HailCoreLocation.Y * 1e-5, S.CloudTop, Rect.X * 1e-5, Rect.Y * 1e-5, Dom.X * 1e-5, Dom.Y * 1e-5);
+		}
+	}
 	// The day is the storm's life: it ends once the storm has died
 	if (Sub->GetStorms().Num() > 0) { bStormSeen = true; NoStormTime = 0.f; }
 	else NoStormTime += DeltaSeconds;
@@ -652,7 +668,7 @@ void AAerosChasePawn::ApplyHazards(UAerosWeatherSubsystem* Sub, float DeltaSecon
 		double BestD = 1e18;
 		for (const FAerosStormData& S : Sub->GetStorms())
 		{
-			const double D = FVector::Dist2D(S.Location, L);
+			const double D = FVector::Dist2D(S.UpdraftLocation, L);
 			if (D < BestD) { BestD = D; Nearest = S.Id; }
 		}
 		if (HailTime > 2.f && Nearest >= 0 && !HailStorms.Contains(Nearest))
@@ -731,7 +747,7 @@ void AAerosChasePawn::FastTravel()
 	for (const FAerosStormData& S : Storms)
 	{
 		if (S.Type != EAerosStormType::Supercell) continue;
-		const double D = FVector::Dist2D(S.Location, L);
+		const double D = FVector::Dist2D(S.UpdraftLocation, L);
 		if (D < BestD) { BestD = D; Best = &S; }
 	}
 	// A tornado on the ground beats any supercell
@@ -747,7 +763,7 @@ void AAerosChasePawn::FastTravel()
 	{
 		for (const FAerosStormData& S : Storms)
 		{
-			const double D = FVector::Dist2D(S.Location, L);
+			const double D = FVector::Dist2D(S.UpdraftLocation, L);
 			if (D < BestD) { BestD = D; Best = &S; }
 		}
 	}
@@ -756,7 +772,7 @@ void AAerosChasePawn::FastTravel()
 	const double TargetD = bTwister ? TwisterD : BestD;
 	const TCHAR* What = bTwister ? TEXT("de la tornade") : TEXT("de la supercellule");
 	if (TargetD < (FastTravelKm + 2.f) * 100000.0) { ShowToast(FString::Printf(TEXT("Tu es d\u00E9j\u00E0 pr\u00E8s %s."), What)); return; }
-	const FVector Center = bTwister ? Twister->GetActorLocation() : Best->Location;
+	const FVector Center = bTwister ? Twister->GetActorLocation() : Best->UpdraftLocation;
 	SetActorLocation(FindSafeStart(Sub, FastTravelKm, &Center));
 	PlaceOnGround();
 	HeadingDeg = (Center - GetActorLocation()).Rotation().Yaw;
@@ -849,7 +865,7 @@ FAerosChaseShotPreview AAerosChasePawn::EvaluateShot() const
 		}
 		if (S.Type == EAerosStormType::Supercell)
 		{
-			Consider(AerosChase::ESubject::Supercell, S.Location + FVector(0, 0, FMath::Max(S.CloudTop, 4000.f) * 50.0), 0, 1.f,
+			Consider(AerosChase::ESubject::Supercell, S.UpdraftLocation + FVector(0, 0, FMath::Max(S.CloudTop, 4000.f) * 50.0), 0, 1.f,
 				TEXT("Supercellule"), FString::Printf(TEXT("S%d"), S.Id), 0.0);
 		}
 	}
@@ -927,7 +943,7 @@ void AAerosChasePawn::TickAutopilot(float DeltaSeconds)
 		float BestI = -1.f;
 		for (const FAerosStormData& S : Sub->GetStorms())
 		{
-			if (S.Intensity > BestI) { BestI = S.Intensity; Target = S.Location + FVector(0, 0, FMath::Max(S.CloudTop, 4000.f) * 50.0); bHave = true; }
+			if (S.Intensity > BestI) { BestI = S.Intensity; Target = S.UpdraftLocation + FVector(0, 0, FMath::Max(S.CloudTop, 4000.f) * 50.0); bHave = true; }
 		}
 		BestD = float(FVector::Dist2D(Target, L)) * 1e-5f;
 	}

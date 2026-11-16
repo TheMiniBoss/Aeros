@@ -31,6 +31,20 @@ public:
 	FAerosSimulationSettings Settings;   // grid + domain centre at publish time
 	double SimTime = 0.0;
 	double StormSimTime = 0.0;   // when Storms were last tracked (once a simulated minute): their positions are that old
+
+	/** Storm Index moved on from its tracking to AtSimTime by its velocity (location, updraft, hail core;
+	 *  0-180 s): read raw, storms jumped once a simulated minute. */
+	FAerosStormData StormAt(int32 Index, double AtSimTime) const
+	{
+		FAerosStormData S = Storms[Index];
+		const double Age = AtSimTime - StormSimTime;
+		const double T = Age < 0.0 ? 0.0 : (Age > 180.0 ? 180.0 : Age);
+		const FVector Shift(S.Velocity.X * 100.0 * T, S.Velocity.Y * 100.0 * T, 0.0);
+		S.Location = S.Location + Shift;
+		S.UpdraftLocation = S.UpdraftLocation + Shift;
+		if (!S.HailCoreLocation.IsZero()) S.HailCoreLocation = S.HailCoreLocation + Shift;
+		return S;
+	}
 	uint64 Generation = 0;
 	int32 NX = 0, NY = 0;
 	float CellM = 2000.f;

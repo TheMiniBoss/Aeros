@@ -446,10 +446,10 @@ FString AAerosDemoHUD::Explain(UAerosWeatherSubsystem* Sub, const FAerosWeatherS
 
 	// Nearest notable storm, to give the player a direction to look at
 	FAerosStormData Storm;
-	if (Sub->GetNearestStorm(Viewer, Storm, 120.f) && Km(Storm.Location, Viewer) > Storm.RadiusKm)
+	if (Sub->GetNearestStorm(Viewer, Storm, 120.f) && Km(Storm.UpdraftLocation, Viewer) > Storm.RadiusKm)
 	{
 		Out.Add(FString::Printf(TEXT("%s le plus proche : %.0f km au %s (touche F pour y aller)."), *StormTypeFr(Storm.Type),
-			Km(Storm.Location, Viewer), *Compass(Bearing(Viewer, Storm.Location))));
+			Km(Storm.UpdraftLocation, Viewer), *Compass(Bearing(Viewer, Storm.UpdraftLocation))));
 	}
 
 	while (Out.Num() > 3) Out.RemoveAt(Out.Num() - 2);
@@ -517,7 +517,7 @@ void AAerosDemoHUD::DrawExpert(UAerosWeatherSubsystem* Sub, const FAerosWeatherS
 
 	// Nearby storms under the radar
 	TArray<FAerosStormData> Storms = Sub->GetStorms();
-	Storms.Sort([&Viewer](const FAerosStormData& A, const FAerosStormData& B) { return FVector::DistSquared2D(A.Location, Viewer) < FVector::DistSquared2D(B.Location, Viewer); });
+	Storms.Sort([&Viewer](const FAerosStormData& A, const FAerosStormData& B) { return FVector::DistSquared2D(A.UpdraftLocation, Viewer) < FVector::DistSquared2D(B.UpdraftLocation, Viewer); });
 	const float RadarSize = FMath::Min(Canvas->ClipY * 0.36f, 320.f);
 	const float SX = Canvas->ClipX - RadarSize - 20.f;
 	float SY = 20.f + RadarSize + 30.f;
@@ -528,7 +528,7 @@ void AAerosDemoHUD::DrawExpert(UAerosWeatherSubsystem* Sub, const FAerosWeatherS
 		const FAerosStormData& St = Storms[K];
 		SY = Line(SX, SY, FString::Printf(TEXT("#%d %s %3.0f km %s  %2.0f dBZ  hail %2.0f"), St.Id,
 			St.Type == EAerosStormType::Supercell ? TEXT("SUP") : (St.Type == EAerosStormType::Multicell ? TEXT("MUL") : TEXT("SGL")),
-			Km(St.Location, Viewer), *Compass(Bearing(Viewer, St.Location)), St.MaxReflectivity, St.MaxHail), StormColor(St));
+			Km(St.UpdraftLocation, Viewer), *Compass(Bearing(Viewer, St.UpdraftLocation)), St.MaxReflectivity, St.MaxHail), StormColor(St));
 	}
 }
 
@@ -641,12 +641,12 @@ void AAerosDemoHUD::DrawWorldMarkers(UAerosWeatherSubsystem* Sub)
 
 	// Storms: the 5 nearest within 150 km, at cloud-base height above the updraft (no edge arrows)
 	TArray<FAerosStormData> Storms = Sub->GetStorms();
-	Storms.Sort([&Viewer](const FAerosStormData& A, const FAerosStormData& B) { return FVector::DistSquared2D(A.Location, Viewer) < FVector::DistSquared2D(B.Location, Viewer); });
+	Storms.Sort([&Viewer](const FAerosStormData& A, const FAerosStormData& B) { return FVector::DistSquared2D(A.UpdraftLocation, Viewer) < FVector::DistSquared2D(B.UpdraftLocation, Viewer); });
 	for (int32 K = 0; K < FMath::Min(Storms.Num(), 5); ++K)
 	{
 		const FAerosStormData& St = Storms[K];
-		if (Km(St.Location, Viewer) > 150.f) break;
-		FString Label = FString::Printf(TEXT("%s  %.0f km"), *StormTypeFr(St.Type), Km(St.Location, Viewer));
+		if (Km(St.UpdraftLocation, Viewer) > 150.f) break;
+		FString Label = FString::Printf(TEXT("%s  %.0f km"), *StormTypeFr(St.Type), Km(St.UpdraftLocation, Viewer));
 		if (St.MaxHail > 10.f) Label += FString::Printf(TEXT("  gr\u00EAle %.0f mm"), St.MaxHail);
 		if (St.Mesocyclone > 0.5f) Label += TEXT("  rotation");
 		DrawMarker(FVector(St.UpdraftLocation.X, St.UpdraftLocation.Y, 250000.0), Label, StormColor(St), St.Type == EAerosStormType::Supercell ? 10.f : 7.f, false);
@@ -784,9 +784,9 @@ void AAerosDemoHUD::HandleStormFormed(const FAerosStormData& Storm)
 	using namespace AerosDemoHudInternal;
 	UAerosWeatherSubsystem* Sub = UAerosWeatherSubsystem::Get(this);
 	if (!Sub) return;
-	const float D = Km(Storm.Location, Sub->GetViewerLocation());
+	const float D = Km(Storm.UpdraftLocation, Sub->GetViewerLocation());
 	if (Storm.Type == EAerosStormType::SingleCell && D > 40.f) return; // too many small cells otherwise
-	PushEvent(FString::Printf(TEXT("Un orage se forme \u00E0 %.0f km au %s"), D, *Compass(Bearing(Sub->GetViewerLocation(), Storm.Location))), FLinearColor::White);
+	PushEvent(FString::Printf(TEXT("Un orage se forme \u00E0 %.0f km au %s"), D, *Compass(Bearing(Sub->GetViewerLocation(), Storm.UpdraftLocation))), FLinearColor::White);
 }
 
 void AAerosDemoHUD::HandleTornado(AAerosTornado* Tornado)

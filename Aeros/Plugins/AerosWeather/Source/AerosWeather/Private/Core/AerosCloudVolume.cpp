@@ -123,14 +123,9 @@ void FAerosCloudVolume::Build(const FAerosSnapshot& Snap, const FAerosCloudVolum
 	Anvil.SetNum(NX * NY);
 	// Storms are tracked once a simulated minute, the grid is built at every snapshot (~30 s): move them on
 	// to the snapshot's time, or the clouds jumped ~1 km at each tracking (every minute of the clock)
-	const double TrackAge = FMath::Clamp(Snap.SimTime - Snap.StormSimTime, 0.0, 120.0);
-	for (const FAerosStormData& Tracked : Snap.Storms)
+	for (int32 StormIndex = 0; StormIndex < Snap.Storms.Num(); ++StormIndex)
 	{
-		FAerosStormData S = Tracked;
-		const FVector Shift(S.Velocity.X * 100.0 * TrackAge, S.Velocity.Y * 100.0 * TrackAge, 0.0);
-		S.UpdraftLocation = S.UpdraftLocation + Shift;
-		S.Location = S.Location + Shift;
-		if (!S.HailCoreLocation.IsZero()) S.HailCoreLocation = S.HailCoreLocation + Shift;
+		const FAerosStormData S = Snap.StormAt(StormIndex, Snap.SimTime);
 		FStormShape Sh;
 		ToLocal(S.UpdraftLocation, Sh.UX, Sh.UY);
 		ToLocal(S.HailCoreLocation.IsZero() ? S.UpdraftLocation : S.HailCoreLocation, Sh.HX, Sh.HY);

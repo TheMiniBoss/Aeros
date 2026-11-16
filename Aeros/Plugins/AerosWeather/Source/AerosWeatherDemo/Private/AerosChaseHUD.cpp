@@ -357,7 +357,7 @@ void AAerosChaseHUD::DrawCompass(AAerosChasePawn* P, UAerosWeatherSubsystem* Sub
 	{
 		if (S.Type != EAerosStormType::Supercell) continue;
 		float X;
-		if (ToX(P->BearingTo(S.Location), X)) DrawRect(Storm, X - 3.f, Y + 2.f, 6.f, 6.f);
+		if (ToX(P->BearingTo(S.UpdraftLocation), X)) DrawRect(Storm, X - 3.f, Y + 2.f, 6.f, 6.f);
 	}
 	for (TActorIterator<AAerosTornado> It(GetWorld()); It; ++It)
 	{
@@ -388,9 +388,9 @@ void AAerosChaseHUD::DrawWorldMarkers(AAerosChasePawn* P, UAerosWeatherSubsystem
 	for (const FAerosStormData& S : Sub->GetStorms())
 	{
 		if (S.Type != EAerosStormType::Supercell) continue;
-		const float D = float(FVector::Dist2D(S.Location, P->GetActorLocation())) * 1e-5f;
+		const float D = float(FVector::Dist2D(S.UpdraftLocation, P->GetActorLocation())) * 1e-5f;
 		if (D > 90.f || D < 4.f) continue;
-		Mark(S.Location + FVector(0, 0, 900000.0), FString::Printf(TEXT("Supercellule  %.0f km"), D), Storm);
+		Mark(S.UpdraftLocation + FVector(0, 0, 900000.0), FString::Printf(TEXT("Supercellule  %.0f km"), D), Storm);
 	}
 }
 

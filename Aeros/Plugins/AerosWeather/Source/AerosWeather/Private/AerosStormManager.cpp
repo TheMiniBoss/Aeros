@@ -93,7 +93,8 @@ void UAerosStormManager::UpdateStormActors()
 	const UAerosWeatherSettings* Settings = UAerosWeatherSettings::Get();
 
 	TSet<int32> Wanted;
-	for (const FAerosStormData& S : Snap->Storms)
+	const TArray<FAerosStormData> Storms = Owner->GetStorms();   // moved on from their tracking (no minute jumps)
+	for (const FAerosStormData& S : Storms)
 	{
 		const bool bImportant = S.Intensity >= Settings->StormActorMinIntensity || S.Type == EAerosStormType::Supercell;
 		if (!bImportant || !IsNearAnyPlayer(S.Location, Settings->StormActorRadiusKm)) continue;
@@ -130,7 +131,8 @@ void UAerosStormManager::UpdateTornadoGenesis()
 	const UAerosWeatherSettings* Settings = UAerosWeatherSettings::Get();
 	if (Settings->TornadoFrequency <= 0.f) return;
 
-	for (const FAerosStormData& S : Snap->Storms)
+	const TArray<FAerosStormData> Storms = Owner->GetStorms();   // a tornado is born where the storm is now
+	for (const FAerosStormData& S : Storms)
 	{
 		const bool bCritical = (S.Mesocyclone > 0.5f && S.STP > 0.5f) || (S.CAPE > 2500.f && S.SRH03 > 250.f && S.Mesocyclone > 0.3f);
 		if (!bCritical) continue;
@@ -196,7 +198,8 @@ AAerosTornado* UAerosStormManager::ForceTornado(int32 StormId)
 	if (!Snap || !Owner->HasAuthority()) return nullptr;
 
 	const FAerosStormData* Best = nullptr;
-	for (const FAerosStormData& S : Snap->Storms)
+	const TArray<FAerosStormData> Storms = Owner->GetStorms();
+	for (const FAerosStormData& S : Storms)
 	{
 		if (StormId >= 0 ? S.Id == StormId : (!Best || S.Intensity + S.Mesocyclone > Best->Intensity + Best->Mesocyclone)) Best = &S;
 	}
