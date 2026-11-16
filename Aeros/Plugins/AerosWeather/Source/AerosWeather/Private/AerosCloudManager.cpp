@@ -171,13 +171,14 @@ void UAerosCloudManager::UpdateCloudVolume(float DeltaTime)
 	const FVector Center = FAerosCloudVolume::SnapCenter(Owner->GetViewerLocation());
 	const bool bMoved = !Center.Equals(VolumeDescs[CurVolume].Center, 1.0);
 	if (FVector::Dist2D(Center, VolumeDescs[CurVolume].Center) > 4000000.0) VolumeWeight = 0.f; // > 40 km: hide the stale grid
-	if (VolumeTimer < 1.f || (!bMoved && Snap->Generation == VolumeGeneration)) return;
+	// Rebuilt every second while storms move (from their interpolated positions), else on a new state
+	if (VolumeTimer < 1.f || (!bMoved && Snap->Generation == VolumeGeneration && Snap->Storms.Num() == 0)) return;
 
 	VolumeTimer = 0.f;
 	VolumeGeneration = Snap->Generation;
 	BuildingDesc = FAerosCloudVolumeDesc();
 	BuildingDesc.Center = Center;
-	BuildingDesc.SimTime = Snap->SimTime;
+	BuildingDesc.SimTime = Owner->GetSimulationTime();   // the displayed time the storms are interpolated to
 	{
 		// Mean motion of the storms in and around the grid (weighted by intensity), else the steering wind
 		FVector Sum = FVector::ZeroVector;
@@ -197,15 +198,14 @@ void UAerosCloudManager::UpdateCloudVolume(float DeltaTime)
 	bVolumeBuilding = true;
 	TSharedPtr<TArray<uint8>, ESPMode::ThreadSafe> Out = BuildingData;
 	const FAerosCloudVolumeDesc Desc = BuildingDesc;
-	// The storms as they are shown (moved on from their tracking and glided over its gaps, like the
-	// markers and tornadoes): Build moves them on from the displayed time to the snapshot's
+	// The storms as they are shown (interpolated between two states, like the markers and tornadoes),
+	// at the displayed time: Build does not move them
 	TArray<FAerosStormData> Shown = Owner->GetStorms();
-	const double ShownTime = Owner->GetSimulationTime();
-	VolumeTask = UE::Tasks::Launch(UE_SOURCE_LOCATION, [Snap, Desc, Out, Shown = MoveTemp(Shown), ShownTime]()
+	VolumeTask = UE::Tasks::Launch(UE_SOURCE_LOCATION, [Snap, Desc, Out, Shown = MoveTemp(Shown)]()
 	{
 		FAerosSnapshot Copy = *Snap;
 		Copy.Storms = Shown;
-		Copy.StormSimTime = ShownTime;
+		Copy.StormSimTime = Copy.SimTime;
 		FAerosCloudVolume::Build(Copy, Desc, *Out);
 	});
 }

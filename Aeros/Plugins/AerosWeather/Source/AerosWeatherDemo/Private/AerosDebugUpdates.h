@@ -32,25 +32,23 @@ namespace AerosDebugUpdatesInternal
 		auto Real = [Scale](double Sim) { return float(FMath::Max(Sim, 0.0) / Scale); };
 		TArray<FString> Lines;
 		Lines.Add(FString::Printf(TEXT("MISES \u00C0 JOUR (temps x%.0f)"), T.TimeScale));
-		Lines.Add(FString::Printf(TEXT("\u00C9tat de la simulation : le prochain dans %.0f s simul\u00E9es (%.1f s r\u00E9elles)"), FMath::Max(T.NextSnapshot - T.DisplayTime, 0.0), Real(T.NextSnapshot - T.DisplayTime)));
-		Lines.Add(FString::Printf(TEXT("Suivi des orages (1 par minute simul\u00E9e) : le prochain dans %.0f s simul\u00E9es (%.1f s r\u00E9elles)"), FMath::Max(T.NextTracking - T.DisplayTime, 0.0), Real(T.NextTracking - T.DisplayTime)));
-		if (T.SinceTrackingReal >= 0.f)
-		{
-			Lines.Add(FString::Printf(TEXT("Dernier suivi : il y a %.1f s, \u00E9cart liss\u00E9 %.2f km (glisse en ~3 s)"), T.SinceTrackingReal, T.LastGlideKm));
-		}
+		Lines.Add(FString::Printf(TEXT("Affichage entre deux \u00E9tats : t = %.0f s -> t+1 = %.0f s, %.0f %% du chemin"), T.FromTime, T.ToTime, T.Alpha * 100.f));
+		Lines.Add(FString::Printf(TEXT("Prochain d\u00E9part vers t+2 dans %.0f s simul\u00E9es (%.1f s r\u00E9elles), simulation \u00E0 %.0f s (avance %.0f s)"),
+			FMath::Max(T.ToTime - T.DisplayTime, 0.0), Real(T.ToTime - T.DisplayTime), T.SimTime, T.SimTime - T.DisplayTime));
+		Lines.Add(FString::Printf(TEXT("Orages suivis \u00E0 chaque \u00E9tat (%d), positions interpol\u00E9es t -> t+1"), T.NumStorms));
 		if (const UAerosCloudManager* Clouds = Sub->GetCloudManager())
 		{
 			const float Swap = Clouds->GetSecondsSinceVolumeSwap();
 			Lines.Add(Swap < 0.f ? FString(TEXT("Grille 3D des nuages : pas encore construite"))
 				: FString::Printf(TEXT("Grille 3D des nuages : \u00E9chang\u00E9e il y a %.1f s (fondu 1 s, %d \u00E9changes)"), Swap, Clouds->GetCloudVolumeSwaps()));
 		}
-		const bool bJustTracked = T.SinceTrackingReal >= 0.f && T.SinceTrackingReal < 1.f;
+		const bool bJustTracked = T.Alpha < 0.05f;
 		UFont* Font = GEngine->GetSmallFont();
 		const float LineH = 16.f;
 		Hud->DrawRect(FLinearColor(0.f, 0.f, 0.f, 0.55f), X - 6.f, Y - LineH * Lines.Num() - 6.f, 560.f, LineH * Lines.Num() + 10.f);
 		for (int32 K = 0; K < Lines.Num(); ++K)
 		{
-			const FLinearColor C = K == 0 ? FLinearColor(1.f, 0.78f, 0.35f) : (K == 2 && bJustTracked ? FLinearColor(1.f, 0.4f, 0.35f) : FLinearColor(0.9f, 0.92f, 0.95f));
+			const FLinearColor C = K == 0 ? FLinearColor(1.f, 0.78f, 0.35f) : (K == 1 && bJustTracked ? FLinearColor(1.f, 0.4f, 0.35f) : FLinearColor(0.9f, 0.92f, 0.95f));
 			Hud->DrawText(Lines[K], C, X, Y - LineH * (Lines.Num() - K), Font, 1.f);
 		}
 	}

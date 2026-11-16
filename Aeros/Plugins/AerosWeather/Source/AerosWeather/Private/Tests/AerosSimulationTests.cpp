@@ -115,6 +115,30 @@ bool FAerosStormTrackTest::RunTest(const FString& Parameters)
 		PrevVel = St->Velocity;
 	}
 	TestTrue(TEXT("Updraft followed over 30+ minutes"), Samples >= 30);
+	{
+		// Every published state has its own tracking, so the display can interpolate t -> t+1
+		FAerosSnapshot A, B;
+		Sim.FillSnapshot(A);
+		Sim.Step(30.f);
+		Sim.FillSnapshot(B);
+		TestTrue(TEXT("Storms tracked at every step (StormSimTime == SimTime)"), A.StormSimTime == A.SimTime && B.StormSimTime == B.SimTime);
+		// Interpolation between two states: matched by id, new storms as they are, vanished ones dropped
+		FAerosSnapshot P, Q;
+		FAerosStormData S1; S1.Id = 1; S1.Location = FVector(0, 0, 0); S1.UpdraftLocation = FVector(1000, 0, 0); S1.Intensity = 0.2f;
+		FAerosStormData S2 = S1; S2.Location = FVector(4000, 0, 0); S2.UpdraftLocation = FVector(5000, 800, 0); S2.Intensity = 0.6f;
+		FAerosStormData Gone; Gone.Id = 7;
+		FAerosStormData Born; Born.Id = 9; Born.Location = FVector(100, 200, 0);
+		P.Storms.Add(S1); P.Storms.Add(Gone);
+		Q.Storms.Add(S2); Q.Storms.Add(Born);
+		const TArray<FAerosStormData> Mid = FAerosSnapshot::InterpolateStorms(P, Q, 0.25f);
+		const FAerosStormData* M1 = nullptr;
+		const FAerosStormData* M9 = nullptr;
+		bool bGone = false;
+		for (const FAerosStormData& M : Mid) { if (M.Id == 1) M1 = &M; if (M.Id == 9) M9 = &M; bGone |= M.Id == 7; }
+		TestTrue(TEXT("Interpolated storm sits a quarter of the way"), M1 && FVector::Dist2D(M1->Location, FVector(1000, 0, 0)) < 1.0
+			&& FVector::Dist2D(M1->UpdraftLocation, FVector(2000, 200, 0)) < 1.0 && FMath::Abs(M1->Intensity - 0.3f) < 1e-4f);
+		TestTrue(TEXT("New storm shown as it is, vanished one dropped"), M9 && FVector::Dist2D(M9->Location, Born.Location) < 1.0 && !bGone);
+	}
 	// The rest (an updraft pulsing between cells) is glided out on display by UAerosWeatherSubsystem
 	TestTrue(TEXT("Updraft moves smoothly (error vs predicted motion < 1.5 km per minute, was > 12)"), WorstKm < 1.5f);
 	return true;

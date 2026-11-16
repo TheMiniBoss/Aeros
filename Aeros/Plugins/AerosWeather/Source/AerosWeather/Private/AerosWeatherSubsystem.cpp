@@ -167,7 +167,6 @@ void UAerosWeatherSubsystem::Tick(float DeltaTime)
 	SimThread->SetTargetTime(TargetTime);
 	SimThread->TickSynchronous(); // no-op when threaded
 	PullSnapshot();
-	UpdateStormGlide(DeltaTime);
 	MaybeFollowViewer();
 
 	UpdateTerrainSampling();
@@ -742,77 +741,29 @@ EAerosPhenomenon UAerosWeatherSubsystem::GetPhenomenonAtLocation(FVector WorldLo
 	return GetWeatherAtLocation(WorldLocation).Phenomenon;
 }
 
-void UAerosWeatherSubsystem::UpdateStormGlide(float DeltaTime)
-{
-	// Fade the gaps out (time constant 2.5 real seconds)
-	const float Keep = FMath::Exp(-DeltaTime / 2.5f);
-	for (auto It = StormGlide.CreateIterator(); It; ++It)
-	{
-		It.Value() *= Keep;
-		if (It.Value().SizeSquared2D() < 100.0) It.RemoveCurrent();
-	}
-	if (!Current || !Previous || Current->StormSimTime == GlideTrackTime) return;
-	const bool bFirst = GlideTrackTime < 0.0;
-	GlideTrackTime = Current->StormSimTime;
-	if (bFirst) return;
-	// A new tracking: where each storm was shown (previous snapshot, plus its glide) against where it is now
-	LastTrackRealTime = FPlatformTime::Seconds();
-	LastTrackGlideKm = 0.f;
-	for (int32 K = 0; K < Current->Storms.Num(); ++K)
-	{
-		const int32 Id = Current->Storms[K].Id;
-		for (int32 P = 0; P < Previous->Storms.Num(); ++P)
-		{
-			if (Previous->Storms[P].Id != Id) continue;
-			const FVector* Glide = StormGlide.Find(Id);
-			const FVector Shown = Previous->StormAt(P, DisplayTime).UpdraftLocation + (Glide ? *Glide : FVector::ZeroVector);
-			FVector Gap = Shown - Current->StormAt(K, DisplayTime).UpdraftLocation;
-			Gap.Z = 0.0;
-			if (Gap.SizeSquared2D() > FMath::Square(800000.0)) break;   // > 8 km: a new updraft took over, show it
-			LastTrackGlideKm = FMath::Max(LastTrackGlideKm, float(Gap.Size2D() * 1e-5));
-			StormGlide.Add(Id, Gap);
-			break;
-		}
-	}
-}
-
-FAerosStormData UAerosWeatherSubsystem::DisplayedStorm(int32 Index) const
-{
-	FAerosStormData S = Current->StormAt(Index, DisplayTime);
-	if (const FVector* Glide = StormGlide.Find(S.Id))
-	{
-		S.Location += *Glide;
-		S.UpdraftLocation += *Glide;
-		if (!S.HailCoreLocation.IsZero()) S.HailCoreLocation += *Glide;
-	}
-	return S;
-}
-
 UAerosWeatherSubsystem::FUpdateTimes UAerosWeatherSubsystem::GetUpdateTimes() const
 {
 	FUpdateTimes T;
 	T.DisplayTime = DisplayTime;
 	T.TimeScale = bPaused ? 0.f : ActiveSettings.TimeScale;
-	if (Current && SimThread)
+	T.Alpha = SnapshotAlpha;
+	if (Current)
 	{
-		T.NextSnapshot = Current->SimTime + SimThread->GetStepSeconds();
-		T.NextTracking = Current->StormSimTime + 60.0;
+		T.FromTime = Previous ? Previous->SimTime : Current->SimTime;
+		T.ToTime = Current->SimTime;
+		T.NumStorms = Current->Storms.Num();
 	}
-	T.SinceTrackingReal = LastTrackRealTime < 0.0 ? -1.f : float(FPlatformTime::Seconds() - LastTrackRealTime);
-	T.LastGlideKm = LastTrackGlideKm;
+	if (SimThread) T.SimTime = SimThread->GetSimTime();
 	return T;
 }
 
 TArray<FAerosStormData> UAerosWeatherSubsystem::GetStorms() const
 {
-	// Storms are tracked once a simulated minute: moved on to the displayed time by their velocity (or
-	// every marker, tornado and chase target jumped each minute of the clock), and glided over the gap
-	// a new tracking makes
-	TArray<FAerosStormData> Out;
-	if (!Current) return Out;
-	Out.Reserve(Current->Storms.Num());
-	for (int32 K = 0; K < Current->Storms.Num(); ++K) Out.Add(DisplayedStorm(K));
-	return Out;
+	// The display runs one step behind the simulation, between two published states (t and t+1), and
+	// every state has its own storm tracking: each storm glides from where it is at t to where it is at
+	// t+1, then on to t+2 (they jumped when they were tracked once a simulated minute and extrapolated)
+	if (!Current) return TArray<FAerosStormData>();
+	return FAerosSnapshot::InterpolateStorms(Previous ? *Previous : *Current, *Current, SnapshotAlpha);
 }
 
 TArray<FAerosCycloneData> UAerosWeatherSubsystem::GetCyclones() const
@@ -825,9 +776,8 @@ bool UAerosWeatherSubsystem::GetNearestStorm(FVector WorldLocation, FAerosStormD
 	if (!Current) return false;
 	double Best = FMath::Square(MaxDistanceKm * 100000.0);
 	bool bFound = false;
-	for (int32 K = 0; K < Current->Storms.Num(); ++K)
+	for (const FAerosStormData& S : GetStorms())
 	{
-		const FAerosStormData S = DisplayedStorm(K);
 		const double D = FVector::DistSquared2D(S.Location, WorldLocation);
 		if (D < Best) { Best = D; OutStorm = S; bFound = true; }
 	}

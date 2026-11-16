@@ -480,8 +480,10 @@ void FAerosSimulation::Step(float Dt)
 	if (Settings.bEnableHydrology) StepHydrology(Dt);
 	if (Settings.bEnableTropicalCyclones) StepCyclones(Dt);
 
+	// Storms are tracked at every step (they were once a simulated minute): every published state has
+	// its own tracking, and the display interpolates storms from one state to the next
 	StormTimer += Dt;
-	if (StormTimer >= 60.f)
+	if (StormTimer >= FMath::Min(Dt, 60.f) - 1e-3f)
 	{
 		DetectAndTrackStorms(StormTimer);
 		GenerateLightning(StormTimer);
@@ -1686,12 +1688,16 @@ void FAerosSimulation::DetectAndTrackStorms(float Interval)
 		{
 			const FAerosTrackedStorm& Old = Storms[BestIdx];
 			const float VXo = float(Old.Data.Velocity.X), VYo = -float(Old.Data.Velocity.Y);   // world -> domain (y north)
-			auto Filter = [Interval, VXo, VYo](float OldX, float OldY, float& InOutX, float& InOutY)
+			// Gains per tracking, set for a one-minute interval (30 % of the measure, 40 % of the track):
+			// tracked every 30 s the same gains made the path twice as noisy
+			const float PerMinute = FMath::Clamp(Interval / 60.f, 0.05f, 2.f);
+			const float PosGain = 1.f - FMath::Pow(0.7f, PerMinute), VelGain = 1.f - FMath::Pow(0.6f, PerMinute);
+			auto Filter = [Interval, VXo, VYo, PosGain](float OldX, float OldY, float& InOutX, float& InOutY)
 			{
 				const float PX = OldX + VXo * Interval, PY = OldY + VYo * Interval;
 				if (FMath::Square(InOutX - PX) + FMath::Square(InOutY - PY) > FMath::Square(8000.f)) return;
-				InOutX = PX + 0.3f * (InOutX - PX);
-				InOutY = PY + 0.3f * (InOutY - PY);
+				InOutX = PX + PosGain * (InOutX - PX);
+				InOutY = PY + PosGain * (InOutY - PY);
 			};
 			Filter(Old.UX, Old.UY, UX, UY);
 			Filter(Old.HX, Old.HY, HX, HY);
@@ -1699,8 +1705,8 @@ void FAerosSimulation::DetectAndTrackStorms(float Interval)
 			{
 				FVector2D UTrack((UX - Old.UX) / Interval, (UY - Old.UY) / Interval);
 				if (UTrack.Size() > 25.0) UTrack = UTrack.GetSafeNormal() * 25.0;
-				VX = 0.6f * VXo + 0.4f * float(UTrack.X);
-				VY = 0.6f * VYo + 0.4f * float(UTrack.Y);
+				VX = VXo + VelGain * (float(UTrack.X) - VXo);
+				VY = VYo + VelGain * (float(UTrack.Y) - VYo);
 				D.Velocity = FAerosSnapshot::SimToWorldDir(VX, VY);
 			}
 		}

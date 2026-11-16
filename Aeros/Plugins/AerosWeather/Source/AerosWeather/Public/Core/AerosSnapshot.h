@@ -34,6 +34,41 @@ public:
 
 	/** Storm Index moved on from its tracking to AtSimTime by its velocity (location, updraft, hail core;
 	 *  0-180 s): read raw, storms jumped once a simulated minute. */
+	/** Storms between two published states (Alpha 0 = A, 1 = B), matched by id: what the display shows
+	 *  while it runs from one state to the next. A storm new in B is shown as it is in B; one gone from B
+	 *  is dropped. Positions, velocity and the main measures are blended; the rest is B's. */
+	static TArray<FAerosStormData> InterpolateStorms(const FAerosSnapshot& A, const FAerosSnapshot& B, float Alpha)
+	{
+		const float T = Alpha < 0.f ? 0.f : (Alpha > 1.f ? 1.f : Alpha);
+		auto L = [T](const FVector& X, const FVector& Y) { return X + (Y - X) * double(T); };
+		auto F = [T](float X, float Y) { return X + (Y - X) * T; };
+		TArray<FAerosStormData> Out;
+		for (const FAerosStormData& SB : B.Storms)
+		{
+			FAerosStormData S = SB;
+			for (const FAerosStormData& SA : A.Storms)
+			{
+				if (SA.Id != SB.Id) continue;
+				S.Location = L(SA.Location, SB.Location);
+				S.UpdraftLocation = L(SA.UpdraftLocation, SB.UpdraftLocation);
+				if (!SA.HailCoreLocation.IsZero() && !SB.HailCoreLocation.IsZero()) S.HailCoreLocation = L(SA.HailCoreLocation, SB.HailCoreLocation);
+				S.Velocity = L(SA.Velocity, SB.Velocity);
+				S.Intensity = F(SA.Intensity, SB.Intensity);
+				S.Mesocyclone = F(SA.Mesocyclone, SB.Mesocyclone);
+				S.CloudTop = F(SA.CloudTop, SB.CloudTop);
+				S.RadiusKm = F(SA.RadiusKm, SB.RadiusKm);
+				S.LCL = F(SA.LCL, SB.LCL);
+				S.MaxUpdraft = F(SA.MaxUpdraft, SB.MaxUpdraft);
+				S.MaxReflectivity = F(SA.MaxReflectivity, SB.MaxReflectivity);
+				S.MaxRainRate = F(SA.MaxRainRate, SB.MaxRainRate);
+				S.MaxHail = F(SA.MaxHail, SB.MaxHail);
+				break;
+			}
+			Out.Add(S);
+		}
+		return Out;
+	}
+
 	FAerosStormData StormAt(int32 Index, double AtSimTime) const
 	{
 		FAerosStormData S = Storms[Index];
