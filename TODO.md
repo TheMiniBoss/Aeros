@@ -5,7 +5,9 @@ Branche de travail actuelle : `claude/clouds-v2` (rendu maison des nuages).
 
 ## Nuages et orages
 
-- [ ] Les nuages sautent à chaque minute de l'horloge. Piste : la simulation ne recalcule les orages qu'une fois par minute simulée (`StormTimer`), mais la grille voxel est reconstruite à chaque état (~30 s), et l'advection repart de zéro.
+- [x] Les nuages sautent à chaque minute de l'horloge. Cause : la simulation ne recalcule les orages qu'une fois par minute simulée (`StormTimer`), mais la grille voxel est reconstruite à chaque état (~30 s) avec ces positions périmées. Corrigé : le snapshot porte `StormSimTime`, la grille avance chaque orage de vitesse × âge (test `Stale storm positions…`). Pas encore revu à l'écran.
+- [x] EF4-EF5 : un gros wedge (`Aeros::Funnel::WedgeMargin`, pied ≈ 1,5 rayon de cœur), les sous-tourbillons tournent à sa surface près du sol (avant : 5 cordes fines autour d'un voile presque vide). Testé hors moteur, pas encore vu à l'écran (les essais auto finissaient dans la pluie ou derrière une colline).
+- [ ] Tornade sous un orage à base haute (entonnoir suspendu), embruns de près.
 - [x] Bords « salés » sur les images fixes : le rendu maison trace en demi-résolution et lisse les silhouettes contre le ciel.
 - [ ] Vues du sol, les cumulus proches cachent les tours d'orage lointaines.
 - [x] Face sombre du côté opposé au soleil (rendu maison : ombre vers le soleil + ciel SH × couleur de la sky light).

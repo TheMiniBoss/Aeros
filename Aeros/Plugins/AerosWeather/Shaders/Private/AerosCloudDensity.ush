@@ -275,25 +275,28 @@ float AerosFunnelDensity(uint i, float3 PosKm, out float Dark)
 		float n = AerosTornadoStriation(i, Rel, H, max(Rf * 1.5, 0.04), 1.0);
 		float RfMod = Rf * (1.0 + 0.2 * (n - 0.5));
 		float Skin = clamp(Rf * 0.1, 0.005, 0.015);
-		// With sub-vortices the parent is only a faint veil of debris and mist around them
-		Dens = smoothstep(RfMod, RfMod - Skin, Dist) * lerp(1.0, 0.012, SubK);
+		// With sub-vortices the parent stays a dense wedge (it was a faint veil: an EF5 looked like five
+		// thin ropes circling instead of a wedge)
+		Dens = smoothstep(RfMod, RfMod - Skin, Dist) * lerp(1.0, 0.85, SubK);
 	}
-	// Multi-vortex: thin funnels orbiting inside at 0.7 rc, each with its own small core
+	// Multi-vortex: suction vortices orbiting at the wedge's surface, seen at its foot (they fade out
+	// above a quarter of the base height, inside the condensation)
+	const float SubLow = 1.0 - smoothstep(0.08, 0.25, H / max(Base, 0.05));
 	for (int k = 0; k < 6; ++k)
 	{
-		if (float(k) >= NumSub)
+		if (float(k) >= NumSub || SubLow <= 0.0)
 		{
 			break;
 		}
 		float A = TornadoE[i].w + 6.2831853 * float(k) / NumSub;
-		float2 SubC = float2(cos(A), sin(A)) * (0.7 * RcKm);
+		float2 SubC = float2(cos(A), sin(A)) * max(0.7 * RcKm, Rf * 1.02);
 		float SubRc = RcKm * 0.2;
 		float SubRf = min(AerosFunnelRadiusKm(0.6 * Vmax, SubRc, Base, K, H), AerosFunnelCapKm(SubRc));
 		if (SubRf > 0.0)
 		{
 			float SubDist = length(Rel - SubC) * CosTilt;
 			float SubSkin = clamp(SubRf * 0.15, 0.003, 0.01);
-			Dens = max(Dens, smoothstep(SubRf, SubRf - SubSkin, SubDist) * SubK);
+			Dens = max(Dens, smoothstep(SubRf, SubRf - SubSkin, SubDist) * SubK * SubLow);
 		}
 	}
 	Dark = 0.45 * Dens;

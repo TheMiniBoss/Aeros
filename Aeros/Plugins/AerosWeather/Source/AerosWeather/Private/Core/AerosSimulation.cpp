@@ -162,6 +162,7 @@ void FAerosSimulation::Initialize(const FAerosSimulationSettings& InSettings)
 	StepCount = 0;
 	ClockOffsetHours = 0.0;
 	StormTimer = 0.f;
+	StormTrackTime = 0.0;
 	GenesisTimer = 0.f;
 	Vortices.Reset();
 	Storms.Reset();
@@ -485,6 +486,7 @@ void FAerosSimulation::Step(float Dt)
 		DetectAndTrackStorms(StormTimer);
 		GenerateLightning(StormTimer);
 		StormTimer = 0.f;
+		StormTrackTime = SimTime + Dt;   // the cells already hold the end of this step (SimTime moves on below)
 	}
 
 	GenesisTimer += Dt;
@@ -2161,6 +2163,7 @@ void FAerosSimulation::FillSnapshot(FAerosSnapshot& Out) const
 	using namespace AerosSimInternal;
 	Out.Settings = Settings;
 	Out.SimTime = SimTime;
+	Out.StormSimTime = StormTrackTime;
 	Out.Generation = uint64(StepCount);
 	Out.NX = NX;
 	Out.NY = NY;

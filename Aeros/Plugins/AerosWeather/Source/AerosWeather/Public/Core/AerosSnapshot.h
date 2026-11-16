@@ -30,6 +30,7 @@ class AEROSWEATHER_API FAerosSnapshot
 public:
 	FAerosSimulationSettings Settings;   // grid + domain centre at publish time
 	double SimTime = 0.0;
+	double StormSimTime = 0.0;   // when Storms were last tracked (once a simulated minute): their positions are that old
 	uint64 Generation = 0;
 	int32 NX = 0, NY = 0;
 	float CellM = 2000.f;

@@ -242,6 +242,7 @@ private:
 	int64 StepCount = 0;
 	double ClockOffsetHours = 0.0;
 	float StormTimer = 0.f;
+	double StormTrackTime = 0.0;   // simulated time the tracked storms refer to
 	float GenesisTimer = 0.f;
 	float LastStepMs = 0.f;
 	float ConvectiveFraction = 0.f; // domain fraction with active convection (previous step)

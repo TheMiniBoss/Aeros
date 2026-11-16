@@ -195,6 +195,15 @@ namespace FunnelTests
 			T.TestTrue("Funnel_SpinUpHangsFromCloud", bSpinUp);
 			T.TestTrue("Funnel_RopeOutLiftsAtTheEnd", bLift);
 			T.TestTrue("Funnel_TouchdownKKeepsLargerK", TouchdownK(90.f, 300.f, 5.f) == 5.f);
+			{
+				// Violent tornadoes are wedges: wider than their core at the ground (a 1.3 margin made a cone)
+				FParams P; P.CoreRadiusM = 200.f; P.CloudBaseM = 1200.f; P.VmaxMs = FunnelVmaxMs(90.f, 0.4f);
+				P.K = TouchdownK(90.f, 1200.f, 2.f, WedgeMargin(90.f));
+				const float Wedge = RadiusAtM(P, 0.f);
+				P.K = TouchdownK(40.f, 1200.f, 2.f, WedgeMargin(40.f)); P.VmaxMs = FunnelVmaxMs(40.f, 0.4f);
+				const float Cone = RadiusAtM(P, 0.f);
+				T.TestTrue("Funnel_ViolentIsAWedge (ground radius >= 1.4 core for EF5, < 0.8 for EF1)", Wedge >= 1.4f * 200.f && Cone < 0.8f * 200.f);
+			}
 		}
 		{
 			FParams P; P.VmaxMs = 70.f; P.CoreRadiusM = 100.f; P.CloudBaseM = 1000.f; P.K = 1.5f;

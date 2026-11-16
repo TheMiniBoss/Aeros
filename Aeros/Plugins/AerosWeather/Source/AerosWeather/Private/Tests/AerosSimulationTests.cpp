@@ -288,6 +288,36 @@ bool FAerosCloudVolumeTest::RunTest(const FString& Parameters)
 		}
 		TestTrue(TEXT("Anvil top fades over >= 0.5 km (no terraces)"), Peak > 0.2f && Z10 > 0.f && Z90 > 0.f && Z10 - Z90 >= 0.5f);
 	}
+	// Storms are tracked once a simulated minute but the grid is rebuilt at every snapshot (~30 s): their
+	// positions are moved on by their velocity x the age of the tracking, or the clouds jumped ~1 km at
+	// each tracking (every minute of the clock)
+	{
+		FAerosSnapshot Fresh = Snap;
+		Fresh.Storms.Reset();
+		FAerosStormData Moving = St;
+		Moving.Velocity = FVector(20.0, 0.0, 0.0);   // m/s, world
+		Fresh.Storms.Add(Moving);
+		Fresh.StormSimTime = Fresh.SimTime;
+		FAerosSnapshot Stale = Fresh;
+		Stale.StormSimTime = Stale.SimTime - 60.0;   // positions one minute old: 1.2 km behind
+		TArray<uint8> FreshGrid, StaleGrid;
+		FAerosCloudVolume::Build(Fresh, Desc, FreshGrid);
+		FAerosCloudVolume::Build(Stale, Desc, StaleGrid);
+		auto CentroidKm = [&](const TArray<uint8>& G)
+		{
+			double Sum = 0.0, W = 0.0;
+			const float Mid = 0.5f * (LCLkm + ELkm);
+			for (float X = -12.f; X <= 12.f; X += 0.1f)
+			{
+				const float D = FAerosCloudVolume::SampleDensity(G, Desc, St.UpdraftLocation + FVector(X * 100000.0, 0.0, 0.0), Mid);
+				Sum += D * X;
+				W += D;
+			}
+			return W > 0.0 ? float(Sum / W) : 0.f;
+		};
+		const float Shift = CentroidKm(StaleGrid) - CentroidKm(FreshGrid);
+		TestTrue(TEXT("Stale storm positions are moved on by velocity x age (1.2 km +- 0.4)"), FMath::Abs(Shift - 1.2f) < 0.4f);
+	}
 	// Upwind checks on this storm alone: in an outbreak another storm upwind legitimately spreads its anvil there
 	FAerosSnapshot Single = Snap;
 	Single.Storms.Reset();

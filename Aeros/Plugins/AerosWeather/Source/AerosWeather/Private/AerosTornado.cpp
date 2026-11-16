@@ -387,7 +387,8 @@ FAerosCloudTornado AAerosTornado::MakeRenderDescriptor(float CloudBaseM, float K
 	D.TopKm = FVector2f(float(Top.X), float(Top.Y)) * 0.001f;
 	D.VmaxMs = Aeros::Funnel::FunnelVmaxMs(MaxWind, Age01);
 	D.CoreRadiusM = Rc;
-	D.K = Aeros::Funnel::TouchdownK(MaxWind, H, K);   // the mature funnel reaches the ground
+	// The mature funnel reaches the ground: a cone for weak tornadoes, a wedge for violent ones
+	D.K = Aeros::Funnel::TouchdownK(MaxWind, H, K, Aeros::Funnel::WedgeMargin(MaxWind));
 	D.RopeOut = Decay;
 	D.SpinPhase = RenderSpin;
 	// Violent tornadoes split into orbiting sub-vortices (2 seeds in 3)

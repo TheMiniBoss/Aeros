@@ -95,10 +95,17 @@ namespace Aeros
 		 *  cooled inflow out: with a fixed K of 2 an EF3 under a 1.5 km base hung 900 m above the ground,
 		 *  while most photographed tornadoes show a condensation funnel down to the debris cloud. It still
 		 *  hangs from the cloud while it spins up and lifts at the end of the rope-out. */
-		inline float TouchdownK(float MaxWindMs, float CloudBaseM, float KMin)
+		inline float TouchdownK(float MaxWindMs, float CloudBaseM, float KMin, float Margin = 1.3f)
 		{
 			const float V = FMath::Max(MaxWindMs, 1.f);
-			return FMath::Max(KMin, 1.3f * Gravity * FMath::Max(CloudBaseM, 0.f) / (V * V));
+			return FMath::Max(KMin, FMath::Max(Margin, 1.f) * Gravity * FMath::Max(CloudBaseM, 0.f) / (V * V));
+		}
+
+		/** Margin for TouchdownK: 1.3 (a cone, its foot ~0.55 core radii wide) up to 3.3 for violent
+		 *  tornadoes (~85 m/s and more): a wedge ~1.5 core radii wide at the ground. */
+		inline float WedgeMargin(float MaxWindMs)
+		{
+			return 1.3f + 2.f * SmoothStep01((MaxWindMs - 55.f) / 30.f);
 		}
 	}
 }

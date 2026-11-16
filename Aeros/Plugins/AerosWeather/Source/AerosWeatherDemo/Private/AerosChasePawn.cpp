@@ -488,7 +488,7 @@ FVector AAerosChasePawn::FindSafeStart(UAerosWeatherSubsystem* Sub, float Distan
 		{
 			const FVector P = Center + FVector(FMath::Cos(A), FMath::Sin(A), 0.0) * double(D) * 100000.0;
 			const double GZ = GroundZAt(P.X, P.Y);
-			if (GZ < SeaZ + 300.0 || GZ > SeaZ + 60000.0) continue;   // dry land, no mountains
+			if (GZ < SeaZ + 300.0 || GZ > SeaZ + 15000.0) continue;   // dry plains: hills hid the storm and its tornado
 			// Dry here and 5 km around: a supercell's rain reaches 20 km and more from its centre
 			bool bDry = true;
 			for (int32 R = 0; R < 5 && bDry; ++R)
