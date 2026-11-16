@@ -87,12 +87,19 @@ void UAerosCloudManager::Tick(float DeltaTime)
 	Timer += DeltaTime;
 	ShapeTimer += DeltaTime;
 
-	// Cloud noise drifts with the ~1.5-5 km wind (simulated time), so billows move with the weather
+	// Cloud noise drifts with the clouds it carves (simulated time): the storms' mean motion, which is
+	// the steering wind when there is no storm (FAerosCloudVolumeDesc::MotionCmS). With the wind alone
+	// the billows slid through the storms (moving at their own speed) in a x60 time-lapse.
 	if (FAerosSnapshotPtr Snap = Owner->GetSnapshot())
 	{
-		const FVector2D W = (Snap->Synoptic.Wind850 + Snap->Synoptic.Wind500) * 0.5f;      // m/s, sim frame
+		FVector MotionCmS = VolumeDescs[CurVolume].MotionCmS;
+		if (MotionCmS.IsNearlyZero())
+		{
+			const FVector2D W = (Snap->Synoptic.Wind850 + Snap->Synoptic.Wind500) * 0.5f;   // m/s, sim frame
+			MotionCmS = FVector(W.X, -W.Y, 0.0) * 100.0;                                        // Unreal: -Y = north
+		}
 		const float SimSeconds = Owner->IsPaused() ? 0.f : DeltaTime * FMath::Min(Owner->GetTimeScale(), MaxNoiseDriftTimeScale);
-		NoiseOffsetKm += FVector(W.X, -W.Y, 0.0) * 0.001 * SimSeconds;                      // Unreal: -Y = north
+		NoiseOffsetKm += FVector(MotionCmS.X, MotionCmS.Y, 0.0) * 1e-5 * SimSeconds;
 		NoiseOffsetKm.X = FMath::Fmod(NoiseOffsetKm.X, 10000.0);
 		NoiseOffsetKm.Y = FMath::Fmod(NoiseOffsetKm.Y, 10000.0);
 	}

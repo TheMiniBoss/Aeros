@@ -303,7 +303,10 @@ void AAerosLightningFlash::Fire(const FAerosLightningStrike& Strike, const FVect
 	}
 
 	EndTime = FMath::Max(StrokeTimes.Num() > 0 ? StrokeTimes.Last() + 0.25f : 0.3f, ContinuingCurrent > 0.f ? ContinuingUntil + 0.3f : 0.f);
-	Peak = CurrentKA * (Type == EAerosLightningType::IntraCloud ? 4.0e4f : 1.0e5f);
+	// Light on the ground and objects (the clouds have their own local glow in the renderer). At 1e5 cd
+	// per kA the whole landscape out to 20 km turned brighter than the lit clouds at night, a flat grey
+	// day; the clouds round the channel must stay the brightest thing.
+	Peak = CurrentKA * (Type == EAerosLightningType::IntraCloud ? 1.2e4f : 3.0e4f);
 	BaseIntensity = 25.f + 1.2f * CurrentKA;
 	LightPos = bChannel ? (Start + End) * 0.5 : Start;
 	SetActorLocation(LightPos);
