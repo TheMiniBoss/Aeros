@@ -285,7 +285,7 @@ public:
 private:
 	void UpdateViewer();
 	void UpdateClock(float DeltaTime);
-	void PullSnapshot();
+	void PullSnapshot(float DeltaTime);
 	void BroadcastEvents();
 	void MaybeFollowViewer();
 	void IssueCommand(uint8 Type, const FVector& Location, const FVector4& Params);
@@ -319,6 +319,9 @@ private:
 	FAerosSnapshotPtr Current;
 	FAerosSnapshotPtr Previous;
 	float SnapshotAlpha = 1.f;
+	// Recent published states (oldest first): the display runs on its own smooth clock between them
+	TArray<FAerosSnapshotPtr> History;
+	bool bDisplayWaiting = false;   // the display caught up with the newest state and holds (debug)
 
 	double TargetTime = 0.0;
 	double DisplayTime = 0.0;
@@ -331,6 +334,7 @@ public:
 		double DisplayTime = 0.0, FromTime = 0.0, ToTime = 0.0, SimTime = 0.0;   // simulated seconds
 		float TimeScale = 1.f, Alpha = 1.f;                                    // Alpha: display between From (0) and To (1)
 		int32 NumStorms = 0;
+		bool bWaiting = false;   // the display holds on the newest state: the simulation is late
 	};
 	FUpdateTimes GetUpdateTimes() const;
 private:

@@ -115,6 +115,8 @@ void UAerosWeatherSubsystem::StartSimulation(const FAerosSimulationSettings& Set
 	DisplayTime = 0.0;
 	Current = SimThread->GetLatestSnapshot();
 	Previous = Current;
+	History.Reset();
+	if (Current) History.Add(Current);
 	LastLightningSeq = 0;
 	PendingStrikes.Reset();
 	KnownStorms.Reset();
@@ -145,6 +147,7 @@ void UAerosWeatherSubsystem::StopSimulation()
 	SimThread.Reset(); // joins the worker
 	Current.Reset();
 	Previous.Reset();
+	History.Reset();
 }
 
 bool UAerosWeatherSubsystem::IsSimulationRunning() const
@@ -166,7 +169,7 @@ void UAerosWeatherSubsystem::Tick(float DeltaTime)
 	UpdateClock(DeltaTime);
 	SimThread->SetTargetTime(TargetTime);
 	SimThread->TickSynchronous(); // no-op when threaded
-	PullSnapshot();
+	PullSnapshot(DeltaTime);
 	MaybeFollowViewer();
 
 	UpdateTerrainSampling();
@@ -240,21 +243,47 @@ void UAerosWeatherSubsystem::UpdateClock(float DeltaTime)
 	TargetTime = FMath::Min(TargetTime, SimNow + FMath::Max<double>(ActiveSettings.MaxLagSeconds, SimThread->GetStepSeconds() * 2.0));
 }
 
-void UAerosWeatherSubsystem::PullSnapshot()
+void UAerosWeatherSubsystem::PullSnapshot(float DeltaTime)
 {
 	FAerosSnapshotPtr Latest = SimThread->GetLatestSnapshot();
-	if (Latest && (!Current || Latest.Get() != Current.Get()))
+	if (Latest && (History.Num() == 0 || Latest.Get() != History.Last().Get()))
 	{
-		Previous = Current ? Current : Latest;
-		Current = Latest;
+		// A state from the past (re-initialised simulation) starts the history over
+		if (History.Num() > 0 && Latest->SimTime <= History.Last()->SimTime) History.Reset();
+		History.Add(Latest);
+		while (History.Num() > 6) History.RemoveAt(0);
 	}
-	if (!Current) return;
+	if (History.Num() == 0) return;
 
-	// Display one step behind the target so we can blend between two published states
-	const double Lo = Previous ? Previous->SimTime : Current->SimTime;
-	const double Hi = Current->SimTime;
-	DisplayTime = FMath::Clamp(TargetTime - SimThread->GetStepSeconds(), Lo, Hi);
-	SnapshotAlpha = Hi > Lo ? float((DisplayTime - Lo) / (Hi - Lo)) : 1.f;
+	// The display runs on its own clock, two steps behind the target: the simulation only computes a step
+	// once the target has passed it, and one step behind (as before) the display caught up with the newest
+	// state while it was being computed, held, then jumped a whole step when it came (450 m at x60). It
+	// speeds up or slows down smoothly to keep its distance, and holds (never jumps) if the data is late.
+	const double Step = SimThread->GetStepSeconds();
+	const double Oldest = History[0]->SimTime, Newest = History.Last()->SimTime;
+	const double Desired = TargetTime - 2.0 * Step;
+	if (DisplayTime <= 0.0 || FMath::Abs(Desired - DisplayTime) > 20.0 * Step)
+	{
+		DisplayTime = Desired;   // start, or a big change (time-lapse switch, reset): no point gliding there
+	}
+	else if (!bPaused)
+	{
+		const double Rate = FMath::Clamp(1.0 + (Desired - DisplayTime) / (4.0 * Step), 0.25, 3.0);
+		DisplayTime += double(DeltaTime) * ActiveSettings.TimeScale * Rate;
+	}
+	bDisplayWaiting = DisplayTime > Newest;
+	DisplayTime = FMath::Clamp(DisplayTime, Oldest, Newest);
+
+	// The two states round the displayed time
+	int32 Hi = History.Num() - 1;
+	for (int32 K = 1; K < History.Num(); ++K)
+	{
+		if (History[K]->SimTime >= DisplayTime) { Hi = K; break; }
+	}
+	Current = History[Hi];
+	Previous = History[FMath::Max(Hi - 1, 0)];
+	const double Lo = Previous->SimTime, HiT = Current->SimTime;
+	SnapshotAlpha = HiT > Lo ? float(FMath::Clamp((DisplayTime - Lo) / (HiT - Lo), 0.0, 1.0)) : 1.f;
 }
 
 void UAerosWeatherSubsystem::MaybeFollowViewer()
@@ -754,6 +783,7 @@ UAerosWeatherSubsystem::FUpdateTimes UAerosWeatherSubsystem::GetUpdateTimes() co
 		T.NumStorms = Current->Storms.Num();
 	}
 	if (SimThread) T.SimTime = SimThread->GetSimTime();
+	T.bWaiting = bDisplayWaiting;
 	return T;
 }
 
