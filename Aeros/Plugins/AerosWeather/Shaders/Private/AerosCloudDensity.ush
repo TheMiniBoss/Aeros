@@ -49,11 +49,14 @@ struct FAerosCloudSample
 	float Dark;      // 0-1, rain greying
 	float Height;    // 0 at the cloud base, 1 at its top (ambient light)
 	float3 Tint;     // albedo tint (1 = cloud; earth or spray colour in a tornado's dust whirl)
+	float Puff;      // 0-1: how much of the density is billowed (cumulus, storm towers) rather than layered
 };
 
 float AerosCloudOctaves(float DistKm)
 {
-	return clamp(4.5 - log2(max(DistKm, 0.5)), 1.0, 4.0);
+	// Detail octaves: 4 within ~2 km, 3 at ~4 km, 2 at ~8 km (half an octave further than before: the
+	// clouds read as smooth clay without their smaller billows)
+	return clamp(5.0 - log2(max(DistKm, 0.5)), 1.0, 4.0);
 }
 
 float AerosCloudStepKm(float DistKm)
@@ -565,6 +568,7 @@ FAerosCloudSample AerosCloudDensity(float3 PosKm, float DistKm, float Octaves)
 	Out.Dark = 0.0;
 	Out.Height = 0.5;
 	Out.Tint = 1.0;
+	Out.Puff = 0.0;
 
 	const float AltKm = PosKm.z;
 	const float3 P = PosKm - NoiseOffsetKm;
@@ -609,12 +613,14 @@ FAerosCloudSample AerosCloudDensity(float3 PosKm, float DistKm, float Octaves)
 	const float N = saturate(0.5 + (ShapeNoise.SampleLevel(NoiseSampler, P / 6.0, ShapeMip).r - 0.5) * 1.6);
 	const float W = saturate(0.5 + (ShapeNoise.SampleLevel(NoiseSampler, P / 9.0 + float3(0.37, 0.11, 0.53), ShapeMip).r - 0.5) * 1.6);
 
-	// Bubbles: Worley 500 / 250 / 125 m (4 km tiles), each octave fading to its mean with distance.
-	const float3 B3 = ShapeNoise.SampleLevel(NoiseSampler, P / 4.0, Lod * 0.5).gba;
-	const float BubblesRaw = (AerosCloudOctave(B3.x, Octaves, 0.0) * 0.55
-		+ AerosCloudOctave(B3.y, Octaves, 1.0) * 0.30
+	// Bubbles: Worley 375 / 190 / 95 m (3 km tiles), each octave fading to its mean with distance: the
+	// size of a cumulus's billows (750 m ones made clay-like lumps). The sun's march reads 2 octaves, so
+	// the billows get their own shadows.
+	const float3 B3 = ShapeNoise.SampleLevel(NoiseSampler, P / 3.0, Lod * 0.5).gba;
+	const float BubblesRaw = (AerosCloudOctave(B3.x, Octaves, 0.0) * 0.5
+		+ AerosCloudOctave(B3.y, Octaves, 1.0) * 0.35
 		+ AerosCloudOctave(B3.z, Octaves, 2.0) * 0.15);
-	const float bubbles = saturate(0.5 + (BubblesRaw - 0.5) * 1.3);   // the weighted sum is narrower than one channel
+	const float bubbles = saturate(0.5 + (BubblesRaw - 0.5) * 1.9);   // the weighted sum is narrower than one channel
 
 	// Fine detail near the camera only: Worley 125 / 62 m (1 km tiles), fully on under ~1.4 km, gone by
 	// ~2.8 km (Octaves 4 -> 3). Mean-zero, and strongest on thin parts, so it sculpts the edges without
@@ -631,6 +637,12 @@ FAerosCloudSample AerosCloudDensity(float3 PosKm, float DistKm, float Octaves)
 	const float E = AerosCloudOctave(DetailNoise.SampleLevel(NoiseSampler, P / 4.0, 0).a, Octaves, 1.0);
 	const float fib = DetailNoise.SampleLevel(NoiseSampler, P * float3(1.0 / 16.0, 1.0 / 16.0, 1.0 / 3.0), 0).r;
 
+	// Detail erosion (Nubis): a Worley fbm of 300 / 150 / 75 m carving the soft skin of convective clouds,
+	// billows on top (the bumps survive), wisps at the base (the bumps are eaten). It sets the outline: the
+	// skin was smooth, and the clouds read as clay or cotton. Fades out by ~10 km (Octaves 1.5).
+	// Sampled only in a cloud's skin (0 < density < 1): not in clear air nor in a solid core.
+	const float DetailK = saturate(Octaves - 1.5);
+	float DetailFbm = -1.0;
 	const float lowFbm = N;
 	const float warpY  = W;
 	const float h       = saturate((AltKm - baseKm) / (topKm - baseKm));
@@ -675,16 +687,31 @@ FAerosCloudSample AerosCloudDensity(float3 PosKm, float DistKm, float Octaves)
 
 	// Nubis-style carving on a solid core; far away the field melts into a soft coverage.
 	const float baseCut = saturate((AltKm - baseKm) / 0.08);
-	float cv = saturate(shape * 1.6 + 0.35) * baseCut;
+	// The outline itself is billowed: the cell's round profile eaten by a Perlin-Worley noise (300-600 m
+	// bulges), then a wide band where the bubbles set the surface (a round, solid cell gave smooth domes)
+	const float PWOutline = shape > -0.6 ? ShapeNoise.SampleLevel(NoiseSampler, P / 2.5 + float3(0.43, 0.29, 0.71), Lod * 0.5).r : 0.5;
+	float cv = saturate((shape - (1.0 - PWOutline) * 0.35) * 1.4 + 0.35) * baseCut;
 	const float farK = smoothstep(30.0, 70.0, DistKm);
 	const float cvFar = saturate(cover * 1.4 - (1.0 - lowFbm) * 0.6) * baseCut * step(AltKm, baseKm + cuDepth);
 	cv = lerp(cv, cvFar, farK);
 	// Less of a solid core (it made cotton balls): the bubbles carve deeper, the core only keeps the
 	// middle of a cloud from flickering
-	float cloud = saturate((bubbles - (1.0 - cv) * 1.25 - highMod * 0.15) * 2.2 + cv * 0.4 - 0.1);
+	// Crisp billowed surface on the upper cloud (steep density ramp), soft ragged base
+	float cloud = saturate((bubbles - (1.0 - cv) * 1.25 - highMod * 0.3) * lerp(1.8, 3.0, saturate(h * 1.5)) + cv * 0.4 - 0.1);
 	cloud *= lerp(smoothstep(0.25, 0.45, cv), saturate(cv * 2.0), farK);
-	cloud = saturate(cloud + FineMod * 0.7 * saturate(1.5 - cloud * 1.5) * step(1e-3, cloud));
+	cloud = saturate(cloud + FineMod * 0.6 * saturate(1.5 - cloud * 1.5) * step(1e-3, cloud));
+	{
+		const float hb = saturate((AltKm - baseKm) / max(cuDepth, 0.25));
+		if (DetailK > 0.0 && cloud > 0.0 && cloud < 1.0)
+		{
+			const float3 D3 = DetailNoise.SampleLevel(NoiseSampler, P / 1.2, Lod * 0.5).gba;
+			DetailFbm = D3.x * 0.625 + D3.y * 0.25 + D3.z * 0.125;
+			const float Er = lerp(DetailFbm, 1.0 - DetailFbm, saturate(hb * 5.0)) * 0.45 * DetailK;
+			cloud = saturate((cloud - Er) / max(1.0 - Er, 0.1));
+		}
+	}
 	cloud *= cuK;
+	const float cumulusD = cloud;
 
 	// --- Low sheets: stratus (form 0, a uniform grey layer with a ragged base), stratocumulus (0.5, a layer
 	// broken into rolls / cells ~1.5 km wide with gaps), nimbostratus (form 0, deep, from the weather map top)
@@ -738,7 +765,17 @@ FAerosCloudSample AerosCloudDensity(float3 PosKm, float DistKm, float Octaves)
 		const float voxCv = saturate(voxRaw * 2.0);
 		float voxCu = saturate((bubbles - (1.0 - voxCv) * 1.2 - highMod * 0.1) * 2.0 + voxCv * 0.6 - 0.1);
 		voxCu *= smoothstep(0.15, 0.35, voxCv);
-		voxCu = saturate(voxCu + FineMod * 0.7 * saturate(1.5 - voxCu * 1.5) * step(1e-3, voxCu));
+		voxCu = saturate(voxCu + FineMod * 0.3 * saturate(1.5 - voxCu * 1.5) * step(1e-3, voxCu));
+		if (DetailK > 0.0 && voxCu > 0.0 && voxCu < 1.0)   // billowed storm towers too
+		{
+			if (DetailFbm < 0.0)
+			{
+				const float3 D3 = DetailNoise.SampleLevel(NoiseSampler, P / 1.2, Lod * 0.5).gba;
+				DetailFbm = D3.x * 0.625 + D3.y * 0.25 + D3.z * 0.125;
+			}
+			const float Er = (1.0 - DetailFbm) * 0.45 * DetailK;
+			voxCu = saturate((voxCu - Er) / max(1.0 - Er, 0.1));
+		}
 		const float voxIce = saturate((voxRaw - (1.0 - lowFbm) * 0.2 - (1.0 - fib) * 0.12) * 2.5);
 		vox = lerp(voxCu, voxIce, iceK);
 		if (NumStorms > 0u)
@@ -773,6 +810,7 @@ FAerosCloudSample AerosCloudDensity(float3 PosKm, float DistKm, float Octaves)
 	density = max(density, TornadoDens);
 
 	Out.Density = density;
+	Out.Puff = saturate(max(cumulusD, vox * VoxIn) / max(density, 1e-4));
 	Out.Dark = dark;
 	Out.Height = h;
 	return Out;

@@ -523,7 +523,12 @@ void AAerosDemoPawn::TickTour(float DeltaSeconds)
 	// -AerosTourTimeScale=N: force the time scale after the first step (which needs x600 to grow storms),
 	// e.g. 1 to judge cloud flicker at real speed
 	float ForcedScale = 0.f;
-	if (TourStep > 0 && FParse::Value(FCommandLine::Get(), TEXT("AerosTourTimeScale="), ForcedScale) && ForcedScale > 0.f)
+	// -AerosTourSettle=S: the last S seconds of the first step at that scale too (clouds grown at x600, then
+	// photographed still: at x600 the temporal filter smears them into grain)
+	float Settle = 0.f;
+	FParse::Value(FCommandLine::Get(), TEXT("AerosTourSettle="), Settle);
+	const bool bSettling = TourStep == 0 && Settle > 0.f && TourTime >= StepSeconds - Settle;
+	if ((TourStep > 0 || bSettling) && FParse::Value(FCommandLine::Get(), TEXT("AerosTourTimeScale="), ForcedScale) && ForcedScale > 0.f)
 	{
 		if (UAerosWeatherSubsystem* ScaleSub = UAerosWeatherSubsystem::Get(this)) ScaleSub->SetTimeScale(ForcedScale);
 	}
@@ -619,7 +624,9 @@ void AAerosDemoPawn::BuildTour()
 		Sub->SetScenario(static_cast<EAerosScenario>(FMath::Clamp(ScenarioIndex, 0, int32(EAerosScenario::Monsoon))));
 		float Hour = -1.f;
 		if (FParse::Value(FCommandLine::Get(), TEXT("AerosTourHour="), Hour)) Sub->SetDateTime(Sub->GetDateTime().DayOfYear, Hour);
-		Sub->SetTimeScale(600.f);
+		float Step1Scale = 600.f;   // -AerosTourScale1=N: judge the clouds at another speed (x600 smears them)
+		FParse::Value(FCommandLine::Get(), TEXT("AerosTourScale1="), Step1Scale);
+		Sub->SetTimeScale(Step1Scale);
 		float LookAltKm = 2.f;
 		FParse::Value(FCommandLine::Get(), TEXT("AerosTourLookAlt="), LookAltKm);
 		TeleportLookAt(FVector(0, 0, 40000.0), FVector(1000000.0, 0, LookAltKm * 100000.0));

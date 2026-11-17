@@ -45,7 +45,8 @@ Fait (premier jet, à juger à l'écran) :
 - [x] Rendu : nappes St / Sc / Ns, As (nappe grise épaisse), Ac (galets), Ci (fibres dans le vent), Cs (voile), Cc (grains).
 - [x] Le HUD de la démo technique nomme les nuages au-dessus (« Cumulus mediocris, Altocumulus, Cirrus »).
 - [ ] Juger à l'écran les Ci / Cs / Cc et l'As vus du sol (les essais n'ont montré que des cumulus, des Ac, et le gris d'un Ns ou d'un St vus de dedans), et de haut (aucun cadrage d'avion pour les couches).
-- [ ] Cumulus : moins de grain en surface, bords ensoleillés plus nets, ombres moins bleues.
+- [x] Cumulus plus réalistes : bourgeons de 95 à 375 m (ceux de 750 m faisaient de la pâte à modeler), contour lui-même bourgeonnant (Perlin-Worley), érosion de détail Nubis (bourgeons en haut, effilochures en bas), probabilité de diffusion (Schneider : creux et peau sombres, cœurs clairs), diffusion multiple plus forte et ombres à moitié grises. Coût : 6,5-7,1 ms sur un champ de cumulus (+1 ms). Le grain vu avant venait surtout du x600 de l'étape 1 (le filtre temporel ne suit pas) : juger à x1 (`-AerosTourSettle=5`).
+- [ ] Cumulus : encore un peu doux à 5-10 km ; les couches hautes, l'As et les orages n'ont pas été rejugés après ce réglage.
 - [ ] Le soleil ne voit pas encore les nouvelles couches dans la simulation (un As épais devrait couper le chauffage du sol et les cumulus).
 
 Pas encore fait :
@@ -57,6 +58,10 @@ Pas encore fait :
 - [ ] Optique : halo à 22° et parhélies dans les Cs, irisations (Ac, Cc, pileus).
 - [ ] Nuages nacrés (stratosphère, hiver polaire, < -78 °C) et noctulescents (mésosphère, été 50-70°, la nuit).
 - [ ] Nuage de condensation autour d'un avion transsonique.
+
+## Météo de grande échelle
+
+- [ ] Système d'anticyclones et de dépressions : centres de haute et basse pression qui naissent, se déplacent avec le courant d'altitude et meurent ; vent qui tourne autour (sens horaire autour d'un anticyclone dans l'hémisphère nord), air qui descend et s'assèche sous un anticyclone (ciel clair, brouillard ou stratus sous l'inversion l'hiver), air qui monte dans une dépression avec ses fronts (chaud : Cs -> As -> Ns ; froid : Cb, averses ; occlusion). Aujourd'hui le forçage de grande échelle est un scénario fixe (`FAerosSynopticState`), sans centres de pression qui bougent.
 
 ## Radar et interface
 

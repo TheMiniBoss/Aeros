@@ -227,7 +227,8 @@ void TraceCS(uint2 Id : SV_DispatchThreadID)
 				float Sigma = AerosCloudExtinction(Smp);
 				// In a funnel (dark anyway) 3 sun samples are enough
 				float od = bNearFunnel ? OpticalDepthGrowing(P, SunDir, t, min(Octaves, 2.0), 3) : LightOpticalDepth(P, SunDir, t, Octaves);
-				// Three scattering orders: contribution 0.25^n, optical depth 0.8^n, phase flattened 0.5^n.
+				// Three scattering orders: contribution 0.4^n, optical depth 0.5^n, phase flattened 0.5^n. Light
+				// scattered many times reaches deep into a cumulus: its shaded side is grey-white, not sky blue.
 				float S = 0.0;
 				float a = 1.0;
 				float b = 1.0;
@@ -235,17 +236,24 @@ void TraceCS(uint2 Id : SV_DispatchThreadID)
 				[unroll] for (int n = 0; n < 3; ++n)
 				{
 					S += a * CloudPhase(CosT, c) * exp(-od * b);
-					a *= 0.25;
-					b *= 0.8;
+					a *= 0.4;
+					b *= 0.5;
 					c *= 0.5;
 				}
-				// Powder: thin edges send less light toward the viewer than the core (the dark rims and creases
-				// that keep a cumulus from looking like cotton), most when looking away from the sun.
-				S *= lerp(lerp(0.5, 1.0, 1.0 - exp(-Sigma * 0.25)), 1.0, saturate(CosT * 0.5 + 0.5) * 0.7);
+				// In-scatter probability (Schneider, Nubis 2017): the thin skin and the creases between billows
+				// send less light toward the viewer than the dense cores, more so low in the cloud. This is what
+				// makes the cauliflower read; without it the shading stayed smooth (clay, cotton wool). Weaker
+				// looking into the sun (forward scattering lights the edges: silver lining).
+				const float Dp = saturate(Smp.Density);
+				const float DepthProb = 0.05 + pow(Dp, lerp(0.5, 2.0, saturate((Smp.Height - 0.3) / 0.55)));
+				const float VertProb = pow(lerp(0.1, 1.0, saturate((Smp.Height - 0.07) / 0.07)), 0.8);
+				S *= lerp(1.0, lerp(DepthProb * VertProb * 1.6, 1.0, saturate(CosT) * 0.6), Smp.Puff);
 				// Sky light, dimmer low in the cloud and under thick cloud.
 				float UpOd = OpticalDepthAlong(P, float3(0, 0, 1), t, 1.0, UpSeg, 1);
 				// Side faces still see the horizon sky: the column above only takes away up to 75 %.
 				float3 Amb = SkyAmb * lerp(0.3, 1.0, Smp.Height) * lerp(0.25, 1.0, exp(-UpOd * 0.05));
+				// Shaded faces also see other clouds and the ground, not only the blue sky: half grey
+				Amb = lerp(Amb, dot(Amb, float3(0.2126, 0.7152, 0.0722)), 0.5);
 				float3 Albedo = lerp(0.92, 0.55, Smp.Dark) * Smp.Tint;
 				float3 Lin = (SunE * S + Amb) * Albedo;
 				float Tr = exp(-Sigma * Step);

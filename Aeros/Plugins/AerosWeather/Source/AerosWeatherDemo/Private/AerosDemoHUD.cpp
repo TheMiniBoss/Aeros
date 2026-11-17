@@ -339,7 +339,7 @@ void AAerosDemoHUD::DrawSimple(UAerosWeatherSubsystem* Sub, const FAerosWeatherS
 
 	// ---- Here and now
 	const FString Explanation = Explain(Sub, S);
-	DrawPanel(X - 10, Y - 8, W + 20, 250.f + 15.f * FMath::Max(0, Explanation.Len() / 55 - 2));
+	DrawPanel(X - 10, Y - 8, W + 20, 282.f + 15.f * FMath::Max(0, Explanation.Len() / 55 - 2));
 	static const TCHAR* Months[] = { TEXT("janv."), TEXT("f\u00E9vr."), TEXT("mars"), TEXT("avril"), TEXT("mai"), TEXT("juin"), TEXT("juil."), TEXT("ao\u00FBt"), TEXT("sept."), TEXT("oct."), TEXT("nov."), TEXT("d\u00E9c.") };
 	const int32 HH = int32(T.Hour), MM = int32((T.Hour - HH) * 60.f);
 	Y = Line(X, Y, FString::Printf(TEXT("%02d:%02d  %d %s (%s)   temps x%.0f%s   %s"), HH, MM, T.DayOfMonth, Months[FMath::Clamp(T.Month - 1, 0, 11)],
@@ -363,6 +363,20 @@ void AAerosDemoHUD::DrawSimple(UAerosWeatherSubsystem* Sub, const FAerosWeatherS
 	{
 		const FString Above = AerosStormNames::CloudsAboveFr(S);
 		if (!Above.IsEmpty()) Y = Line(X, Y, Above, Dim);
+	}
+	{
+		// Where the camera is: altitude above sea level, and above the ground under it
+		const FVector Eye = Sub->GetViewerLocation();
+		const double SeaZ = Sub->GetSimulationSettings().SeaLevelZ;
+		const float AltKm = float((Eye.Z - SeaZ) * 1e-5);
+		FString Above = FString::Printf(TEXT("Altitude %.2f km"), AltKm);
+		FHitResult Hit;
+		FCollisionQueryParams Params(SCENE_QUERY_STAT(AerosHudGround), false);
+		if (GetWorld() && GetWorld()->LineTraceSingleByObjectType(Hit, Eye, Eye - FVector(0.0, 0.0, 2000000.0), FCollisionObjectQueryParams(ECC_WorldStatic), Params))
+		{
+			Above += FString::Printf(TEXT("   (%.2f km au-dessus du sol)"), float((Eye.Z - Hit.ImpactPoint.Z) * 1e-5));
+		}
+		Y = Line(X, Y, Above, Dim);
 	}
 	Y += 6.f;
 	Y = Line(X, Y, TEXT("CE QUI SE PASSE"), Accent);
