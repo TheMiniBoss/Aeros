@@ -29,6 +29,13 @@ float4 TornadoF[4];   // fade
 uint NumTornadoes;
 uint TornadoDebug;
 
+// Rotating storms (see FAerosCloudStorm): wall cloud and striated updraft, growing with the mesocyclone
+float4 StormA[4];     // updraft ground km xyz, cloud base km above the ground
+float4 StormB[4];     // top km above the ground, tower radius km, lean xy (km per km of height)
+float4 StormC[4];     // wall cloud centre xy (world km), wall radius km, rotation 0-1
+float4 StormD[4];     // spin phase, striation 0-1, fade
+uint NumStorms;
+
 Texture3D ShapeNoise;     // RGBA: Perlin-Worley, Worley 8 / 16 / 32 cells (tileable, 128^3)
 Texture3D DetailNoise;    // RGBA: Worley 4 / 8 / 16 cells, Worley fbm (tileable, 32^3)
 SamplerState NoiseSampler;
@@ -402,6 +409,91 @@ float AerosTornadoDensity(float3 PosKm, out float Dark, out float3 Tint)
 	return D;
 }
 
+// Wall cloud under a rotating storm: the base lowers under the updraft as the mesocyclone organises (a
+// bowl, lowest in its middle), with a ragged rim and spiral bands turning with the storm.
+float AerosStormWallDensity(float3 PosKm)
+{
+	float D = 0.0;
+	for (uint i = 0; i < NumStorms; ++i)
+	{
+		const float Rot = StormC[i].w * StormD[i].z;
+		if (Rot <= 0.01)
+		{
+			continue;
+		}
+		const float H = PosKm.z - StormA[i].z;
+		const float Base = StormA[i].w;
+		const float Depth = min(0.1 + 0.4 * Rot, 0.6 * Base);
+		if (H < Base - Depth - 0.1 || H > Base + 0.05)
+		{
+			continue;
+		}
+		const float2 Rel = PosKm.xy - StormC[i].xy;
+		const float Rw = StormC[i].z * (0.5 + 0.5 * Rot);
+		const float d = length(Rel);
+		if (d > 1.25 * Rw)
+		{
+			continue;
+		}
+		const float Ang = atan2(Rel.y, Rel.x) - StormD[i].x;
+		const float x = d / Rw;
+		const float Rim = 1.0 + 0.15 * sin(5.0 * Ang + 2.0 * x) + 0.08 * sin(11.0 * Ang);
+		const float xr = saturate(x / Rim);
+		if (xr >= 1.0)
+		{
+			continue;
+		}
+		const float LocalBottom = lerp(Base - Depth, Base, xr * xr);
+		const float Spiral = 0.5 + 0.5 * sin(3.0 * Ang + 7.0 * xr);
+		// A soft underside (~200 m) as the tornado's wall cloud: a thin skin under 80 m steps drew rings
+		const float W = smoothstep(LocalBottom - 0.06, LocalBottom + 0.16, H) * (1.0 - smoothstep(0.75, 1.0, xr));
+		D = max(D, W * (0.45 + 0.2 * Spiral) * saturate(Rot * 1.5));
+	}
+	return D;
+}
+
+// Striations of a rotating updraft: grooves wrapping the lower half of the tower (the "mothership" look
+// of a supercell, strongest on an LP), turning with the storm. A factor <= 1 on the voxel density; it fades
+// out beyond 15-30 km where ray steps (> 250 m) would alias the 450 m bands.
+float AerosStormStriation(float3 PosKm, float DistKm)
+{
+	float F = 1.0;
+	const float Far = 1.0 - smoothstep(15.0, 30.0, DistKm);
+	if (Far <= 0.0)
+	{
+		return F;
+	}
+	for (uint i = 0; i < NumStorms; ++i)
+	{
+		const float S = StormD[i].y * StormD[i].z;
+		if (S <= 0.01)
+		{
+			continue;
+		}
+		const float H = PosKm.z - StormA[i].z;
+		const float Base = StormA[i].w;
+		const float Hi = Base + 0.55 * max(StormB[i].x - Base, 1.0);
+		if (H < Base || H > Hi)
+		{
+			continue;
+		}
+		const float2 Axis = StormA[i].xy + StormB[i].zw * (H - Base);
+		const float2 Rel = PosKm.xy - Axis;
+		const float R = StormB[i].y;
+		const float d = length(Rel);
+		if (d > 1.4 * R)
+		{
+			continue;
+		}
+		const float Edge = smoothstep(0.45 * R, 0.85 * R, d) * (1.0 - smoothstep(1.15 * R, 1.4 * R, d));
+		const float Ang = atan2(Rel.y, Rel.x);
+		const float Band = 0.5 + 0.5 * sin(6.2831853 * (H - Base) / 0.45 + Ang + StormD[i].x);
+		const float Height = smoothstep(Base, Base + 0.4, H) * (1.0 - smoothstep(Hi - 1.0, Hi, H));
+		F *= 1.0 - 0.65 * S * Edge * Height * Far * Band * Band;
+	}
+	return F;
+}
+
 FAerosCloudSample AerosCloudDensity(float3 PosKm, float DistKm, float Octaves)
 {
 	FAerosCloudSample Out;
@@ -434,9 +526,10 @@ FAerosCloudSample AerosCloudDensity(float3 PosKm, float DistKm, float Octaves)
 	float TornadoDark = 0.0;
 	float3 TornadoTint = 1.0;
 	const float TornadoDens = NumTornadoes > 0u ? AerosTornadoDensity(PosKm, TornadoDark, TornadoTint) : 0.0;
+	const float StormWallDens = NumStorms > 0u ? AerosStormWallDensity(PosKm) : 0.0;
 
-	// Nothing here: no 2D cloud, no rain, no anvil, no shelf, outside the voxel grid and no tornado.
-	if (cover < 1e-3 && Wx.a < 1e-3 && anvilCv < 1e-3 && gust < 1e-3 && VoxIn < 1e-3 && TornadoDens <= 0.0)
+	// Nothing here: no 2D cloud, no rain, no anvil, no shelf, outside the voxel grid, no tornado, no wall cloud.
+	if (cover < 1e-3 && Wx.a < 1e-3 && anvilCv < 1e-3 && gust < 1e-3 && VoxIn < 1e-3 && TornadoDens <= 0.0 && StormWallDens <= 0.0)
 	{
 		return Out;
 	}
@@ -553,6 +646,10 @@ FAerosCloudSample AerosCloudDensity(float3 PosKm, float DistKm, float Octaves)
 		voxCu = saturate(voxCu + FineMod * 0.7 * saturate(1.5 - voxCu * 1.5) * step(1e-3, voxCu));
 		const float voxIce = saturate((voxRaw - (1.0 - lowFbm) * 0.2 - (1.0 - fib) * 0.12) * 2.5);
 		vox = lerp(voxCu, voxIce, iceK);
+		if (NumStorms > 0u)
+		{
+			vox *= AerosStormStriation(PosKm, DistKm);
+		}
 	}
 
 	// --- Rain below the cloud base: a thin grey veil.
@@ -567,6 +664,11 @@ FAerosCloudSample AerosCloudDensity(float3 PosKm, float DistKm, float Octaves)
 	float dark = lerp(rainDark, max(rainDark * 0.4, voxDark), VoxIn);
 	dark = lerp(dark, 1.0, saturate(rainVeil * 400.0 * (1.0 - saturate(density * 20.0))));
 	density = max(density, rainVeil);
+	if (StormWallDens > density)
+	{
+		dark = max(dark, 0.35);
+	}
+	density = max(density, StormWallDens);
 	if (TornadoDens > density)
 	{
 		dark = max(dark, TornadoDark);

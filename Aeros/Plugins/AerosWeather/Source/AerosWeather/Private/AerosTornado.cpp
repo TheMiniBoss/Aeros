@@ -92,6 +92,7 @@ void AAerosTornado::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLif
 	Super::GetLifetimeReplicatedProps(OutLifetimeProps);
 	DOREPLIFETIME(AAerosTornado, ParentStormId);
 	DOREPLIFETIME(AAerosTornado, EFRating);
+	DOREPLIFETIME(AAerosTornado, PeakEFRating);
 	DOREPLIFETIME(AAerosTornado, MaxWind);
 	DOREPLIFETIME(AAerosTornado, CoreRadius);
 	DOREPLIFETIME(AAerosTornado, Lifetime);
@@ -104,7 +105,8 @@ void AAerosTornado::ServerInitialize(int32 InStormId, float InMaxWind, float InC
 {
 	ParentStormId = InStormId;
 	MaxWind = InMaxWind;
-	EFRating = Aeros::Phys::EFScale(InMaxWind);
+	PeakEFRating = Aeros::Phys::EFScale(InMaxWind);
+	EFRating = 0;   // every tornado starts weak (EF0) and climbs to its peak
 	CoreRadius = InCoreRadiusM;
 	Lifetime = InLifetime;
 	TrackVelocity = InVelocity;
@@ -147,7 +149,7 @@ void AAerosTornado::BeginPlay()
 		// Deformable funnel (replaces the rigid cone when its material exists)
 		int32 ForcedShape = ShapeOverride;
 		FParse::Value(FCommandLine::Get(), TEXT("AerosTornadoShape="), ForcedShape);
-		Shape = ForcedShape >= 0 && ForcedShape <= int32(EAerosTornadoShape::Multivortex) ? static_cast<EAerosTornadoShape>(ForcedShape) : PickShape(EFRating, Seed);
+		Shape = ForcedShape >= 0 && ForcedShape <= int32(EAerosTornadoShape::Multivortex) ? static_cast<EAerosTornadoShape>(ForcedShape) : PickShape(PeakEFRating, Seed);
 		NumSubVortices = Shape == EAerosTornadoShape::Multivortex ? 3 + int32(uint32(Seed) % 3u) : 0;
 		if (UMaterialInterface* TubeMat = Aeros::LoadOptional(TSoftObjectPtr<UMaterialInterface>(FSoftObjectPath(TEXT("/AerosWeather/Materials/M_AerosTornadoFunnel.M_AerosTornadoFunnel")))))
 		{
@@ -201,8 +203,20 @@ void AAerosTornado::EndPlay(const EEndPlayReason::Type Reason)
 
 float AAerosTornado::GetStrength() const
 {
-	// Same law as the funnel model the cloud renderer draws (Core/AerosFunnel.h)
-	return Aeros::Funnel::LifeStrength(Lifetime > 0.f ? Age / Lifetime : 1.f);
+	// Same law as the funnel model the cloud renderer draws (Core/AerosFunnel.h): the wind now over the peak
+	return MaxWind > 0.f ? GetCurrentWind() / MaxWind : 0.f;
+}
+
+int32 AAerosTornado::GetEFTrend() const
+{
+	const float Age01 = Lifetime > 0.f ? Age / Lifetime : 1.f;
+	if (Age01 < Aeros::Funnel::RiseEnd(MaxWind)) return 1;
+	return Age01 < Aeros::Funnel::MatureEnd ? 0 : -1;
+}
+
+float AAerosTornado::GetCurrentWind() const
+{
+	return Aeros::Funnel::LifeWindMs(MaxWind, Lifetime > 0.f ? Age / Lifetime : 1.f);
 }
 
 FVector AAerosTornado::GetWindAt(const FVector& WorldLocation) const
@@ -256,7 +270,7 @@ void AAerosTornado::Tick(float DeltaSeconds)
 		// otherwise tornadoes pile up at high time scales.
 		const UAerosWeatherSubsystem* Sub = UAerosWeatherSubsystem::Get(this);
 		const float TimeFactor = Sub ? FMath::Max(1.f, Sub->GetTimeScale() / 60.f) : 1.f;
-		Age += DeltaSeconds * TimeFactor;
+		Age += DeltaSeconds * TimeFactor * (bHasAnchor || ParentStormId < 0 ? 1.f : 3.f);   // an orphan dies quicker
 
 		// A tornado cannot outlive its parent storm (or drift away from it)
 		ParentCheckTimer += DeltaSeconds;
@@ -281,15 +295,21 @@ void AAerosTornado::Tick(float DeltaSeconds)
 				{
 					const FAerosStormData& S = *Parent;
 					ParentStormId = S.Id;
-					bParentNear = FVector::Dist2D(S.UpdraftLocation, GetActorLocation()) < 2000000.0;
+					// A dead storm (its anvil alone) holds no tornado: it ropes out
+					bParentNear = S.IsActive() && FVector::Dist2D(S.UpdraftLocation, GetActorLocation()) < 2000000.0;
 					// Same place as at birth (UAerosStormManager::SpawnTornado), moving with the storm
-					Anchor = AnchorFor(S, TrackVelocity);
+					Anchor = AnchorFor(S, TrackVelocity, Sub->GetSimulationSettings().LatitudeDeg < 0.f ? -1.f : 1.f);
 					AnchorVelocity = FVector(S.Velocity.X, S.Velocity.Y, 0.0) * 100.0 * (Sub->IsPaused() ? 0.f : Sub->GetTimeScale());
 					if (S.Velocity.Size2D() > 1.0) TrackVelocity = S.Velocity;
 					bHasAnchor = true;
 				}
 			}
-			if (!bParentNear) { Age = FMath::Max(Age, Lifetime * 0.8f); bHasAnchor = false; } // rope out over the last 20 %
+			if (!bParentNear && bHasAnchor && Lifetime > 0.f)
+			{
+				// Lost its storm: weakens from where it is (jumping to 80 % of the life made a rising EF0 an EF2)
+				Age = Lifetime * Aeros::Funnel::DecayAgeForWind(MaxWind, GetCurrentWind(), Age / Lifetime);
+			}
+			if (!bParentNear) bHasAnchor = false;
 		}
 		const FVector Here = GetActorLocation();
 		const FVector Dir = TrackVelocity.Size2D() > 0.1 ? TrackVelocity.GetSafeNormal2D() : FVector(1, 0, 0);
@@ -323,6 +343,14 @@ void AAerosTornado::Tick(float DeltaSeconds)
 			Destroy();
 			return;
 		}
+		// EF now: up one category after the other, then down
+		const float WindNow = GetCurrentWind();
+		const int32 NewEF = Aeros::Phys::EFScale(WindNow);
+		if (NewEF != EFRating)
+		{
+			UE_LOG(LogTemp, Log, TEXT("Aeros: tornado %s EF%d -> EF%d (%.0f m/s, peak EF%d)"), *GetName(), EFRating, NewEF, WindNow, PeakEFRating);
+			EFRating = NewEF;
+		}
 	}
 
 	const float Strength = GetStrength();
@@ -355,7 +383,7 @@ void AAerosTornado::Tick(float DeltaSeconds)
 	}
 	{
 		const float Age01 = Lifetime > 0.f ? FMath::Clamp(Age / Lifetime, 0.f, 1.f) : 1.f;
-		const float Rc = FMath::Max(Aeros::Funnel::CoreRadiusAt(CoreRadius, Age01), 10.f);
+		const float Rc = FMath::Max(Aeros::Funnel::LifeCoreRadiusM(CoreRadius, MaxWind, Age01), 10.f);
 		const float Vmax = MaxWind * Strength;
 		// Visual spin in real seconds, capped (fast vortices would strobe)
 		RenderSpin = FMath::Fmod(RenderSpin + SpinSign * FMath::Min(Vmax / Rc, 6.f) * DeltaSeconds, 2.f * PI);
@@ -368,7 +396,7 @@ FAerosCloudTornado AAerosTornado::MakeRenderDescriptor(float CloudBaseM, float K
 {
 	const float Age01 = Lifetime > 0.f ? FMath::Clamp(Age / Lifetime, 0.f, 1.f) : 1.f;
 	const float Decay = Aeros::Funnel::RopeOut(Age01);
-	const float Rc = Aeros::Funnel::CoreRadiusAt(CoreRadius, Age01);
+	const float Rc = Aeros::Funnel::LifeCoreRadiusM(CoreRadius, MaxWind, Age01);
 	const float H = FMath::Max(CloudBaseM, 100.f);
 
 	// Axis (same intent as the mesh funnel): the top follows the mesocyclone ahead along the storm motion,
@@ -399,8 +427,8 @@ FAerosCloudTornado AAerosTornado::MakeRenderDescriptor(float CloudBaseM, float K
 	D.TopKm = FVector2f(float(Top.X), float(Top.Y)) * 0.001f;
 	D.VmaxMs = Aeros::Funnel::FunnelVmaxMs(MaxWind, Age01);
 	D.CoreRadiusM = Rc;
-	// The mature funnel reaches the ground: a cone for weak tornadoes, a wedge for violent ones
-	D.K = Aeros::Funnel::TouchdownK(MaxWind, H, K, Aeros::Funnel::WedgeMargin(MaxWind));
+	// The funnel of the wind now reaches the ground: a cone while weak, a wedge once violent
+	D.K = Aeros::Funnel::FunnelK(MaxWind, Age01, H, K);
 	D.RopeOut = Decay;
 	D.SpinPhase = RenderSpin;
 	// Violent tornadoes split into orbiting sub-vortices (2 seeds in 3)

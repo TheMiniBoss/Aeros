@@ -179,31 +179,93 @@ namespace FunnelTests
 			T.TestTrue("Funnel_RadiusMonotonic (Vmax up, core up, base down -> wider)", bV && bRc && bBase);
 		}
 		{
-			// A mature tornado's funnel reaches the ground (EF1 under a 1.5 km base too), it hangs from the
-			// cloud while it spins up, and lifts again at the very end of the rope-out
+			// The funnel of the tornado as it lives (FunnelVmaxMs, FunnelK, LifeCoreRadiusM): it hangs from the cloud at
+			// birth, reaches the ground at every stage of its life (weak or violent, low or high base), and lifts
+			// again at the very end of the rope-out
 			bool bTouch = true, bSpinUp = true, bLift = true;
-			const float Winds[] = { 30.f, 55.f, 90.f };
+			const float Winds[] = { 30.f, 55.f, 95.f };
 			const float Bases[] = { 300.f, 1500.f, 3000.f };
+			auto Funnel = [](float W, float Base, float Age01)
+			{
+				FParams P; P.CoreRadiusM = LifeCoreRadiusM(100.f, W, Age01); P.CloudBaseM = Base;
+				P.K = FunnelK(W, Age01, Base, 2.f); P.VmaxMs = FunnelVmaxMs(W, Age01);
+				return P;
+			};
 			for (float W : Winds) for (float Base : Bases)
 			{
-				FParams P; P.CoreRadiusM = 100.f; P.CloudBaseM = Base; P.K = TouchdownK(W, Base, 2.f);
-				P.VmaxMs = FunnelVmaxMs(W, 0.4f);  bTouch &= TipHeightM(P) == 0.f && RadiusAtM(P, 0.f) > 30.f;
-				P.VmaxMs = FunnelVmaxMs(W, 0.03f); bSpinUp &= TipHeightM(P) > 0.f;
-				P.VmaxMs = FunnelVmaxMs(W, 0.995f); bLift &= TipHeightM(P) > 0.f;
+				for (float Age : { 0.12f, 0.3f, 0.5f, 0.7f, 0.9f })
+				{
+					const FParams P = Funnel(W, Base, Age);
+					bTouch &= TipHeightM(P) == 0.f && RadiusAtM(P, 0.f) > 0.2f * P.CoreRadiusM;
+				}
+				bSpinUp &= TipHeightM(Funnel(W, Base, 0.02f)) > 0.f;
+				bLift &= TipHeightM(Funnel(W, Base, 0.995f)) > 0.f;
 			}
-			T.TestTrue("Funnel_MatureTouchesGround", bTouch);
+			T.TestTrue("Funnel_TouchesGroundAllItsLife", bTouch);
 			T.TestTrue("Funnel_SpinUpHangsFromCloud", bSpinUp);
 			T.TestTrue("Funnel_RopeOutLiftsAtTheEnd", bLift);
 			T.TestTrue("Funnel_TouchdownKKeepsLargerK", TouchdownK(90.f, 300.f, 5.f) == 5.f);
 			{
-				// Violent tornadoes are wedges: wider than their core at the ground (a 1.3 margin made a cone)
-				FParams P; P.CoreRadiusM = 200.f; P.CloudBaseM = 1200.f; P.VmaxMs = FunnelVmaxMs(90.f, 0.4f);
-				P.K = TouchdownK(90.f, 1200.f, 2.f, WedgeMargin(90.f));
-				const float Wedge = RadiusAtM(P, 0.f);
-				P.K = TouchdownK(40.f, 1200.f, 2.f, WedgeMargin(40.f)); P.VmaxMs = FunnelVmaxMs(40.f, 0.4f);
-				const float Cone = RadiusAtM(P, 0.f);
-				T.TestTrue("Funnel_ViolentIsAWedge (ground radius >= 1.4 core for EF5, < 0.8 for EF1)", Wedge >= 1.4f * 200.f && Cone < 0.8f * 200.f);
+				// A violent tornado is a wedge at its peak, but a cone while it is still EF0-EF1
+				const FParams Peak = Funnel(95.f, 1200.f, 0.5f), Young = Funnel(95.f, 1200.f, 0.13f);
+				const FParams Weak = Funnel(40.f, 1200.f, 0.5f);
+				T.TestTrue("Funnel_ViolentIsAWedge (ground radius >= 1.4 core at the EF5 peak, < 0.8 for an EF1)",
+					RadiusAtM(Peak, 0.f) >= 1.4f * Peak.CoreRadiusM && RadiusAtM(Weak, 0.f) < 0.8f * Weak.CoreRadiusM);
+				T.TestTrue("Funnel_GrowsIntoAWedge (EF5 to be: narrower and a cone at its EF0 start)",
+					RadiusAtM(Young, 0.f) < 0.8f * Young.CoreRadiusM && RadiusAtM(Young, 0.f) < 0.5f * RadiusAtM(Peak, 0.f));
 			}
+			{
+				// Descends slowly: the tip is lower at 6 % of the life than at 3 %, still above the ground at 3 %
+				const float Tip3 = TipHeightM(Funnel(55.f, 1000.f, 0.03f)), Tip6 = TipHeightM(Funnel(55.f, 1000.f, 0.06f));
+				T.TestTrue("Funnel_DescendsAtBirth", Tip3 > 0.f && Tip6 < Tip3 && TipHeightM(Funnel(55.f, 1000.f, 0.1f)) == 0.f);
+			}
+		}
+		{
+			// EF goes up one category after the other, holds, then comes back down the same way
+			auto EF = [](float W) { return Aeros::Phys::EFScale(W); };
+			const float Peak = 95.f;
+			int Prev = 0, MaxEF = 0, Steps = 0;
+			bool bOneStep = true, bUpThenDown = true, bDown = false;
+			float Spent[6] = {};
+			for (int K = 0; K <= 1000; ++K)
+			{
+				const float Age = K / 1000.f;
+				const float W = LifeWindMs(Peak, Age);
+				const int E = W >= 29.f ? EF(W) : -1;
+				if (K > 0 && E >= 0 && Prev >= 0)
+				{
+					bOneStep &= std::abs(E - Prev) <= 1;
+					if (E < Prev) bDown = true;
+					if (bDown && E > Prev) bUpThenDown = false;
+					if (E != Prev) ++Steps;
+				}
+				if (E >= 0 && Age < 0.5f) Spent[E] += 0.001f;
+				MaxEF = std::max(MaxEF, E);
+				Prev = E;
+			}
+			T.TestTrue("Tornado_EFOneCategoryAtATime", bOneStep);
+			T.TestTrue("Tornado_EFUpThenDown (EF0 -> EF5 -> EF0: 10 changes)", bUpThenDown && MaxEF == 5 && Steps == 10);
+			bool bLasts = true;
+			for (int E = 0; E < 5; ++E) bLasts &= Spent[E] >= 0.04f;
+			T.TestTrue("Tornado_EachCategoryLasts (>= 4 % of the life on the way up)", bLasts);
+			T.TestTrue("Tornado_StartsAndEndsWeak (EF0 at 12 % and 90 %, peak at 50 %)",
+				EF(LifeWindMs(Peak, 0.12f)) == 0 && EF(LifeWindMs(Peak, 0.9f)) == 0 && Near(LifeWindMs(Peak, 0.5f), Peak, 1e-3f));
+			T.TestTrue("Tornado_WeakOneStaysWeak (35 m/s never above EF0)", EF(LifeWindMs(35.f, 0.5f)) == 0 && LifeWindMs(35.f, 0.5f) <= 35.f);
+			T.TestTrue("Tornado_NoWindAtBirthAndDeath", LifeWindMs(Peak, 0.f) == 0.f && LifeWindMs(Peak, 1.f) < 1e-3f);
+			{
+				// A tornado that loses its storm weakens from where it is: it never jumps to a stronger stage
+				bool bNoJump = true;
+				for (int K = 0; K <= 100; ++K)
+				{
+					const float Age = K / 100.f;
+					const float Now = LifeWindMs(Peak, Age);
+					const float Then = DecayAgeForWind(Peak, Now, Age);
+					bNoJump &= Then >= Age && Then >= MatureEnd && LifeWindMs(Peak, Then) <= Now + 0.5f;
+				}
+				T.TestTrue("Tornado_OrphanWeakensFromWhereItIs", bNoJump && Near(DecayAgeForWind(Peak, 60.f, 0.3f), MatureEnd + (Peak - 60.f) / (Peak - 32.f) * (DecayEnd - MatureEnd), 1e-3f));
+			}
+			T.TestTrue("EF scale (real thresholds: 35 EF0, 45 EF1, 55 EF2, 70 EF3, 85 EF4, 95 EF5)",
+				EF(35.f) == 0 && EF(45.f) == 1 && EF(55.f) == 2 && EF(70.f) == 3 && EF(85.f) == 4 && EF(95.f) == 5);
 		}
 		{
 			FParams P; P.VmaxMs = 70.f; P.CoreRadiusM = 100.f; P.CloudBaseM = 1000.f; P.K = 1.5f;
@@ -231,19 +293,7 @@ namespace FunnelTests
 			}
 			T.TestTrue("Funnel_DegenerateInputs (finite, non-negative)", bOk);
 		}
-		{
-			const bool bLife = Near(LifeStrength(0.f), 0.f, 1e-4f) && Near(LifeStrength(0.06f), 0.5f, 1e-3f) && Near(LifeStrength(0.5f), 1.f, 1e-4f)
-				&& Near(LifeStrength(0.875f), 0.5f, 1e-3f) && Near(LifeStrength(1.f), 0.f, 1e-4f);
-			T.TestTrue("Funnel_LifeMatchesTornado (0, 0.5, 1, 0.5, 0)", bLife);
-		}
-		{
-			// The funnel's wind follows the circulation: as the core shrinks in the rope-out the wind in it
-			// speeds up, so the rope still reaches the ground late in the life, then lifts at the very end.
-			auto Tip = [](float Age01) { FParams P; P.VmaxMs = FunnelVmaxMs(70.f, Age01); P.CoreRadiusM = CoreRadiusAt(100.f, Age01); P.CloudBaseM = 800.f; P.K = 2.f; return TipHeightM(P); };
-			T.TestTrue("Funnel_RopeTouchesLate (age 0.92 on the ground, 0.985 lifted)", Tip(0.92f) == 0.f && Tip(0.985f) > 200.f);
-			T.TestTrue("Funnel_DescendsAtBirth (tip lower at 0.08 than at 0.03, on the ground at 0.5)", Tip(0.08f) < Tip(0.03f) && Tip(0.03f) > 0.f && Tip(0.5f) == 0.f);
-			T.TestTrue("Funnel_VmaxNeverAboveTwiceMax", FunnelVmaxMs(70.f, 0.99f) <= 140.f && FunnelVmaxMs(70.f, 0.5f) <= 70.f + 1e-3f);
-		}
+		T.TestTrue("Funnel_VmaxNeverAboveTwiceTheWind", FunnelVmaxMs(70.f, 0.99f) <= 140.f && FunnelVmaxMs(70.f, 0.5f) <= 70.f + 1e-3f);
 		{
 			T.TestTrue("Funnel wind peaks at the core", Near(TangentialWindMs(60.f, 100.f, 100.f), 60.f, 1e-3f) && TangentialWindMs(60.f, 50.f, 100.f) < 60.f && TangentialWindMs(60.f, 200.f, 100.f) < 60.f);
 			T.TestTrue("Funnel pressure deficit 1.1 x V^2 at the centre", Near(PressureDeficitPa(100.f, 0.f, 100.f), 11000.f, 1.f));
@@ -302,6 +352,7 @@ int main()
 	{ FAerosSupercellTest T; std::printf("Supercell\n"); T.RunTest(""); Fails += T.Fails; }
 	{ FAerosSingleStormTest T; std::printf("Single storm\n"); T.RunTest(""); Fails += T.Fails; }
 	{ FAerosStormTrackTest T; std::printf("Storm track\n"); T.RunTest(""); Fails += T.Fails; }
+	{ FAerosStormLifeTest T; std::printf("Storm life\n"); T.RunTest(""); Fails += T.Fails; }
 	{ FAerosHazardTest T;    std::printf("Disasters\n"); T.RunTest(""); Fails += T.Fails; }
 	{ FAerosCloudVolumeTest T; std::printf("Cloud voxels\n"); T.RunTest(""); Fails += T.Fails; }
 	{ std::printf("Cloud noise\n"); Fails += CloudNoiseTests::Run(); }

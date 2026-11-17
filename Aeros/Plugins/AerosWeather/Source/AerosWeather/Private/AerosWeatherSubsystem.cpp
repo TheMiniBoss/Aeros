@@ -783,20 +783,23 @@ UAerosWeatherSubsystem::FUpdateTimes UAerosWeatherSubsystem::GetUpdateTimes() co
 	{
 		T.FromTime = Previous ? Previous->SimTime : Current->SimTime;
 		T.ToTime = Current->SimTime;
-		T.NumStorms = Current->Storms.Num();
+		T.NumStorms = 0;
+		for (const FAerosStormData& S : Current->Storms) T.NumStorms += S.IsActive() ? 1 : 0;
 	}
 	if (SimThread) T.SimTime = SimThread->GetSimTime();
 	T.bWaiting = bDisplayWaiting;
 	return T;
 }
 
-TArray<FAerosStormData> UAerosWeatherSubsystem::GetStorms() const
+TArray<FAerosStormData> UAerosWeatherSubsystem::GetStorms(bool bIncludeDead) const
 {
 	// The display runs one step behind the simulation, between two published states (t and t+1), and
 	// every state has its own storm tracking: each storm glides from where it is at t to where it is at
 	// t+1, then on to t+2 (they jumped when they were tracked once a simulated minute and extrapolated)
 	if (!Current) return TArray<FAerosStormData>();
-	return FAerosSnapshot::InterpolateStorms(Previous ? *Previous : *Current, *Current, SnapshotAlpha);
+	TArray<FAerosStormData> Storms = FAerosSnapshot::InterpolateStorms(Previous ? *Previous : *Current, *Current, SnapshotAlpha);
+	if (!bIncludeDead) Storms.RemoveAll([](const FAerosStormData& S) { return !S.IsActive(); });
+	return Storms;
 }
 
 TArray<FAerosCycloneData> UAerosWeatherSubsystem::GetCyclones() const

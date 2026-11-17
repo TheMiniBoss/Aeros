@@ -712,7 +712,7 @@ void AAerosDemoPawn::BuildTour()
 			// mature tornado unless -AerosTornadoAge asks for another stage
 			if (!FParse::Param(FCommandLine::Get(), TEXT("AerosTornadoAge")) && !FString(FCommandLine::Get()).Contains(TEXT("AerosTornadoAge=")))
 			{
-				T->Age = T->Lifetime * 0.3f;
+				T->Age = T->Lifetime * 0.5f;   // at its peak (Aeros::Funnel::LifeWindMs)
 			}
 			const FVector At = T->GetActorLocation();
 			// Gallery framing: -AerosTornadoCam=DistKm,AltM,LookAltM (camera that far from the tornado, on the

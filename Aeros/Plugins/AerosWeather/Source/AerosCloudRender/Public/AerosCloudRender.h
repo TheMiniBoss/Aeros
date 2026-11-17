@@ -15,6 +15,23 @@ struct FAerosCloudFlash
 	float Intensity = 0.f;                     // 0-1, as reported by the lightning actors
 };
 
+/** One rotating storm drawn by the renderer: its wall cloud (a lowered base turning under the updraft) and the
+ *  striations of its rotating updraft, both growing with the mesocyclone (the voxel grid has the rest). */
+struct FAerosCloudStorm
+{
+	FVector3f UpdraftKm = FVector3f::ZeroVector;  // world km, Unreal axes, z = ground height (as the voxel grid)
+	float BaseKm = 1.f;                           // cloud base above the ground
+	float TopKm = 10.f;                           // top above the ground
+	float TowerRadiusKm = 3.f;
+	FVector2f LeanKm = FVector2f::ZeroVector;     // tower lean per km of height (xy)
+	FVector2f WallKm = FVector2f::ZeroVector;     // wall cloud centre, world km xy
+	float WallRadiusKm = 2.f;
+	float Rotation = 0.f;                         // 0-1, organisation of the mesocyclone
+	float SpinPhase = 0.f;                        // radians, wrapped (sign = rotation sense)
+	float Striation = 0.f;                        // 0-1: LP strongly striated, HP hardly (hidden in rain)
+	float Fade = 1.f;                             // 0-1, fades in / out of the rendered set
+};
+
 /** One tornado drawn inside the clouds (condensation funnel, wall cloud, dust whirl), see Core/AerosFunnel.h. */
 struct FAerosCloudTornado
 {
@@ -55,6 +72,7 @@ struct FAerosCloudRenderParams
 	// Cloud shadow map (R16F transmittance towards the sun, UAV): rendered every 4th frame and when
 	// the rect moves; the sun's light function M_AerosCloudShadow reads it over the same rect.
 	TArray<FAerosCloudTornado, TInlineAllocator<4>> Tornadoes;   // at most 4, nearest to the viewer
+	TArray<FAerosCloudStorm, TInlineAllocator<4>> Storms;        // rotating storms, at most 4, nearest to the viewer
 	FTextureRenderTargetResource* ShadowTarget = nullptr;
 	FVector4f ShadowRectCm = FVector4f(0.f, 0.f, 10000000.f, 10000000.f);   // xy centre, zw size (cm)
 };

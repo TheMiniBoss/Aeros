@@ -47,6 +47,8 @@ Aeros/Plugins/AerosWeather/
 
 9. **Démo jouable « Chasseur d'orages »** (branche `claude/storm-chaser`, partie de `claude/volumetric-tornadoes`) : `AAerosChasePawn` (véhicule, états menu / briefing / conduite / détruit / pause / résumé), `AAerosChaseHUD`, règles pures `AerosChaseRules.h` (13 tests hors moteur). **Play ouvre maintenant le menu** ; la démo technique (`AAerosDemoPawn` + `AAerosDemoHUD`) s'ouvre par le menu, `-AerosTech` ou toute option `-AerosTour…` (la visite marche comme avant). Test auto : `-AerosChaseAuto -AerosChaseShots=10 -AerosChaseEndAfter=120 -AerosChaseQuitAfter=200`, captures dans `Saved/Screenshots/WindowsEditor/AerosChase/`. Pas encore vu : partie jouée à la main (souris, zoom, T, pause, Retour arrière vers la démo technique et retour), réglage des points sur une vraie partie.
 
+10. **Orages et tornades qui vivent** (branche `claude/storm-chaser`) : stade, enclume qui survit, types de supercellule (LP / classique / HP / LT), nuage-mur tournant et stries (`FAerosCloudStorm`), tornades qui montent EF0 -> pic -> EF0 une catégorie à la fois. Voir README (« Vie d'un orage », « Supercellules variées », « Vie » des tornades). Pas encore vu de près à l'écran.
+
 ## Règles apprises (erreurs à ne pas refaire)
 
 - Démo jouable : **pas de touches de fonction** (F1-F12, réservées au débogage du moteur), et l'interface de la démo technique reste à la démo technique.
@@ -60,6 +62,9 @@ Aeros/Plugins/AerosWeather/
 - Un seul orage voulu : `SetConvectionControl(0, true)` (coupe la naissance spontanée, efface les orages en cours), puis `InjectThermalBubble`. La bulle force `Conv` elle-même, elle ne dépend pas de la naissance spontanée. Les tornades déjà là sont des acteurs : les détruire à part.
 - Chasse : un véhicule ne rattrape un orage que si l'échelle de temps reste petite (orage 15 m/s × échelle à l'écran). À x20 ils filaient à 300 m/s. Les essais de tornade sont en temps **simulé** (`TornadoCheckInterval` = 600 s) : à petite échelle il n'y en a presque plus, la chasse le baisse à 60 s pendant la journée.
 
+- Grille de la simulation, advection semi-lagrangienne : chaque case prend la valeur au point de départ calculé avec **sa propre** vitesse d'orage (`Src.StormU`). Une case vide avance au vent moyen : changer la vitesse d'une partie d'orage ne la fait pas dévier (essai des orages qui se scindent).
+- Tornade qui perd son orage : ne pas sauter l'âge à une valeur fixe (80 % de la vie tombait en pleine phase forte, EF0 -> EF2). `Aeros::Funnel::DecayAgeForWind`.
+- `GetStorms()` ne rend que les orages actifs ; la grille des nuages lit `GetStorms(true)` (enclumes des orages morts).
 - **Sources 100 % ASCII** (MSVC) : pas d'accent dans les `.h/.cpp`. Dans les chaînes, écrire \u00E9 (é), \u00E0 (à)... dans `TEXT("...")`. Attention : les outils Write/Edit décodent `\uXXXX` en vrai caractère. Écrire le texte avec accents puis convertir tous les non-ASCII en `\uXXXX` par un petit script Python (`chr(92)+'u%04X'`).
 - `FString::ToUpper` ne met pas les accents en majuscule (« DéGAGé ») : ne pas l'utiliser sur du texte français.
 - Git Bash convertit les arguments qui commencent par `/` en chemins Windows (`/AerosWeather/Maps/...` devient `C:/Program Files/Git/...`) : lancer Unreal depuis PowerShell.

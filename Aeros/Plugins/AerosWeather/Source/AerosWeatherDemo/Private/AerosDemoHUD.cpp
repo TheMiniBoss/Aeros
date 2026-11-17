@@ -1,6 +1,7 @@
 // Copyright Aeros. All Rights Reserved.
 
 #include "AerosDemoHUD.h"
+#include "AerosStormNames.h"
 #include "AerosDebugUpdates.h"
 #include "AerosDemoPawn.h"
 #include "AerosWeatherSubsystem.h"
@@ -138,16 +139,6 @@ namespace AerosDemoHudInternal
 		case EAerosPrecipType::FreezingRain: return TEXT("Pluie vergla\u00E7ante");
 		case EAerosPrecipType::Hail: return TEXT("Gr\u00EAle");
 		default: return TEXT("Pr\u00E9cipitations");
-		}
-	}
-
-	FString StormTypeFr(EAerosStormType T)
-	{
-		switch (T)
-		{
-		case EAerosStormType::Supercell: return TEXT("Supercellule");
-		case EAerosStormType::Multicell: return TEXT("Orage multicellulaire");
-		default: return TEXT("Orage");
 		}
 	}
 
@@ -406,7 +397,7 @@ FString AAerosDemoHUD::Explain(UAerosWeatherSubsystem* Sub, const FAerosWeatherS
 		if (D < 40.f)
 		{
 			Out.Add(FString::Printf(TEXT("Une tornade EF%d touche le sol \u00E0 %.0f km (%s). Le vent y tourne \u00E0 plus de %.0f km/h et aspire les objets."),
-				Tor->GetEFRating(), D, *Compass(Bearing(Viewer, Tor->GetActorLocation())), Tor->MaxWind * 3.6f));
+				Tor->GetEFRating(), D, *Compass(Bearing(Viewer, Tor->GetActorLocation())), Tor->GetCurrentWind() * 3.6f));
 			break;
 		}
 	}
@@ -451,7 +442,7 @@ FString AAerosDemoHUD::Explain(UAerosWeatherSubsystem* Sub, const FAerosWeatherS
 	FAerosStormData Storm;
 	if (Sub->GetNearestStorm(Viewer, Storm, 120.f) && Km(Storm.UpdraftLocation, Viewer) > Storm.RadiusKm)
 	{
-		Out.Add(FString::Printf(TEXT("%s le plus proche : %.0f km au %s (touche F pour y aller)."), *StormTypeFr(Storm.Type),
+		Out.Add(FString::Printf(TEXT("%s le plus proche : %.0f km au %s (touche F pour y aller)."), *AerosStormNames::LabelFr(Storm),
 			Km(Storm.UpdraftLocation, Viewer), *Compass(Bearing(Viewer, Storm.UpdraftLocation))));
 	}
 
@@ -649,7 +640,7 @@ void AAerosDemoHUD::DrawWorldMarkers(UAerosWeatherSubsystem* Sub)
 	{
 		const FAerosStormData& St = Storms[K];
 		if (Km(St.UpdraftLocation, Viewer) > 150.f) break;
-		FString Label = FString::Printf(TEXT("%s  %.0f km"), *StormTypeFr(St.Type), Km(St.UpdraftLocation, Viewer));
+		FString Label = FString::Printf(TEXT("%s  %.0f km"), *AerosStormNames::LabelFr(St), Km(St.UpdraftLocation, Viewer));
 		if (St.MaxHail > 10.f) Label += FString::Printf(TEXT("  gr\u00EAle %.0f mm"), St.MaxHail);
 		if (St.Mesocyclone > 0.5f) Label += TEXT("  rotation");
 		DrawMarker(FVector(St.UpdraftLocation.X, St.UpdraftLocation.Y, 250000.0), Label, StormColor(St), St.Type == EAerosStormType::Supercell ? 10.f : 7.f, false);

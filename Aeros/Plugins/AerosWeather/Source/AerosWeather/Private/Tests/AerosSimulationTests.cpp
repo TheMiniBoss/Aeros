@@ -19,7 +19,7 @@ bool FAerosPhysicsTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("Dew point round trip"), FMath::IsNearlyEqual(DewPoint(MixingRatioFromDewPoint(18.f, 1000.f), 1000.f), 18.f, 0.05f));
 	TestTrue(TEXT("LCL Espy"), FMath::IsNearlyEqual(LCLHeight(30.f, 20.f), 1250.f, 1.f));
 	TestTrue(TEXT("Hail 30 m/s updraft ~ 4.5 cm"), FMath::IsNearlyEqual(MaxHailForUpdraft(30.f), 45.f, 2.f));
-	TestEqual(TEXT("EF3 at 55 m/s"), EFScale(55.f), 3);
+	TestEqual(TEXT("EF2 at 55 m/s"), EFScale(55.f), 2);
 	TestEqual(TEXT("Cat 4 at 65 m/s"), SaffirSimpson(65.f), 4);
 	return true;
 }
@@ -194,6 +194,97 @@ bool FAerosSingleStormTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("Natural initiation off: no new storm"), QuietConv < 0.05f && Quiet.GetStorms().Num() == 0);
 	TestTrue(TEXT("One bubble: deep convection"), OneW > 20.f);
 	TestTrue(TEXT("One bubble: one storm (a split may add one)"), One.GetStorms().Num() >= 1 && One.GetStorms().Num() <= 2);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FAerosStormLifeTest, "Aeros.Simulation.StormLife",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FAerosStormLifeTest::RunTest(const FString& Parameters)
+{
+	// Supercell flavours from the environment of the updraft (Keraunos): LP in dry air with a high base,
+	// classic in moist air, HP in very moist air with a low base, LT under a low tropopause (< 10 km)
+	{
+		using F = FAerosSimulation;
+		const float Dry = F::SupercellPrecipLoad(9.f, 1900.f, 0.4f);
+		const float Moist = F::SupercellPrecipLoad(13.5f, 1000.f, 0.65f);
+		const float Wet = F::SupercellPrecipLoad(18.f, 500.f, 0.9f);
+		TestTrue(TEXT("Precipitation load grows with moisture (dry < moist < very moist)"), Dry < Moist && Moist < Wet && Dry >= 0.f && Wet <= 1.f);
+		TestTrue(TEXT("Dry air, high base: LP supercell"), F::ClassifySupercell(Dry, 12000.f) == EAerosSupercellType::LowPrecip);
+		TestTrue(TEXT("Moist air: classic supercell"), F::ClassifySupercell(Moist, 12000.f) == EAerosSupercellType::Classic);
+		TestTrue(TEXT("Very moist air, low base: HP supercell"), F::ClassifySupercell(Wet, 13000.f) == EAerosSupercellType::HighPrecip);
+		TestTrue(TEXT("Top under 10 km: low-topped supercell"), F::ClassifySupercell(Moist, 8500.f) == EAerosSupercellType::LowTopped);
+	}
+
+	// One storm from birth to death: it grows (developing, no anvil), matures (anvil built over minutes, not at
+	// once), and when its fuel is cut it collapses (dissipating); its anvil outlives the updraft and dissolves
+	FAerosSimulationSettings S;
+	S.GridSizeX = S.GridSizeY = 96;
+	S.Scenario = EAerosScenario::SupercellOutbreak;
+	S.StartDayOfYear = 140;
+	S.StartHour = 12.f;
+	S.LatitudeDeg = 37.f;
+	FAerosSimulation Sim;
+	Sim.Initialize(S);
+	Sim.SetConvectionControl(0.f, true);
+	Sim.InjectThermal(FVector::ZeroVector, 6.f, 3.f, 0.002f);
+	int32 Id = -1;
+	TArray<EAerosStormStage> Stages;
+	float PrevAnvil = 0.f, WorstAnvilJump = 0.f, MaxAnvil = 0.f;
+	bool bTypedSupercell = true, bSawSupercell = false, bMature = false;
+	auto Find = [&Sim, &Id]() -> const FAerosStormData*
+	{
+		const FAerosStormData* Best = nullptr;
+		for (const FAerosTrackedStorm& T : Sim.GetStorms())
+		{
+			if (T.Data.Id == Id) return &T.Data;
+			if (Id < 0 && T.Data.IsActive() && (!Best || T.Data.Intensity > Best->Intensity)) Best = &T.Data;
+		}
+		return Id < 0 ? Best : nullptr;
+	};
+	FVector Where = FVector::ZeroVector;
+	for (int32 Minute = 0; Minute < 150; ++Minute)
+	{
+		Sim.Step(30.f);
+		Sim.Step(30.f);
+		const FAerosStormData* St = Find();
+		if (!St) continue;
+		Id = St->Id;
+		Where = St->UpdraftLocation;
+		if (Stages.Num() == 0 || Stages[Stages.Num() - 1] != St->Stage) Stages.Add(St->Stage);
+		bMature |= St->Stage == EAerosStormStage::Mature;
+		WorstAnvilJump = FMath::Max(WorstAnvilJump, St->Anvil - PrevAnvil);
+		PrevAnvil = St->Anvil;
+		MaxAnvil = FMath::Max(MaxAnvil, St->Anvil);
+		if (St->Type == EAerosStormType::Supercell) { bSawSupercell = true; bTypedSupercell &= St->SupercellType != EAerosSupercellType::None; }
+		else bTypedSupercell &= St->SupercellType == EAerosSupercellType::None;
+	}
+	TestTrue(TEXT("Storm followed"), Id >= 0);
+	TestTrue(TEXT("Born developing (no anvil), then mature"), Stages.Num() >= 2 && Stages[0] == EAerosStormStage::Developing && bMature);
+	TestTrue(TEXT("Anvil builds over minutes (< 0.15 per minute) up to > 0.6"), WorstAnvilJump < 0.15f && MaxAnvil > 0.6f);
+	TestTrue(TEXT("A supercell has a flavour, other storms none"), bSawSupercell && bTypedSupercell);
+
+	// Cut the fuel: cold, dry air over the storm
+	Sim.InjectThermal(Where, 30.f, -6.f, -0.009f);
+	bool bDissipating = false, bRemnant = false, bAnvilFades = true, bGone = false;
+	float RemnantAnvil = 2.f;
+	for (int32 Minute = 0; Minute < 240 && !bGone; ++Minute)
+	{
+		Sim.Step(30.f);
+		Sim.Step(30.f);
+		const FAerosStormData* St = Find();
+		if (!St) { bGone = bRemnant; continue; }
+		bDissipating |= St->Stage == EAerosStormStage::Dissipating;
+		if (!St->IsActive())
+		{
+			bRemnant = true;
+			bAnvilFades &= St->Anvil <= RemnantAnvil + 1e-4f && St->Mesocyclone == 0.f && St->LightningRate == 0.f;
+			RemnantAnvil = St->Anvil;
+		}
+	}
+	TestTrue(TEXT("Collapsing storm is dissipating"), bDissipating);
+	TestTrue(TEXT("Its anvil outlives the updraft (no cell, anvil fading, no rotation, no lightning)"), bRemnant && bAnvilFades);
+	TestTrue(TEXT("Then it is gone"), bGone);
 	return true;
 }
 
@@ -463,6 +554,104 @@ bool FAerosCloudVolumeTest::RunTest(const FString& Parameters)
 		TestTrue(TEXT("Storm base raised by the ground height (none at LCL above sea, dense at ground + LCL)"), Below < 0.05f && Above > 0.5f);
 	}
 	TestTrue(TEXT("Clear below the cloud base away from storms"), FAerosCloudVolume::SampleDensity(SingleGrid, Desc, Upwind, 0.3f) < 0.05f);
+	// --- Life and flavour of a storm, on its shape alone (cells cleared): a storm moving east
+	{
+		FAerosSnapshot Bare = Single;
+		for (FAerosSnapCell& C : Bare.Cells) { C.Conv = 0.f; C.CloudCover = 0.f; C.Elev = 0.f; C.PrecipRate = 0.f; }
+		FAerosStormData Base = St;
+		Base.Velocity = FVector(12.0, 0.0, 0.0);
+		Base.HailCoreLocation = Base.UpdraftLocation + FVector(300000.0, -300000.0, 0.0);
+		Base.CloudTop = Base.AnvilTop = 12000.f;
+		Base.LCL = 1000.f;
+		Base.RadiusKm = 15.f;
+		Base.MaxRainRate = 80.f;
+		Base.MaxUpdraft = Base.PeakUpdraft = 40.f;
+		Base.NumCells = 60;
+		Base.Anvil = 1.f;
+		Base.Stage = EAerosStormStage::Mature;
+		const FVector U = Base.UpdraftLocation;
+		const FVector M(100000.0, 0.0, 0.0), R(0.0, 100000.0, 0.0);   // 1 km ahead (east), 1 km right (south)
+		const FVector Meso = U - M + R * 0.5;                            // where the tornado stands (AnchorFor)
+		auto Build = [&](const FAerosStormData& Storm, float Lat, TArray<uint8>& Out)
+		{
+			FAerosSnapshot One = Bare;
+			One.Settings.LatitudeDeg = Lat;
+			One.Storms.Reset();
+			One.Storms.Add(Storm);
+			One.StormSimTime = One.SimTime;
+			FAerosCloudVolume::Build(One, Desc, Out);
+		};
+		auto Rain = [&](const TArray<uint8>& G, const FVector& At) { return FAerosCloudVolume::SampleRain(G, Desc, At, 0.3f); };
+		auto MaxRain = [&](const TArray<uint8>& G)
+		{
+			float Best = 0.f;
+			for (float X = -15.f; X <= 15.f; X += 0.5f)
+				for (float Y = -15.f; Y <= 15.f; Y += 0.5f)
+					Best = FMath::Max(Best, Rain(G, U + M * X + R * Y));
+			return Best;
+		};
+
+		// Remnant: the updraft is gone, the anvil stays alone
+		{
+			FAerosStormData Dead = Base;
+			Dead.NumCells = 0; Dead.CloudTop = 0.f; Dead.MaxUpdraft = 0.f; Dead.Mesocyclone = 0.f; Dead.Anvil = 0.8f;
+			Dead.Stage = EAerosStormStage::Dissipating;
+			TArray<uint8> G, GA;
+			Build(Dead, 37.f, G);
+			Build(Base, 37.f, GA);
+			TestTrue(TEXT("Dead storm: no tower left"), FAerosCloudVolume::SampleDensity(G, Desc, U, 5.f) < 0.05f);
+			TestTrue(TEXT("Dead storm: its anvil stays"), FAerosCloudVolume::SampleDensity(G, Desc, Downwind, 11.2f) > 0.15f);
+		}
+		// Developing: a tower, no anvil yet; then the anvil grows with the storm
+		{
+			FAerosStormData Young = Base;
+			Young.CloudTop = Young.AnvilTop = 7000.f; Young.Anvil = 0.f; Young.Stage = EAerosStormStage::Developing; Young.Mesocyclone = 0.f;
+			FAerosStormData Half = Base;
+			Half.Anvil = 0.3f;
+			TArray<uint8> G, GH, GF;
+			Build(Young, 37.f, G);
+			Build(Half, 37.f, GH);
+			Build(Base, 37.f, GF);
+			const FVector Far = St.UpdraftLocation + (Downwind - St.UpdraftLocation) * 1.4;   // 35 km downwind
+			TestTrue(TEXT("Developing storm: tower, no anvil"), FAerosCloudVolume::SampleDensity(G, Desc, U, 4.f) > 0.5f
+				&& FAerosCloudVolume::SampleDensity(G, Desc, Downwind, 6.2f) < 0.05f);
+			TestTrue(TEXT("Anvil grows with the storm (a young anvil does not reach 35 km)"),
+				FAerosCloudVolume::SampleDensity(GH, Desc, Far, 11.2f) < 0.5f * FAerosCloudVolume::SampleDensity(GF, Desc, Far, 11.2f));
+		}
+		// Collapsing: the tower thins
+		{
+			FAerosStormData Dying = Base;
+			Dying.Stage = EAerosStormStage::Dissipating; Dying.MaxUpdraft = 10.f;
+			TArray<uint8> G, GM;
+			Build(Dying, 37.f, G);
+			Build(Base, 37.f, GM);
+			auto Width = [&](const TArray<uint8>& Grid) { int32 N = 0; for (float X = -8.f; X <= 8.f; X += 0.25f) N += FAerosCloudVolume::SampleDensity(Grid, Desc, U + R * X, 6.f) > 0.5f ? 1 : 0; return N; };
+			TestTrue(TEXT("Collapsing tower is thinner"), Width(G) < Width(GM) && Width(G) > 0);
+		}
+		// Supercell flavours (Keraunos cross-sections): classic rain forward-left with a hook round the
+		// mesocyclone and a dry inflow ahead-right; HP rain wrapping the mesocyclone; LP little rain
+		{
+			FAerosStormData Classic = Base, HP = Base, LP = Base;
+			Classic.Mesocyclone = HP.Mesocyclone = LP.Mesocyclone = 0.9f;
+			Classic.Type = HP.Type = LP.Type = EAerosStormType::Supercell;
+			Classic.PrecipLoad = 0.55f; Classic.SupercellType = EAerosSupercellType::Classic;
+			HP.PrecipLoad = 0.9f; HP.SupercellType = EAerosSupercellType::HighPrecip;
+			LP.PrecipLoad = 0.15f; LP.SupercellType = EAerosSupercellType::LowPrecip;
+			TArray<uint8> GC, GH, GL, GS;
+			Build(Classic, 37.f, GC);
+			Build(HP, 37.f, GH);
+			Build(LP, 37.f, GL);
+			Build(Classic, -37.f, GS);
+			const FVector Forward = U + M * 3.5 - R * 3.5, Hook = Meso - M * 2.7, Inflow = U + M * 4.0 + R * 4.0, AheadRight = Meso + R * 3.2;
+			TestTrue(TEXT("Classic: rain forward-left"), Rain(GC, Forward) > 0.3f);
+			TestTrue(TEXT("Classic: rain hook behind the mesocyclone"), Rain(GC, Hook) > 0.1f);
+			TestTrue(TEXT("Classic: dry inflow ahead-right"), Rain(GC, Inflow) < 0.05f);
+			TestTrue(TEXT("HP: rain wraps the mesocyclone (also on its right)"), Rain(GH, AheadRight) > 0.1f && Rain(GC, AheadRight) < Rain(GH, AheadRight));
+			TestTrue(TEXT("LP: little rain (< 60 % of the classic), no hook"), MaxRain(GL) < 0.6f * MaxRain(GC) && Rain(GL, Hook) < 0.05f);
+			TestTrue(TEXT("Southern hemisphere: mirrored (rain forward-right, inflow left dry)"),
+				Rain(GS, U + M * 3.5 + R * 3.5) > 0.3f && Rain(GS, U + M * 4.0 - R * 4.0) < 0.05f);
+		}
+	}
 	// Rain shaft under the precipitation core: no cloud density (R) below the base, rain amount in G
 	{
 		const FAerosStormData* Rainiest = nullptr;
@@ -494,8 +683,9 @@ bool FAerosCloudVolumeTest::RunTest(const FString& Parameters)
 		Pair.Storms.Reset();
 		const FVector Side(-Dir500.Y, Dir500.X, 0.0);
 		FAerosStormData Low = St, High = St;
-		Low.CloudTop = 11000.f;
-		High.CloudTop = 13000.f;
+		Low.CloudTop = Low.AnvilTop = 11000.f;
+		High.CloudTop = High.AnvilTop = 13000.f;
+		Low.Anvil = High.Anvil = 1.f;
 		High.UpdraftLocation = High.UpdraftLocation + Side * 600000.0;
 		if (!High.HailCoreLocation.IsZero()) High.HailCoreLocation = High.HailCoreLocation + Side * 600000.0;
 		Pair.Storms.Add(Low);

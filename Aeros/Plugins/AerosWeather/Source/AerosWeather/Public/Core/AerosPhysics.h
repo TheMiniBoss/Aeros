@@ -134,11 +134,12 @@ namespace Aeros::Phys
 	/** Enhanced Fujita rating from 3 s gust (m/s). */
 	FORCEINLINE int32 EFScale(float Wind)
 	{
-		if (Wind < 29.f) return 0;
-		if (Wind < 38.f) return 1;
-		if (Wind < 49.f) return 2;
-		if (Wind < 60.f) return 3;
-		if (Wind < 74.f) return 4;
+		// 3-second gust (m/s): EF0 29-38, EF1 38-50, EF2 50-61, EF3 61-74, EF4 74-90, EF5 above
+		if (Wind < 38.f) return 0;
+		if (Wind < 50.f) return 1;
+		if (Wind < 61.f) return 2;
+		if (Wind < 74.f) return 3;
+		if (Wind < 90.f) return 4;
 		return 5;
 	}
 

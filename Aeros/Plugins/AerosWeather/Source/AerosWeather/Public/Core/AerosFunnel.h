@@ -62,10 +62,61 @@ namespace Aeros
 			return X * X * (3.f - 2.f * X);
 		}
 
-		/** 0 -> 1 -> 0 over the life: spin-up over the first 12 %, rope-out from 75 % (AAerosTornado::GetStrength). */
-		inline float LifeStrength(float Age01)
+		/** Life of a tornado, Age01 = 0 at birth, 1 at death. The funnel lowers from the wall cloud (TouchdownEnd),
+		 *  then the wind climbs one EF category after the other up to the peak (RiseEnd, longer for a violent
+		 *  tornado), holds it (MatureEnd), falls back the same way (DecayEnd) and dies in the rope-out. A future
+		 *  EF5 is first an EF0, then EF1, EF2... it never appears at its peak. */
+		constexpr float TouchdownEnd = 0.1f;
+		constexpr float MatureEnd = 0.58f;
+		constexpr float DecayEnd = 0.92f;
+
+		/** Wind the tornado starts and ends with: weak EF0 (32 m/s), or its peak if it never gets stronger. */
+		inline float StartWindMs(float PeakMs)
 		{
-			return SmoothStep01(Age01 / 0.12f) * (1.f - SmoothStep01((Age01 - 0.75f) / 0.25f));
+			return FMath::Min(32.f, FMath::Max(PeakMs, 0.f));
+		}
+
+		/** End of the intensification: 12 % of the life for an EF0, ~42 % for an EF5 (~6 % per category). */
+		inline float RiseEnd(float PeakMs)
+		{
+			return 0.12f + 0.3f * SmoothStep01((PeakMs - 32.f) / 60.f);
+		}
+
+		/** Peak ground wind (m/s) at a moment of the life (see TouchdownEnd). Linear between the stages so every
+		 *  category lasts about as long as the others. */
+		inline float LifeWindMs(float PeakMs, float Age01)
+		{
+			const float Start = StartWindMs(PeakMs);
+			const float Peak = FMath::Max(PeakMs, Start);
+			const float T = FMath::Clamp(Age01, 0.f, 1.f);
+			const float Rise = RiseEnd(Peak);
+			if (T < TouchdownEnd) return Start * SmoothStep01(T / TouchdownEnd);
+			if (T < Rise) return FMath::Lerp(Start, Peak, (T - TouchdownEnd) / (Rise - TouchdownEnd));
+			if (T < MatureEnd) return Peak;
+			if (T < DecayEnd) return FMath::Lerp(Peak, Start, (T - MatureEnd) / (DecayEnd - MatureEnd));
+			return Start * (1.f - SmoothStep01((T - DecayEnd) / (1.f - DecayEnd)));
+		}
+
+		/** Age (0-1) to jump to when the tornado loses its storm: the point of the weakening where the wind is
+		 *  the wind now (never earlier than now): it weakens from where it is, category by category. */
+		inline float DecayAgeForWind(float PeakMs, float WindMs, float Age01)
+		{
+			const float Start = StartWindMs(PeakMs);
+			const float Peak = FMath::Max(PeakMs, Start);
+			if (WindMs >= Start)
+			{
+				const float Frac = Peak > Start ? FMath::Clamp((Peak - WindMs) / (Peak - Start), 0.f, 1.f) : 1.f;
+				return FMath::Max(Age01, MatureEnd + Frac * (DecayEnd - MatureEnd));
+			}
+			// Weaker than the start wind (still lowering, or already roping out): into the rope-out where the wind
+			// has fallen as low (the wind decreases there: bisection)
+			float Lo = DecayEnd, Hi = 1.f;
+			for (int32 It = 0; It < 24; ++It)
+			{
+				const float Mid = 0.5f * (Lo + Hi);
+				if (LifeWindMs(Peak, Mid) > WindMs) Lo = Mid; else Hi = Mid;
+			}
+			return FMath::Max(Age01, Hi);
 		}
 
 		/** 0 -> 1 over the last 35 % of the life (the rope-out stage). */
@@ -80,14 +131,27 @@ namespace Aeros
 			return CoreRadiusM * (1.f - 0.6f * RopeOut(Age01));
 		}
 
-		/** Peak wind of the funnel's vortex. Its circulation decays more slowly than the wind at the ground
-		 *  (sqrt of the life strength), and as the core shrinks in the rope-out the wind in it speeds up
-		 *  (v = circulation / core): the rope keeps reaching the ground until late, then lifts. */
-		inline float FunnelVmaxMs(float MaxWindMs, float Age01)
+		/** Core radius over the life: narrow while the tornado is weak, full at its peak, thinning in the rope-out. */
+		inline float LifeCoreRadiusM(float CoreRadiusM, float PeakMs, float Age01)
 		{
-			const float Circulation = std::sqrt(FMath::Max(LifeStrength(Age01), 0.f));
-			const float CoreRatio = FMath::Max(CoreRadiusAt(1.f, Age01), 0.1f);
-			return FMath::Min(MaxWindMs * Circulation / CoreRatio, 2.f * MaxWindMs);
+			const float Peak = FMath::Max(PeakMs, 1.f);
+			const float Wind = FMath::Max(LifeWindMs(Peak, Age01), StartWindMs(Peak));
+			return CoreRadiusAt(CoreRadiusM, Age01) * (0.45f + 0.55f * FMath::Clamp(Wind / Peak, 0.f, 1.f));
+		}
+
+		/** Peak wind of the funnel's vortex. At birth its circulation builds up (sqrt): the funnel lowers slowly
+		 *  from the cloud. In the rope-out the circulation decays more slowly than the ground wind, and as the core
+		 *  shrinks the wind in it speeds up (v = circulation / core): the rope reaches the ground until late,
+		 *  then lifts. */
+		inline float FunnelVmaxMs(float PeakMs, float Age01)
+		{
+			const float Start = StartWindMs(PeakMs);
+			const float T = FMath::Clamp(Age01, 0.f, 1.f);
+			if (T < TouchdownEnd) return Start * std::sqrt(SmoothStep01(T / TouchdownEnd));
+			const float Wind = LifeWindMs(PeakMs, T);
+			const float Circulation = T < DecayEnd ? Wind : Start * std::sqrt(FMath::Max(Wind / FMath::Max(Start, 1.f), 0.f));
+			const float CoreRatio = FMath::Max(CoreRadiusAt(1.f, T), 0.1f);
+			return FMath::Min(Circulation / CoreRatio, 2.f * FMath::Max(Wind, Circulation));
 		}
 
 		/** K for which this tornado's mature funnel (Vmax = MaxWind) reaches the ground, 1.3x over the
@@ -106,6 +170,15 @@ namespace Aeros
 		inline float WedgeMargin(float MaxWindMs)
 		{
 			return 1.3f + 2.f * SmoothStep01((MaxWindMs - 55.f) / 30.f);
+		}
+
+		/** Condensation K at a moment of the life: the funnel of the current wind reaches the ground (a cone while
+		 *  weak, a wedge once violent), never computed below the start wind (the descent and the rope-out keep
+		 *  the K of the start: they hang from the cloud). */
+		inline float FunnelK(float PeakMs, float Age01, float CloudBaseM, float KMin)
+		{
+			const float Wind = FMath::Max(LifeWindMs(PeakMs, Age01), StartWindMs(PeakMs));
+			return TouchdownK(Wind, CloudBaseM, KMin, WedgeMargin(Wind));
 		}
 	}
 }

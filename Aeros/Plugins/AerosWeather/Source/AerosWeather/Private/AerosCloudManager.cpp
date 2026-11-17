@@ -210,7 +210,7 @@ void UAerosCloudManager::UpdateCloudVolume(float DeltaTime)
 	const FAerosCloudVolumeDesc Desc = BuildingDesc;
 	// The storms as they are shown (interpolated between two states, like the markers and tornadoes),
 	// at the displayed time: Build does not move them
-	TArray<FAerosStormData> Shown = Owner->GetStorms();
+	TArray<FAerosStormData> Shown = Owner->GetStorms(true);   // dead storms' anvils too
 	// The cells' clouds too (the convective columns): blended between the two states like the weather map
 	FAerosSnapshotPtr PrevSnap = Owner->GetPreviousSnapshot();
 	const float Alpha = Owner->GetSnapshotAlpha();

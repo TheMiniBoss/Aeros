@@ -62,6 +62,11 @@ public:
 				S.MaxReflectivity = F(SA.MaxReflectivity, SB.MaxReflectivity);
 				S.MaxRainRate = F(SA.MaxRainRate, SB.MaxRainRate);
 				S.MaxHail = F(SA.MaxHail, SB.MaxHail);
+				S.PrecipLoad = F(SA.PrecipLoad, SB.PrecipLoad);
+				S.Anvil = F(SA.Anvil, SB.Anvil);
+				S.AnvilTop = F(SA.AnvilTop, SB.AnvilTop);
+				// A storm dying between the two states: its tower collapses over the interval, not at once
+				if (SA.IsActive() && !SB.IsActive()) { S.CloudTop = SA.CloudTop * (1.f - T); S.LCL = SA.LCL; S.RadiusKm = SA.RadiusKm; }
 				break;
 			}
 			Out.Add(S);

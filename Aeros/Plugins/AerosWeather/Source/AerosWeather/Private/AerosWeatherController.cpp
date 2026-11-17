@@ -127,6 +127,7 @@ void AAerosWeatherController::UpdateCustomClouds(UAerosWeatherSubsystem* Sub, fl
 		}
 	}
 	GatherCloudTornadoes(Sub, DeltaSeconds, P);
+	GatherCloudStorms(Sub, DeltaSeconds, P);
 	// Shadow map: 100 km centred on the viewer, snapped to 1 km (the light function reads the same rect).
 	if (CloudShadowRT)
 	{
@@ -227,6 +228,65 @@ void AAerosWeatherController::GatherCloudTornadoes(UAerosWeatherSubsystem* Sub, 
 		}
 		D.Fade = It.Value();
 		P.Tornadoes.Add(D);
+	}
+}
+
+void AAerosWeatherController::GatherCloudStorms(UAerosWeatherSubsystem* Sub, float DeltaSeconds, FAerosCloudRenderParams& P)
+{
+	FAerosSnapshotPtr Snap = Sub ? Sub->GetSnapshot() : nullptr;
+	if (!Snap) return;
+	const FVector Viewer = Sub->GetViewerLocation();
+	const float Hemi = Sub->GetSimulationSettings().LatitudeDeg < 0.f ? -1.f : 1.f;
+	// Tower lean as the voxel grid draws it (FAerosCloudVolume: 0.25 km per km along the 500 hPa wind)
+	FVector Dir500 = FAerosSnapshot::SimToWorldDir(Snap->Synoptic.Wind500.X, Snap->Synoptic.Wind500.Y).GetSafeNormal2D();
+	if (Dir500.Size2D() < 0.5) Dir500 = FVector(1.0, 0.0, 0.0);
+	auto Smooth = [](float E0, float E1, float X) { const float T = FMath::Clamp((X - E0) / (E1 - E0), 0.f, 1.f); return T * T * (3.f - 2.f * T); };
+
+	// The 4 nearest rotating storms within 60 km, as displayed (interpolated between states)
+	const TArray<FAerosStormData> Storms = Sub->GetStorms();
+	TArray<TPair<double, int32>> Near;
+	for (int32 K = 0; K < Storms.Num(); ++K)
+	{
+		const FAerosStormData& S = Storms[K];
+		if (!S.IsActive() || S.Mesocyclone < 0.3f) continue;
+		const double D = FVector::Dist2D(S.UpdraftLocation, Viewer);
+		if (D < 6000000.0) Near.Emplace(D, K);
+	}
+	Near.Sort([](const TPair<double, int32>& A, const TPair<double, int32>& B) { return A.Key < B.Key; });
+	TSet<int32> Selected;
+	for (int32 I = 0; I < Near.Num() && I < 4; ++I) Selected.Add(Storms[Near[I].Value].Id);
+
+	// Visible rotation: a mesocyclone turns ~0.01 rad/s; sped up with the clock, capped (it would strobe)
+	const float Spin = Hemi * FMath::Min(0.01f * FMath::Max(Sub->GetTimeScale(), 1.f), 0.25f) * (Sub->IsPaused() ? 0.f : 1.f);
+	for (int32 Id : Selected) if (!StormFadeSpin.Contains(Id)) StormFadeSpin.Add(Id, FVector2f(0.f, 0.f));
+	for (auto It = StormFadeSpin.CreateIterator(); It; ++It)
+	{
+		const bool bIn = Selected.Contains(It.Key());
+		FVector2f& FS = It.Value();
+		FS.X = FMath::Clamp(FS.X + (bIn ? 0.5f : -0.5f) * DeltaSeconds, 0.f, 1.f);
+		const FAerosStormData* S = Storms.FindByPredicate([&It](const FAerosStormData& X) { return X.Id == It.Key(); });
+		if (!S || (!bIn && FS.X <= 0.f)) { It.RemoveCurrent(); continue; }
+		const float Rotation = Smooth(0.3f, 0.8f, S->Mesocyclone);
+		FS.Y = FMath::Fmod(FS.Y + Spin * Rotation * DeltaSeconds, 2.f * PI);
+		if (P.Storms.Num() >= 4) continue;
+
+		FAerosCloudStorm D;
+		const FAerosWeatherSample Here = Sub->GetWeatherAtLocation(S->UpdraftLocation);
+		const float Ground = FMath::Max(Here.Elevation, 0.f) * 0.001f;   // as the voxel grid (cell elevation)
+		D.UpdraftKm = FVector3f(float(S->UpdraftLocation.X * 1e-5), float(S->UpdraftLocation.Y * 1e-5), Ground);
+		D.BaseKm = FMath::Clamp(S->LCL * 0.001f, 0.3f, 3.f);
+		D.TopKm = FMath::Max(S->CloudTop * 0.001f, D.BaseKm + 1.f);
+		D.TowerRadiusKm = FMath::Clamp(S->RadiusKm * 0.35f, 2.f, 6.f) * (S->SupercellType == EAerosSupercellType::LowTopped ? 0.75f : 1.f);
+		D.LeanKm = FVector2f(float(Dir500.X), float(Dir500.Y)) * 0.25f;
+		const FVector Wall = AAerosTornado::AnchorFor(*S, Dir500, Hemi);
+		D.WallKm = FVector2f(float(Wall.X * 1e-5), float(Wall.Y * 1e-5));
+		D.WallRadiusKm = FMath::Clamp(D.TowerRadiusKm * 0.6f, 1.5f, 3.f);
+		D.Rotation = Rotation;
+		D.SpinPhase = FS.Y;
+		// An LP shows its corkscrew updraft bare; an HP hides it in rain
+		D.Striation = Rotation * FMath::Lerp(1.f, 0.25f, Smooth(0.35f, 0.85f, S->PrecipLoad));
+		D.Fade = FS.X;
+		P.Storms.Add(D);
 	}
 }
 

@@ -1510,6 +1510,35 @@ void FAerosSimulation::TryCycloneGenesis()
 //  Storm labelling + tracking
 // =====================================================================
 
+float FAerosSimulation::SupercellPrecipLoad(float MixingRatioGkg, float LCLm, float RH850)
+{
+	using Aeros::Phys::SmoothStep01;
+	// Moisture feeds the rain, a low base keeps it from evaporating, moist mid levels from drying the core
+	const float Load = 0.55f * SmoothStep01((MixingRatioGkg - 10.f) / 10.f)
+		+ 0.25f * (1.f - SmoothStep01((LCLm - 500.f) / 1500.f))
+		+ 0.2f * SmoothStep01((RH850 - 0.4f) / 0.5f);
+	return FMath::Clamp(Load, 0.f, 1.f);
+}
+
+EAerosSupercellType FAerosSimulation::ClassifySupercell(float PrecipLoad, float CloudTopM)
+{
+	if (CloudTopM < 10000.f) return EAerosSupercellType::LowTopped;
+	if (PrecipLoad < 0.35f) return EAerosSupercellType::LowPrecip;
+	if (PrecipLoad > 0.72f) return EAerosSupercellType::HighPrecip;
+	return EAerosSupercellType::Classic;
+}
+
+void FAerosSimulation::UpdateAnvil(float& InOutAnvil, float& InOutAnvilTopM, float CloudTopM, float IntervalS)
+{
+	using Aeros::Phys::SmoothStep01;
+	const float Target = SmoothStep01((CloudTopM - 7000.f) / 3500.f);
+	const float Tau = Target > InOutAnvil ? 900.f : 1500.f;
+	InOutAnvil += (Target - InOutAnvil) * (1.f - FMath::Exp(-FMath::Max(IntervalS, 0.f) / Tau));
+	InOutAnvil = FMath::Clamp(InOutAnvil, 0.f, 1.f);
+	// The ice stays where it spread (sinking ~0.15 m/s) while the tower below collapses
+	InOutAnvilTopM = InOutAnvil < 0.01f ? CloudTopM : FMath::Max(CloudTopM, InOutAnvilTopM - 0.15f * IntervalS);
+}
+
 void FAerosSimulation::DetectAndTrackStorms(float Interval)
 {
 	using namespace Aeros::Phys;
@@ -1603,11 +1632,13 @@ void FAerosSimulation::DetectAndTrackStorms(float Interval)
 		}
 
 		FAerosTrackedStorm T;
+		const FAerosTrackedStorm* Former = nullptr;
 		float VX = Comp.SumSU / Comp.SumW, VY = Comp.SumSV / Comp.SumW;
 		if (BestIdx >= 0)
 		{
 			FAerosTrackedStorm& Old = Storms[BestIdx];
 			Old.bMatched = true;
+			Former = &Old;
 			T.Data.Id = Old.Data.Id;
 			T.Data.Age = Old.Data.Age + Interval;
 			// Centroid jumps when cells merge/split: trust the track only within reason
@@ -1713,8 +1744,55 @@ void FAerosSimulation::DetectAndTrackStorms(float Interval)
 		T.UX = UX; T.UY = UY; T.HX = HX; T.HY = HY;
 		D.HailCoreLocation = Comp.HailIdx >= 0 ? DomainToWorld(HX, HY) : D.Location;
 		D.UpdraftLocation = Comp.WIdx >= 0 ? DomainToWorld(UX, UY) : D.Location;
+
+		// ---- Life: anvil, stage, supercell flavour (smoothed: one tracking every 30 s)
+		const float PerMin = FMath::Clamp(Interval / 60.f, 0.05f, 2.f);
+		{
+			const FAerosCell& Env = Cells[WIdx >= 0 ? WIdx : Comp.WIdx >= 0 ? Comp.WIdx : CompCells[Comp.Start]];
+			const float Load = SupercellPrecipLoad(Env.Q * 1000.f, Env.LCL, RelativeHumidity(Env.T850, Env.Q850, 850.f));
+			D.PrecipLoad = Former ? Former->Data.PrecipLoad + (Load - Former->Data.PrecipLoad) * (1.f - FMath::Pow(0.8f, PerMin)) : Load;
+		}
+		D.Anvil = Former ? Former->Data.Anvil : 0.f;
+		D.AnvilTop = Former ? Former->Data.AnvilTop : D.CloudTop;
+		UpdateAnvil(D.Anvil, D.AnvilTop, D.CloudTop, Interval);
+		T.WSmooth = Former ? Former->WSmooth + (D.MaxUpdraft - Former->WSmooth) * (1.f - FMath::Pow(0.5f, PerMin)) : D.MaxUpdraft;
+		D.PeakUpdraft = FMath::Max(Former ? Former->Data.PeakUpdraft : 0.f, T.WSmooth);
+		{
+			// Collapsing once the updraft is well under its best (hysteresis: 60 % in, 80 % out)
+			const bool bWasDying = Former && Former->Data.Stage == EAerosStormStage::Dissipating;
+			const bool bDying = D.PeakUpdraft > 10.f && T.WSmooth < (bWasDying ? 0.8f : 0.6f) * D.PeakUpdraft;
+			D.Stage = bDying ? EAerosStormStage::Dissipating : (D.Anvil < 0.35f && !(Former && Former->Data.Stage == EAerosStormStage::Mature) ? EAerosStormStage::Developing : EAerosStormStage::Mature);
+		}
+		// From the highest top reached (the anvil's): a collapsing supercell is not a low-topped one
+		D.SupercellType = D.Type == EAerosStormType::Supercell ? ClassifySupercell(D.PrecipLoad, FMath::Max(D.CloudTop, D.AnvilTop)) : EAerosSupercellType::None;
 		Next.Add(T);
 		CompOfStorm.Add(FIntPoint(Comp.Start, Comp.Count));
+	}
+	// A storm whose cells are gone leaves its anvil: it drifts on with the storm's motion and dissolves
+	// (no tower, no rain, no rotation, no lightning), then the storm is dropped
+	for (const FAerosTrackedStorm& Old : Storms)
+	{
+		if (Old.bMatched || Old.Data.Anvil < 0.05f) continue;
+		FAerosTrackedStorm R = Old;
+		FAerosStormData& D = R.Data;
+		const float MX = float(D.Velocity.X) * Interval, MY = -float(D.Velocity.Y) * Interval;   // world -> domain (y north)
+		R.X += MX; R.Y += MY; R.UX += MX; R.UY += MY; R.HX += MX; R.HY += MY;
+		R.WSmooth = 0.f;
+		D.Location = DomainToWorld(R.X, R.Y);
+		D.UpdraftLocation = DomainToWorld(R.UX, R.UY);
+		D.HailCoreLocation = DomainToWorld(R.HX, R.HY);
+		D.Age += Interval;
+		D.NumCells = 0;
+		D.Intensity = 0.f; D.MaxUpdraft = 0.f; D.Mesocyclone = 0.f; D.LightningRate = 0.f; D.MaxHail = 0.f;
+		D.MaxRainRate *= FMath::Exp(-Interval / 600.f);
+		D.MaxReflectivity = FMath::Max(D.MaxReflectivity - Interval / 60.f, -32.f);
+		D.CloudTop = 0.f;
+		D.Stage = EAerosStormStage::Dissipating;
+		D.SupercellType = EAerosSupercellType::None;
+		UpdateAnvil(D.Anvil, D.AnvilTop, 0.f, Interval);
+		if (D.Anvil < 0.05f) continue;
+		Next.Add(R);
+		CompOfStorm.Add(FIntPoint(0, 0));
 	}
 	Storms = MoveTemp(Next);
 }
@@ -2299,6 +2377,7 @@ void FAerosSimulation::FillSnapshot(FAerosSnapshot& Out) const
 	Out.Stats.StepMs = LastStepMs;
 	Out.Stats.StepsTotal = int32(StepCount);
 	Out.Stats.NumCells = NX * NY;
-	Out.Stats.NumStorms = Storms.Num();
+	Out.Stats.NumStorms = 0;
+	for (const FAerosTrackedStorm& S : Storms) Out.Stats.NumStorms += S.Data.IsActive() ? 1 : 0;
 	Out.Stats.NumCyclones = Vortices.Num();
 }

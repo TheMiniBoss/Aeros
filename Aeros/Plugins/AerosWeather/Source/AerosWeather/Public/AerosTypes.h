@@ -60,6 +60,26 @@ enum class EAerosStormType : uint8
 	Supercell   UMETA(DisplayName = "Supercell"),
 };
 
+/** Life stage of a thunderstorm. */
+UENUM(BlueprintType)
+enum class EAerosStormStage : uint8
+{
+	Developing  UMETA(DisplayName = "Developing"),   // towering cumulus growing, no anvil yet
+	Mature      UMETA(DisplayName = "Mature"),
+	Dissipating UMETA(DisplayName = "Dissipating"),  // updraft collapsing, then the anvil alone (NumCells == 0)
+};
+
+/** Supercell flavour (storm-spotter classification). */
+UENUM(BlueprintType)
+enum class EAerosSupercellType : uint8
+{
+	None        UMETA(DisplayName = "None"),
+	Classic     UMETA(DisplayName = "Classic"),                // rain on the forward flank, hook round the mesocyclone
+	HighPrecip  UMETA(DisplayName = "High precipitation (HP)"),// rain wraps the mesocyclone: hidden tornadoes
+	LowPrecip   UMETA(DisplayName = "Low precipitation (LP)"), // bare striated tower, little rain, big hail
+	LowTopped   UMETA(DisplayName = "Low-topped (LT)"),        // mini supercell under a low tropopause (< 10 km)
+};
+
 /** Large-scale weather regime. Climate = derived from latitude + date (seasons). */
 UENUM(BlueprintType)
 enum class EAerosScenario : uint8
@@ -320,6 +340,18 @@ struct AEROSWEATHER_API FAerosStormData
 	UPROPERTY(BlueprintReadOnly, Category = "Aeros") FVector HailCoreLocation = FVector::ZeroVector;
 	UPROPERTY(BlueprintReadOnly, Category = "Aeros") FVector UpdraftLocation = FVector::ZeroVector;
 	UPROPERTY(BlueprintReadOnly, Category = "Aeros") float Age = 0.f;            // sim seconds
+	UPROPERTY(BlueprintReadOnly, Category = "Aeros") EAerosStormStage Stage = EAerosStormStage::Developing;
+	UPROPERTY(BlueprintReadOnly, Category = "Aeros") EAerosSupercellType SupercellType = EAerosSupercellType::None;
+	/** How much rain the structure carries, from the updraft's environment: 0 dry (LP) .. 0.5 classic .. 1 HP. */
+	UPROPERTY(BlueprintReadOnly, Category = "Aeros") float PrecipLoad = 0.5f;
+	/** 0-1: the anvil builds while the top is near the tropopause, outlives the updraft and dissolves. */
+	UPROPERTY(BlueprintReadOnly, Category = "Aeros") float Anvil = 0.f;
+	UPROPERTY(BlueprintReadOnly, Category = "Aeros") float AnvilTop = 0.f;      // m above the ground
+	/** Strongest (smoothed) updraft so far, m/s: the storm is collapsing when it falls well under it. */
+	UPROPERTY(BlueprintReadOnly, Category = "Aeros") float PeakUpdraft = 0.f;
+
+	/** False for the anvil left by a dead storm (no convective cell any more). */
+	bool IsActive() const { return NumCells > 0; }
 };
 
 /** Tropical cyclone (hurricane / typhoon) vortex. */

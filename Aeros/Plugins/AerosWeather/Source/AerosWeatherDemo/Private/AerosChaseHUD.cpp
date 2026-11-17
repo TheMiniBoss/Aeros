@@ -1,6 +1,7 @@
 // Copyright Aeros. All Rights Reserved.
 
 #include "AerosChaseHUD.h"
+#include "AerosStormNames.h"
 #include "AerosDebugUpdates.h"
 #include "AerosChasePawn.h"
 #include "AerosChaseRules.h"
@@ -387,14 +388,16 @@ void AAerosChaseHUD::DrawWorldMarkers(AAerosChasePawn* P, UAerosWeatherSubsystem
 		if (It->GetStrength() < 0.1f) continue;
 		const float D = float(FVector::Dist2D(It->GetActorLocation(), P->GetActorLocation())) * 1e-5f;
 		if (D > 40.f) continue;
-		Mark(It->GetActorLocation() + FVector(0, 0, 60000.0), FString::Printf(TEXT("TORNADE EF%d  %.1f km"), It->GetEFRating(), D), Danger);
+		const int32 Trend = It->GetEFTrend();
+		const TCHAR* How = Trend > 0 ? TEXT(" (se renforce)") : (Trend < 0 ? TEXT(" (faiblit)") : TEXT(""));
+		Mark(It->GetActorLocation() + FVector(0, 0, 60000.0), FString::Printf(TEXT("TORNADE EF%d%s  %.1f km"), It->GetEFRating(), How, D), Danger);
 	}
 	for (const FAerosStormData& S : Sub->GetStorms())
 	{
 		if (S.Type != EAerosStormType::Supercell) continue;
 		const float D = float(FVector::Dist2D(S.UpdraftLocation, P->GetActorLocation())) * 1e-5f;
 		if (D > 90.f || D < 4.f) continue;
-		Mark(S.UpdraftLocation + FVector(0, 0, 900000.0), FString::Printf(TEXT("Supercellule  %.0f km"), D), Storm);
+		Mark(S.UpdraftLocation + FVector(0, 0, 900000.0), FString::Printf(TEXT("%s  %.0f km"), *AerosStormNames::LabelFr(S), D), Storm);
 	}
 }
 

@@ -119,6 +119,7 @@ struct FAerosTrackedStorm
 	float X = 0.f, Y = 0.f;    // m, domain frame
 	float UX = 0.f, UY = 0.f;  // m, domain frame: updraft, sub-cell and filtered (UpdraftLocation)
 	float HX = 0.f, HY = 0.f;  // m, domain frame: hail core, same
+	float WSmooth = 0.f;       // m/s, updraft smoothed over the trackings (stage)
 	bool bMatched = false;
 };
 
@@ -187,6 +188,16 @@ public:
 	FVector DomainToWorld(float Xm, float Ym) const;
 	void WorldToDomain(const FVector& World, float& OutXm, float& OutYm) const;
 	static FAerosSynopticState MakeScenario(EAerosScenario Scenario, float LatitudeDeg, int32 DayOfYear);
+
+	// ---- Storm life (pure, tested) ------------------------------------------------------------------------
+	/** How much rain a supercell's structure carries (0 dry .. 1 very wet) from its updraft's environment:
+	 *  boundary-layer mixing ratio (g/kg), cloud base (m), relative humidity at 850 hPa (0-1). */
+	static float SupercellPrecipLoad(float MixingRatioGkg, float LCLm, float RH850);
+	/** Flavour of a supercell from its precipitation load and its top (m above the ground). */
+	static EAerosSupercellType ClassifySupercell(float PrecipLoad, float CloudTopM);
+	/** Anvil over a tracking interval: builds over ~15 min while the top nears the tropopause, dissolves over
+	 *  ~25 min once it has collapsed; its top stays where the ice spread, sinking slowly. */
+	static void UpdateAnvil(float& InOutAnvil, float& InOutAnvilTopM, float CloudTopM, float IntervalS);
 
 private:
 	FAerosCell MakeBackgroundCell(float Xm, float Ym) const;

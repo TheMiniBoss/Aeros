@@ -43,6 +43,9 @@ public:
 	/** Nearest-voxel density (0-1) at a world location and altitude (km). 0 outside the grid. */
 	static float SampleDensity(const TArray<uint8>& RG8, const FAerosCloudVolumeDesc& Desc, const FVector& World, float AltKm);
 
+	/** Same, darkness / rain channel (G): rain amount under the cloud base. */
+	static float SampleRain(const TArray<uint8>& RG8, const FAerosCloudVolumeDesc& Desc, const FVector& World, float AltKm);
+
 	/** Gust-front strength (0-1) of a simulation cell: surface convergence next to heavy rain (shelf clouds). */
 	static float GustFront(const FAerosSnapshot& Snap, int32 I, int32 J);
 

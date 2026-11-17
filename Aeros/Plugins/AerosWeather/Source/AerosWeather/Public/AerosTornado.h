@@ -63,8 +63,21 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Aeros|Tornado")
 	float GetStrength() const;
 
+	/** EF rating now: it climbs category by category up to the peak, then comes back down (Aeros::Funnel::LifeWindMs). */
 	UFUNCTION(BlueprintPure, Category = "Aeros|Tornado")
 	int32 GetEFRating() const { return EFRating; }
+
+	/** EF rating it will reach at its peak. */
+	UFUNCTION(BlueprintPure, Category = "Aeros|Tornado")
+	int32 GetPeakEFRating() const { return PeakEFRating; }
+
+	/** Peak ground wind now (m/s). */
+	UFUNCTION(BlueprintPure, Category = "Aeros|Tornado")
+	float GetCurrentWind() const;
+
+	/** +1 while it intensifies, 0 at its peak, -1 while it weakens. */
+	UFUNCTION(BlueprintPure, Category = "Aeros|Tornado")
+	int32 GetEFTrend() const;
 
 	UFUNCTION(BlueprintPure, Category = "Aeros|Tornado")
 	float GetCoreRadius() const { return CoreRadius; }
@@ -72,19 +85,21 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Aeros|Tornado")
 	int32 GetParentStormId() const { return ParentStormId; }
 
-	/** Where a storm's tornado stands: just behind and right of the updraft (~1 km), under the wall cloud
-	 *  the cloud grid draws there. 3.4 km away (as before) it was often out of the tower, under clear sky. */
-	static FVector AnchorFor(const FAerosStormData& Storm, const FVector& FallbackMotion)
+	/** Where a storm's tornado stands: just behind the updraft (~1 km) on the mesocyclone's side (right of the
+	 *  motion in the northern hemisphere, Side = 1; left in the southern one, Side = -1), under the wall cloud
+	 *  the renderer draws there. 3.4 km away (as before) it was often out of the tower, under clear sky. */
+	static FVector AnchorFor(const FAerosStormData& Storm, const FVector& FallbackMotion, float Side = 1.f)
 	{
 		FVector Motion = Storm.Velocity.Size2D() > 1.0 ? Storm.Velocity.GetSafeNormal2D() : FallbackMotion.GetSafeNormal2D();
 		if (Motion.IsNearlyZero()) Motion = FVector(1.0, 0.0, 0.0);
 		const FVector Right(-Motion.Y, Motion.X, 0.0);
-		return Storm.UpdraftLocation - Motion * 100000.0 + Right * 50000.0;
+		return Storm.UpdraftLocation - Motion * 100000.0 + Right * (50000.0 * double(Side));
 	}
 
 	UPROPERTY(Replicated, BlueprintReadOnly, Category = "Aeros|Tornado") int32 ParentStormId = -1;
-	UPROPERTY(Replicated, BlueprintReadOnly, Category = "Aeros|Tornado") int32 EFRating = 0;
-	UPROPERTY(Replicated, BlueprintReadOnly, Category = "Aeros|Tornado") float MaxWind = 50.f;        // m/s
+	UPROPERTY(Replicated, BlueprintReadOnly, Category = "Aeros|Tornado") int32 EFRating = 0;          // now
+	UPROPERTY(Replicated, BlueprintReadOnly, Category = "Aeros|Tornado") int32 PeakEFRating = 0;      // at its peak
+	UPROPERTY(Replicated, BlueprintReadOnly, Category = "Aeros|Tornado") float MaxWind = 50.f;        // m/s, at its peak
 	UPROPERTY(Replicated, BlueprintReadOnly, Category = "Aeros|Tornado") float CoreRadius = 80.f;     // m
 	UPROPERTY(Replicated, BlueprintReadOnly, Category = "Aeros|Tornado") float Lifetime = 300.f;      // real s
 	UPROPERTY(Replicated, BlueprintReadOnly, Category = "Aeros|Tornado") float Age = 0.f;

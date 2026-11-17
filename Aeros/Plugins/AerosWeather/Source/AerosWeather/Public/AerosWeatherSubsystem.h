@@ -194,8 +194,9 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Aeros|Query")
 	EAerosPhenomenon GetPhenomenonAtLocation(FVector WorldLocation) const;
 
+	/** Storms as displayed. Living ones only, unless bIncludeDead: the anvils dead storms leave (NumCells 0). */
 	UFUNCTION(BlueprintPure, Category = "Aeros|Query")
-	TArray<FAerosStormData> GetStorms() const;
+	TArray<FAerosStormData> GetStorms(bool bIncludeDead = false) const;
 
 	UFUNCTION(BlueprintPure, Category = "Aeros|Query")
 	TArray<FAerosCycloneData> GetCyclones() const;

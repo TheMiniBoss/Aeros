@@ -171,7 +171,7 @@ AAerosTornado* UAerosStormManager::SpawnTornado(const FAerosStormData& Storm, fl
 
 	// Tornado sits under the rear flank of the updraft (mesocyclone)
 	const FVector Motion = Storm.Velocity.GetSafeNormal2D();
-	const FVector Location = AAerosTornado::AnchorFor(Storm, Motion);
+	const FVector Location = AAerosTornado::AnchorFor(Storm, Motion, Owner->GetSimulationSettings().LatitudeDeg < 0.f ? -1.f : 1.f);
 
 	FActorSpawnParameters Params;
 	Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
@@ -183,12 +183,14 @@ AAerosTornado* UAerosStormManager::SpawnTornado(const FAerosStormData& Storm, fl
 	const float Potential = FMath::Clamp(Storm.STP / 4.f, 0.25f, 1.f);
 	const float MaxWind = FMath::Clamp(30.f + 75.f * FMath::Pow(RandA, 4.f) * Potential, 30.f, 105.f);
 	const float Core = FMath::Lerp(40.f, 250.f, FMath::Clamp((MaxWind - 30.f) / 70.f, 0.f, 1.f)) * (0.7f + 0.6f * RandB);
-	const float Life = 120.f + 900.f * RandB * FMath::Clamp(Storm.STP / 2.f, 0.3f, 1.f);
+	// A strong tornado climbs one EF category after the other (Aeros::Funnel::LifeWindMs): give it the time
+	// to show each one (~6 % of the life per category, ~40 s at least)
+	const float Life = FMath::Max(120.f + 900.f * RandB * FMath::Clamp(Storm.STP / 2.f, 0.3f, 1.f), 150.f + 110.f * float(Aeros::Phys::EFScale(MaxWind)));
 	const FVector TrackVel = Storm.Velocity.Size2D() > 1.0 ? Storm.Velocity : FVector(10, 0, 0);
 	T->ServerInitialize(Storm.Id, MaxWind, Core, Life, TrackVel, int32(RandA * 100000.f));
 	T->FinishSpawning(FTransform(Location));
 
-	UE_LOG(LogAeros, Log, TEXT("Aeros: tornado EF%d (%.0f m/s, core %.0f m) under storm %d"), T->GetEFRating(), MaxWind, Core, Storm.Id);
+	UE_LOG(LogAeros, Log, TEXT("Aeros: tornado (peak EF%d, %.0f m/s, core %.0f m, life %.0f s) under storm %d"), T->GetPeakEFRating(), MaxWind, Core, Life, Storm.Id);
 	return T;
 }
 

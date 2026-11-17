@@ -79,6 +79,11 @@ namespace AerosCloudRenderInternal
 		SHADER_PARAMETER_ARRAY(FVector4f, TornadoE, [4])   // dust tint rgb, sub-vortex phase
 		SHADER_PARAMETER_ARRAY(FVector4f, TornadoF, [4])   // fade
 		SHADER_PARAMETER(uint32, NumTornadoes)
+		SHADER_PARAMETER_ARRAY(FVector4f, StormA, [4])     // updraft ground km xyz, base km above the ground
+		SHADER_PARAMETER_ARRAY(FVector4f, StormB, [4])     // top km above the ground, tower radius km, lean xy
+		SHADER_PARAMETER_ARRAY(FVector4f, StormC, [4])     // wall centre xy (km), wall radius km, rotation
+		SHADER_PARAMETER_ARRAY(FVector4f, StormD, [4])     // spin phase, striation, fade
+		SHADER_PARAMETER(uint32, NumStorms)
 		SHADER_PARAMETER(uint32, TornadoDebug)
 	END_SHADER_PARAMETER_STRUCT()
 
@@ -480,6 +485,20 @@ FScreenPassTexture FAerosCloudViewExtension::Render_RenderThread(FRDGBuilder& Gr
 		DataParams.TornadoD[Ti] = DataParams.TornadoE[Ti] = DataParams.TornadoF[Ti] = FVector4f(0.f, 0.f, 0.f, 0.f);
 	}
 	DataParams.TornadoDebug = CVarTornadoDebug.GetValueOnRenderThread() > 0 ? 1u : 0u;
+	DataParams.NumStorms = 0;
+	for (const FAerosCloudStorm& Sw : Data.Storms)
+	{
+		if (DataParams.NumStorms >= 4u || Sw.Fade <= 0.f) continue;
+		const uint32 Si = DataParams.NumStorms++;
+		DataParams.StormA[Si] = FVector4f(Sw.UpdraftKm, Sw.BaseKm);
+		DataParams.StormB[Si] = FVector4f(Sw.TopKm, Sw.TowerRadiusKm, Sw.LeanKm.X, Sw.LeanKm.Y);
+		DataParams.StormC[Si] = FVector4f(Sw.WallKm.X, Sw.WallKm.Y, Sw.WallRadiusKm, Sw.Rotation);
+		DataParams.StormD[Si] = FVector4f(Sw.SpinPhase, Sw.Striation, Sw.Fade, 0.f);
+	}
+	for (uint32 Si = DataParams.NumStorms; Si < 4u; ++Si)
+	{
+		DataParams.StormA[Si] = DataParams.StormB[Si] = DataParams.StormC[Si] = DataParams.StormD[Si] = FVector4f(0.f, 0.f, 0.f, 0.f);
+	}
 	FNoiseParameters NoiseParams;
 	NoiseParams.ShapeNoise = GraphBuilder.RegisterExternalTexture(ShapeNoiseRT);
 	NoiseParams.DetailNoise = GraphBuilder.RegisterExternalTexture(DetailNoiseRT);
