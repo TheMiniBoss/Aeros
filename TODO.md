@@ -63,6 +63,16 @@ Pas encore fait :
 
 - [ ] Système d'anticyclones et de dépressions : centres de haute et basse pression qui naissent, se déplacent avec le courant d'altitude et meurent ; vent qui tourne autour (sens horaire autour d'un anticyclone dans l'hémisphère nord), air qui descend et s'assèche sous un anticyclone (ciel clair, brouillard ou stratus sous l'inversion l'hiver), air qui monte dans une dépression avec ses fronts (chaud : Cs -> As -> Ns ; froid : Cb, averses ; occlusion). Aujourd'hui le forçage de grande échelle est un scénario fixe (`FAerosSynopticState`), sans centres de pression qui bougent.
 
+## Éclairs
+
+- [ ] Les éclairs doivent éclairer l'intérieur des nuages, pas seulement autour du canal : le nuage s'allume de l'intérieur (diffusion dans le volume, plus diffus et plus large qu'aujourd'hui), y compris la base et l'enclume. Aujourd'hui 8 éclairs au plus éclairent le rendu maison, avec une lueur locale autour du point d'impact.
+- [ ] D'autres types d'éclairs :
+  - éclair de nappe : un nuage entier qui s'illumine sans canal visible (éclair caché dans le nuage ou au loin) ;
+  - intranuageux : déjà là (lueur dans le nuage, parfois « rampant » sous l'enclume), à revoir avec l'éclairage du volume ;
+  - internuageux : canal qui saute d'un nuage à un autre (de la tour vers un nuage voisin) ;
+  - extranuageux (nuage-air) : canal qui sort du nuage et finit dans l'air clair, sans toucher le sol.
+  Tous déterministes (même graine = mêmes éclairs, pour le multijoueur), proportions selon le type d'orage.
+
 ## Radar et interface
 
 - [ ] Mode libre : radar plus zoomé par défaut.
