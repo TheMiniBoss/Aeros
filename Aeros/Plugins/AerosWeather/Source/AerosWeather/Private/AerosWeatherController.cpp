@@ -100,6 +100,13 @@ void AAerosWeatherController::UpdateCustomClouds(UAerosWeatherSubsystem* Sub, fl
 	if (UAerosCloudManager* Clouds = Sub->GetCloudManager())
 	{
 		P.ShapeMap = Res(Clouds->GetCloudShapeMap());
+		P.LayerMapA = Res(Clouds->GetLayerMapA());
+		P.LayerMapB = Res(Clouds->GetLayerMapB());
+		if (FAerosSnapshotPtr WindSnap = Sub->GetSnapshot())
+		{
+			const FVector W = FAerosSnapshot::SimToWorldDir(WindSnap->Synoptic.Wind500.X, WindSnap->Synoptic.Wind500.Y).GetSafeNormal2D();
+			if (!W.IsNearlyZero()) P.HighWindDir = FVector2f(float(W.X), float(W.Y));
+		}
 		P.VolumePrev = Res(Clouds->GetCloudVolume(0));
 		P.VolumeCur = Res(Clouds->GetCloudVolume(1));
 		const FVector4 RP = Clouds->GetCloudVolumeRect(0);

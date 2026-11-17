@@ -3,6 +3,7 @@
 #include "Core/AerosSimulation.h"
 #include "Core/AerosPhysics.h"
 #include "Core/AerosSnapshot.h"
+#include "Core/AerosCloudTypes.h"
 #include "Async/ParallelFor.h"
 #include "HAL/PlatformTime.h"
 #include "ProfilingDebugging/CpuProfilerTrace.h"
@@ -227,6 +228,7 @@ FAerosCell FAerosSimulation::MakeBackgroundCell(float Xm, float Ym) const
 	C.U850 = Synoptic.Wind850.X;    C.V850 = Synoptic.Wind850.Y;
 	C.U500 = Synoptic.Wind500.X;    C.V500 = Synoptic.Wind500.Y;
 	C.Tg = C.T;
+	C.UpperRH = FMath::Clamp(0.4f + 8.f * Synoptic.LargeScaleAscent, 0.15f, 1.2f);
 	C.StormU = (C.Us + C.U850 + C.U500) / 3.f;
 	C.StormV = (C.Vs + C.V850 + C.V500) / 3.f;
 	return C;
@@ -619,13 +621,14 @@ void FAerosSimulation::StepDynamics(float Dt)
 				if (MakeBilin(I - Src.U500 * S, J - Src.V500 * S, B))
 				{
 					C.T500 = Get(B, &FAerosCell::T500);
+					C.UpperRH = Get(B, &FAerosCell::UpperRH);
 					C.U500 = Get(B, &FAerosCell::U500); C.V500 = Get(B, &FAerosCell::V500);
 					C.Ash = Get(B, &FAerosCell::Ash);
 				}
 				else
 				{
 					const FAerosCell& G0 = Background();
-					C.T500 = G0.T500; C.U500 = G0.U500; C.V500 = G0.V500; C.Ash = 0.f;
+					C.T500 = G0.T500; C.U500 = G0.U500; C.V500 = G0.V500; C.Ash = 0.f; C.UpperRH = G0.UpperRH;
 				}
 				// Storm group: clouds, rain and convection move with the storm motion.
 				// Monotone cubic keeps compact storm cells from smearing out (bilinear is too diffusive).
@@ -1306,16 +1309,34 @@ void FAerosSimulation::ColumnPhysics(int32 I, int32 J, FAerosCell& C, float Dt) 
 		}
 	}
 
-	// ---- 9. Clouds, visibility, phenomenon -------------------------------------------
+	// ---- 9. Clouds by layer, visibility, phenomenon --------------------------------------
 	const float RH850 = RelativeHumidity(C.T850, C.Q850, 850.f);
-	float Cover = FMath::Max(SmoothStep01((RH850 - 0.65f) / 0.35f) * 0.9f, 1.f - FMath::Exp(-C.Cloud / 0.15f));
-	if (HBL > 1000.f && C.LCL < HBL + 300.f && C.RH > 0.45f) Cover = FMath::Max(Cover, 0.3f); // fair-weather cumulus
-	Cover = FMath::Max(Cover, SmoothStep01(C.Conv / 0.3f));
-	C.CloudCover = FMath::Clamp(Cover, 0.f, 1.f);
-	const bool bStratiform = RH850 > 0.9f && C.Conv < 0.2f;
-	C.CloudBase = FMath::Clamp(bStratiform ? FMath::Min(C.LCL, 1200.f) : C.LCL, 100.f, 4000.f);
-	C.CloudTop = C.Conv > 0.05f ? Lerp(C.CloudBase + 2000.f, FMath::Max(C.EL, C.CloudBase + 2000.f), SmoothStep01(C.Conv / 0.5f))
-	                            : (bStratiform ? 4500.f : C.CloudBase + 800.f + 1200.f * C.CloudCover);
+	{
+		// Upper-tropospheric humidity (w.r.t. ice): moistened by large-scale ascent (fronts, lows) and by
+		// thunderstorm anvils, dried by subsidence; the 500 hPa wind carries it far ahead (cirrus before a front)
+		float Target = FMath::Clamp(0.4f + 8.f * W850, 0.15f, 1.2f);
+		if (C.Conv > 0.3f && C.EL > 8000.f) Target = FMath::Max(Target, 1.15f);
+		const float Tau = Target > C.UpperRH ? 3600.f : 3.f * 3600.f;
+		C.UpperRH += (Target - C.UpperRH) * FMath::Min(Dt / Tau, 1.f);
+	}
+	{
+		// Every genus under its own conditions, at its own height (Core/AerosCloudTypes.h)
+		Aeros::CloudTypes::FColumn Col;
+		Col.T = C.T; Col.RH = C.RH; Col.T850 = C.T850; Col.RH850 = RH850; Col.T500 = C.T500;
+		Col.LCL = C.LCL; Col.BLTop = HBL; Col.SurfaceHeatFlux = Hs; Col.CAPE = C.CAPE; Col.Conv = C.Conv;
+		Col.LapseRate75 = C.LapseRate75; Col.Ascent = W850; Col.Wind = Wind; Col.PrecipRate = C.PrecipRate; Col.UpperRH = C.UpperRH;
+		const float ConvBase = FMath::Clamp(C.LCL, 100.f, 4000.f);
+		Col.ConvTop = Lerp(ConvBase + 2000.f, FMath::Max(C.EL, ConvBase + 2000.f), SmoothStep01(C.Conv / 0.5f));
+		const Aeros::CloudTypes::FLayers L = Aeros::CloudTypes::Diagnose(Col);
+		// The low layer is also filled by condensate left without a genus (decaying convection, stratiform rain)
+		const float Condensate = (1.f - FMath::Exp(-C.Cloud / 0.15f)) * (1.f - SmoothStep01(C.Conv / 0.3f));
+		C.CloudCover = FMath::Clamp(FMath::Max(L.Low.Cover, Condensate), 0.f, 1.f);
+		C.CloudBase = FMath::Clamp(L.Low.Base, 80.f, 4000.f);
+		C.CloudTop = FMath::Max(L.Low.Top, C.CloudBase + 200.f);
+		C.LowForm = Condensate > L.Low.Cover ? Lerp(L.Low.Form, 0.f, SmoothStep01((Condensate - L.Low.Cover) / 0.3f)) : L.Low.Form;
+		C.MidCover = L.Mid.Cover; C.MidBase = L.Mid.Base; C.MidTop = L.Mid.Top; C.MidForm = L.Mid.Form;
+		C.HighCover = L.High.Cover; C.HighBase = L.High.Base; C.HighTop = L.High.Top; C.HighForm = L.High.Form;
+	}
 
 	float Vis = 30000.f;
 	const float Spread = C.T - C.Td;
@@ -2341,6 +2362,9 @@ void FAerosSimulation::FillSnapshot(FAerosSnapshot& Out) const
 		S.Us = C.Us + C.Uo; S.Vs = C.Vs + C.Vo; S.U850 = C.U850; S.V850 = C.V850;
 		S.Visibility = C.Visibility;
 		S.CloudCover = C.CloudCover; S.CloudBase = C.CloudBase; S.CloudTop = C.CloudTop; S.CloudWater = C.Cloud;
+		S.LowForm = C.LowForm;
+		S.MidCover = C.MidCover; S.MidBase = C.MidBase; S.MidTop = C.MidTop; S.MidForm = C.MidForm;
+		S.HighCover = C.HighCover; S.HighBase = C.HighBase; S.HighTop = C.HighTop; S.HighForm = C.HighForm;
 		S.PrecipRate = C.PrecipRate; S.Hail = C.Hail; S.DBZ = C.DBZ; S.Lightning = C.Lightning;
 		S.Conv = C.Conv; S.W = C.W; S.Meso = C.Meso;
 		S.CAPE = C.CAPE; S.CIN = C.CIN; S.LCL = C.LCL; S.LFC = C.LFC; S.EL = C.EL; S.FZL = C.FZL; S.LI = C.LI;

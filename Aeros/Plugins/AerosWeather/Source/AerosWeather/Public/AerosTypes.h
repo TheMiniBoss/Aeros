@@ -60,6 +60,13 @@ enum class EAerosStormType : uint8
 	Supercell   UMETA(DisplayName = "Supercell"),
 };
 
+/** Cloud genus (WMO), see Core/AerosCloudTypes.h for the conditions each one forms under. */
+UENUM(BlueprintType)
+enum class EAerosCloudGenus : uint8
+{
+	None, Cumulus, Stratus, Stratocumulus, Nimbostratus, Altocumulus, Altostratus, Cirrus, Cirrostratus, Cirrocumulus, Cumulonimbus
+};
+
 /** Life stage of a thunderstorm. */
 UENUM(BlueprintType)
 enum class EAerosStormStage : uint8
@@ -257,7 +264,19 @@ struct AEROSWEATHER_API FAerosWeatherSample
 	UPROPERTY(BlueprintReadOnly, Category = "Aeros|Surface") float Visibility = 20000.f;    // m
 
 	// Clouds and precipitation
+	/** Fraction of the sky covered, all layers together (0-1). */
 	UPROPERTY(BlueprintReadOnly, Category = "Aeros|Clouds") float CloudCover = 0.f;         // 0-1
+	/** Clouds by layer (Core/AerosCloudTypes.h): genus and cover of the low (< 2 km), middle (2-7 km) and high (ice) layers. */
+	UPROPERTY(BlueprintReadOnly, Category = "Aeros|Clouds") EAerosCloudGenus LowCloud = EAerosCloudGenus::None;
+	UPROPERTY(BlueprintReadOnly, Category = "Aeros|Clouds") EAerosCloudGenus MidCloud = EAerosCloudGenus::None;
+	UPROPERTY(BlueprintReadOnly, Category = "Aeros|Clouds") EAerosCloudGenus HighCloud = EAerosCloudGenus::None;
+	UPROPERTY(BlueprintReadOnly, Category = "Aeros|Clouds") float LowCloudCover = 0.f;
+	UPROPERTY(BlueprintReadOnly, Category = "Aeros|Clouds") float MidCloudCover = 0.f;
+	UPROPERTY(BlueprintReadOnly, Category = "Aeros|Clouds") float HighCloudCover = 0.f;
+	UPROPERTY(BlueprintReadOnly, Category = "Aeros|Clouds") float MidCloudBase = 3000.f;    // m AGL
+	UPROPERTY(BlueprintReadOnly, Category = "Aeros|Clouds") float HighCloudBase = 8000.f;   // m AGL
+	/** Cumulus species from its depth: 0 humilis, 1 mediocris, 2 congestus. */
+	UPROPERTY(BlueprintReadOnly, Category = "Aeros|Clouds") int32 CumulusSpecies = 0;
 	UPROPERTY(BlueprintReadOnly, Category = "Aeros|Clouds") float CloudBase = 1500.f;       // m AGL
 	UPROPERTY(BlueprintReadOnly, Category = "Aeros|Clouds") float CloudTop = 2000.f;        // m AGL
 	UPROPERTY(BlueprintReadOnly, Category = "Aeros|Clouds") float CloudWater = 0.f;         // kg/m2

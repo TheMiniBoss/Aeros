@@ -305,8 +305,8 @@ void FAerosCloudVolume::Build(const FAerosSnapshot& Snap, const FAerosCloudVolum
 				auto Mix = [&](float A00, float A10, float A01, float A11) { return A00 * W00 + A10 * W10 + A01 * W01 + A11 * W11; };
 				Conv = FMath::Clamp(Mix(C00.Conv, C10.Conv, C01.Conv, C11.Conv), 0.f, 1.f);
 				const float Cover = Mix(C00.CloudCover, C10.CloudCover, C01.CloudCover, C11.CloudCover);
-				// Stratiform deck only for a really overcast, non-convective sky (nimbostratus / stratus)
-				StratDensity = 0.5f * Smooth(0.7f, 0.95f, Cover) * (1.f - Smooth(0.1f, 0.25f, Conv));
+				// Stratiform decks (St, Sc, Ns) are drawn by the renderer's low layer (Core/AerosCloudTypes.h)
+				StratDensity = 0.f * Cover;
 				if (StratDensity > 0.f)
 				{
 					// Heights above the ground: the deck follows the terrain (orographic)

@@ -63,6 +63,9 @@ namespace AerosCloudRenderInternal
 	BEGIN_SHADER_PARAMETER_STRUCT(FCloudDataParameters, )
 		SHADER_PARAMETER_RDG_TEXTURE(Texture2D, WeatherMap)
 		SHADER_PARAMETER_RDG_TEXTURE(Texture2D, ShapeMap)
+		SHADER_PARAMETER_RDG_TEXTURE(Texture2D, LayerMapA)
+		SHADER_PARAMETER_RDG_TEXTURE(Texture2D, LayerMapB)
+		SHADER_PARAMETER(FVector2f, HighWindDir)
 		SHADER_PARAMETER_RDG_TEXTURE(Texture3D, VolumePrev)
 		SHADER_PARAMETER_RDG_TEXTURE(Texture3D, VolumeCur)
 		SHADER_PARAMETER_SAMPLER(SamplerState, DataSampler)
@@ -458,6 +461,9 @@ FScreenPassTexture FAerosCloudViewExtension::Render_RenderThread(FRDGBuilder& Gr
 	FCloudDataParameters DataParams;
 	DataParams.WeatherMap = RegisterOr(GraphBuilder, Data.WeatherMap, TEXT("AerosClouds.WeatherMap"), false);
 	DataParams.ShapeMap = RegisterOr(GraphBuilder, Data.ShapeMap, TEXT("AerosClouds.ShapeMap"), false);
+	DataParams.LayerMapA = RegisterOr(GraphBuilder, Data.LayerMapA, TEXT("AerosClouds.LayerMapA"), false);
+	DataParams.LayerMapB = RegisterOr(GraphBuilder, Data.LayerMapB, TEXT("AerosClouds.LayerMapB"), false);
+	DataParams.HighWindDir = Data.HighWindDir;
 	DataParams.VolumePrev = RegisterOr(GraphBuilder, Data.VolumePrev, TEXT("AerosClouds.VolumePrev"), true);
 	DataParams.VolumeCur = RegisterOr(GraphBuilder, Data.VolumeCur, TEXT("AerosClouds.VolumeCur"), true);
 	DataParams.DataSampler = TStaticSamplerState<SF_Bilinear, AM_Clamp, AM_Clamp, AM_Clamp>::GetRHI();

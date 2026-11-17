@@ -58,6 +58,9 @@ struct FAerosCloudRenderParams
 {
 	FTextureResource* WeatherMap = nullptr;   // RGBA: cover, base / 5 km, top / 16 km, rain
 	FTextureResource* ShapeMap = nullptr;     // RGBA: anvil cover, updraft, gust, convection
+	FTextureResource* LayerMapA = nullptr;    // RGBA: mid cover, mid base / 10 km, mid form (As 0 .. Ac 1), low form (St 0 .. Sc 0.5 .. Cu 1)
+	FTextureResource* LayerMapB = nullptr;    // RGBA: high cover, high base / 16 km, high form (Cs 0 .. Ci 0.5 .. Cc 1), mid top / 10 km
+	FVector2f HighWindDir = FVector2f(1.f, 0.f);   // world xy, unit: cirrus streaks along the upper wind
 	FTextureResource* VolumePrev = nullptr;   // RG8 voxel grids (R density, G darkness / rain)
 	FTextureResource* VolumeCur = nullptr;
 	FVector4f DomainCm = FVector4f(0.f, 0.f, 32000000.f, 32000000.f);   // xy centre, zw size (cm)

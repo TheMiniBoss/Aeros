@@ -38,6 +38,11 @@ public:
 	void Tick(float DeltaTime);
 
 	UTexture2D* GetWeatherMap() const { return WeatherMap; }
+	/** Cloud layers (Core/AerosCloudTypes.h), same grid as the weather map. A: mid cover, mid base (/10 km ASL),
+	 *  mid form (0 As .. 1 Ac), low form (0 St .. 0.5 Sc .. 1 Cu). B: high cover, high base (/16 km ASL), high
+	 *  form (0 Cs .. 0.5 Ci .. 1 Cc), mid top (/10 km ASL). */
+	UTexture2D* GetLayerMapA() const { return LayerMapA; }
+	UTexture2D* GetLayerMapB() const { return LayerMapB; }
 	UTexture2D* GetSurfaceMap() const { return SurfaceMap; }
 	/** RGBA8: R flood depth (sqrt, 0-5 m), G dust (0-50 g/m2), B ash on ground (sqrt, 0-100 mm), A sea anomaly (-5..5 m). */
 	UTexture2D* GetHazardMap() const { return HazardMap; }
@@ -110,6 +115,10 @@ private:
 	UPROPERTY(Transient) TObjectPtr<UTexture2D> SurfaceMap;
 	UPROPERTY(Transient) TObjectPtr<UTexture2D> HazardMap;
 	UPROPERTY(Transient) TObjectPtr<UTexture2D> ShapeMap;
+	UPROPERTY(Transient) TObjectPtr<UTexture2D> LayerMapA;
+	UPROPERTY(Transient) TObjectPtr<UTexture2D> LayerMapB;
+	TArray<FColor> LayerPixelsA;
+	TArray<FColor> LayerPixelsB;
 	UPROPERTY(Transient) TObjectPtr<UVolumeTexture> CloudVolumes[2];
 	UPROPERTY(Transient) TObjectPtr<UMaterialParameterCollection> Collection;
 

@@ -58,6 +58,10 @@ void UAerosCloudManager::EnsureTextures(int32 NX, int32 NY)
 	SurfaceMap = Make(TEXT("AerosSurfaceMap"));
 	HazardMap = Make(TEXT("AerosHazardMap"));
 	ShapeMap = Make(TEXT("AerosCloudShapeMap"));
+	LayerMapA = Make(TEXT("AerosCloudLayerMapA"));
+	LayerMapB = Make(TEXT("AerosCloudLayerMapB"));
+	LayerPixelsA.SetNumZeroed(NX * NY);
+	LayerPixelsB.SetNumZeroed(NX * NY);
 	WeatherPixels.SetNumZeroed(NX * NY);
 	SurfacePixels.SetNumZeroed(NX * NY);
 	HazardPixels.SetNumZeroed(NX * NY);
@@ -295,12 +299,19 @@ void UAerosCloudManager::UpdateTextures()
 			const float Top = Ground + L(P.CloudTop, C.CloudTop);
 			const float Rain = L(P.PrecipRate, C.PrecipRate);
 			WeatherPixels[Row + I] = FColor(Byte(Cover), Byte(Base / 5000.f), Byte(Top / 16000.f), Byte(FMath::Sqrt(Rain / 100.f)));
+			// Middle and high layers, heights above sea level like the weather map
+			LayerPixelsA[Row + I] = FColor(Byte(L(P.MidCover, C.MidCover)), Byte((Ground + L(P.MidBase, C.MidBase)) / 10000.f),
+				Byte(L(P.MidForm, C.MidForm)), Byte(L(P.LowForm, C.LowForm)));
+			LayerPixelsB[Row + I] = FColor(Byte(L(P.HighCover, C.HighCover)), Byte((Ground + L(P.HighBase, C.HighBase)) / 16000.f),
+				Byte(L(P.HighForm, C.HighForm)), Byte((Ground + L(P.MidTop, C.MidTop)) / 10000.f));
 			SurfacePixels[Row + I] = FColor(Byte(L(P.Wet, C.Wet)), Byte(L(P.Snow, C.Snow) / 50.f), Byte(L(P.HailCover, C.HailCover)), Byte((L(P.T, C.T) + 40.f) / 90.f));
 			HazardPixels[Row + I] = FColor(Byte(FMath::Sqrt(L(P.Flood, C.Flood) / 5.f)), Byte(L(P.Dust, C.Dust) / 50.f),
 				Byte(FMath::Sqrt(L(P.AshDepth, C.AshDepth) / 100.f)), Byte(0.5f + L(P.Eta, C.Eta) / 10.f));
 		}
 	}
 	Upload(WeatherMap, WeatherPixels, NX, NY);
+	Upload(LayerMapA, LayerPixelsA, NX, NY);
+	Upload(LayerMapB, LayerPixelsB, NX, NY);
 	Upload(SurfaceMap, SurfacePixels, NX, NY);
 	Upload(HazardMap, HazardPixels, NX, NY);
 

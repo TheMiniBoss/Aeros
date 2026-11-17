@@ -1,6 +1,7 @@
 // Copyright Aeros. All Rights Reserved.
 
 #include "Core/AerosSnapshot.h"
+#include "Core/AerosCloudTypes.h"
 
 bool FAerosSnapshot::WorldToGrid(const FVector& World, float& OutGX, float& OutGY) const
 {
@@ -67,7 +68,20 @@ FAerosWeatherSample FAerosSnapshot::Sample(const FVector& World) const
 	S.Wind850 = SimToWorldDir(AEROS_BL(U850), AEROS_BL(V850));
 	S.Visibility = AEROS_BL(Visibility);
 
-	S.CloudCover = AEROS_BL(CloudCover);
+	{
+		// Layers and genera (Core/AerosCloudTypes.h); CloudCover is the sky covered by all of them
+		Aeros::CloudTypes::FLayers L;
+		L.Low = { AEROS_BL(CloudCover), AEROS_BL(CloudBase), AEROS_BL(CloudTop), AEROS_BL(LowForm) };
+		L.Mid = { AEROS_BL(MidCover), AEROS_BL(MidBase), AEROS_BL(MidTop), AEROS_BL(MidForm) };
+		L.High = { AEROS_BL(HighCover), AEROS_BL(HighBase), AEROS_BL(HighTop), AEROS_BL(HighForm) };
+		S.LowCloud = Aeros::CloudTypes::LowGenus(L, AEROS_BL(Conv));
+		S.MidCloud = Aeros::CloudTypes::MidGenus(L);
+		S.HighCloud = Aeros::CloudTypes::HighGenus(L);
+		S.LowCloudCover = L.Low.Cover; S.MidCloudCover = L.Mid.Cover; S.HighCloudCover = L.High.Cover;
+		S.MidCloudBase = L.Mid.Base; S.HighCloudBase = L.High.Base;
+		S.CumulusSpecies = Aeros::CloudTypes::CumulusSpecies(L.Low.Top - L.Low.Base);
+		S.CloudCover = 1.f - (1.f - L.Low.Cover) * (1.f - L.Mid.Cover) * (1.f - L.High.Cover);
+	}
 	S.CloudBase = AEROS_BL(CloudBase);
 	S.CloudTop = AEROS_BL(CloudTop);
 	S.CloudWater = AEROS_BL(CloudWater);

@@ -360,6 +360,10 @@ void AAerosDemoHUD::DrawSimple(UAerosWeatherSubsystem* Sub, const FAerosWeatherS
 			S.HailDiameter > 0.f ? *FString::Printf(TEXT(", gr\u00EAlons %.0f mm"), S.HailDiameter) : TEXT(""));
 	Y = Line(X, Y, Precip, S.PrecipitationRate > 10.f ? Warn : FLinearColor::White);
 	Y = Line(X, Y, FString::Printf(TEXT("Nuages %.0f%%   visibilit\u00E9 %.1f km"), S.CloudCover * 100.f, S.Visibility * 0.001f), Dim);
+	{
+		const FString Above = AerosStormNames::CloudsAboveFr(S);
+		if (!Above.IsEmpty()) Y = Line(X, Y, Above, Dim);
+	}
 	Y += 6.f;
 	Y = Line(X, Y, TEXT("CE QUI SE PASSE"), Accent);
 	Y = Paragraph(X, Y, W, Explanation, FLinearColor::White);

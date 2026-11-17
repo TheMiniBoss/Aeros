@@ -262,6 +262,14 @@ void AAerosDemoGameMode::BuildScene()
 		if (Controller)
 		{
 			Controller->Settings = DemoSettings;
+			// Test options: start in another air mass (-AerosStartScenario=N, EAerosScenario index), day, hour
+			int32 StartScenario = -1;
+			if (FParse::Value(FCommandLine::Get(), TEXT("AerosStartScenario="), StartScenario))
+			{
+				Controller->Settings.Scenario = static_cast<EAerosScenario>(FMath::Clamp(StartScenario, 0, int32(EAerosScenario::Monsoon)));
+			}
+			FParse::Value(FCommandLine::Get(), TEXT("AerosStartDay="), Controller->Settings.StartDayOfYear);
+			FParse::Value(FCommandLine::Get(), TEXT("AerosStartHour="), Controller->Settings.StartHour);
 			Controller->CloudMaterial = CloudMat;
 			Controller->FinishSpawning(FTransform::Identity);
 		}

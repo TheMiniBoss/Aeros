@@ -611,9 +611,18 @@ void AAerosDemoPawn::BuildTour()
 	S.Duration = 14.f;
 	S.Enter = [this, Sub]()
 	{
-		Sub->SetScenario(EAerosScenario::SupercellOutbreak);
+		// Test options (cloud genera): -AerosTourScenario=N (EAerosScenario index), -AerosTourHour=H,
+		// -AerosTourLookAlt=km (height of the point looked at, 10 km away; 2 by default)
+		int32 ScenarioIndex = int32(EAerosScenario::SupercellOutbreak);
+		FParse::Value(FCommandLine::Get(), TEXT("AerosStartScenario="), ScenarioIndex);
+		FParse::Value(FCommandLine::Get(), TEXT("AerosTourScenario="), ScenarioIndex);
+		Sub->SetScenario(static_cast<EAerosScenario>(FMath::Clamp(ScenarioIndex, 0, int32(EAerosScenario::Monsoon))));
+		float Hour = -1.f;
+		if (FParse::Value(FCommandLine::Get(), TEXT("AerosTourHour="), Hour)) Sub->SetDateTime(Sub->GetDateTime().DayOfYear, Hour);
 		Sub->SetTimeScale(600.f);
-		TeleportLookAt(FVector(0, 0, 40000.0), FVector(1000000.0, 0, 200000.0));
+		float LookAltKm = 2.f;
+		FParse::Value(FCommandLine::Get(), TEXT("AerosTourLookAlt="), LookAltKm);
+		TeleportLookAt(FVector(0, 0, 40000.0), FVector(1000000.0, 0, LookAltKm * 100000.0));
 	};
 	Tour.Add(S);
 

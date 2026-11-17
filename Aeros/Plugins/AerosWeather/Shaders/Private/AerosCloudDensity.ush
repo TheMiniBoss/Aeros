@@ -9,6 +9,9 @@
 
 Texture2D WeatherMap;     // R cover, G base (0-5 km), B top (0-16 km), A precipitation
 Texture2D ShapeMap;       // R anvil cover, G updraft, B gust front / shelf, A convective activity
+Texture2D LayerMapA;      // R mid cover, G mid base (/10 km), B mid form (0 As .. 1 Ac), A low form (0 St .. 0.5 Sc .. 1 Cu)
+Texture2D LayerMapB;      // R high cover, G high base (/16 km), B high form (0 Cs .. 0.5 Ci .. 1 Cc), A mid top (/10 km)
+float2 HighWindDir;       // world xy, unit: cirrus streaks lie along the upper wind
 Texture3D VolumePrev;     // voxel storm anatomy (R cloud, G rain / dark), previous build
 Texture3D VolumeCur;      // current build
 SamplerState DataSampler; // bilinear clamp: the simulation is always read filtered
@@ -494,6 +497,67 @@ float AerosStormStriation(float3 PosKm, float DistKm)
 	return F;
 }
 
+// Middle layer (2-7 km): altostratus (form 0), a thick grey sheet with a soft, slowly undulating base; altocumulus
+// (form 1), a thin layer of rounded cells ~0.5 km wide ("galets") with gaps of sky between them.
+float AerosMidDensity(float3 P, float AltKm, float4 La, float4 Lb, float Lod)
+{
+	const float Cover = La.r;
+	const float Base = La.g * 10.0;
+	const float Top = max(Lb.a * 10.0, Base + 0.25);
+	if (Cover < 1e-3 || AltKm < Base - 0.3 || AltKm > Top + 0.1)
+	{
+		return 0.0;
+	}
+	const float Form = La.b;
+	const float h = saturate((AltKm - Base) / (Top - Base));
+	// Base warped by a broad noise (+-0.3 km): an undulating underside, not a ruled plane
+	const float Warp = ShapeNoise.SampleLevel(NoiseSampler, P / 9.0 + float3(0.61, 0.17, 0.0), 3.0).r;
+	const float hw = saturate((AltKm - (Base + (Warp - 0.5) * 0.6)) / (Top - Base));
+	float As = 0.0;
+	if (Form < 0.95)
+	{
+		const float Mottle = ShapeNoise.SampleLevel(NoiseSampler, P / 5.0, 2.0 + Lod * 0.3).r;
+		As = smoothstep(0.0, 0.2, hw) * (1.0 - smoothstep(0.75, 1.0, h)) * saturate(Cover * 1.4 - (1.0 - Mottle) * 0.5);
+	}
+	float Ac = 0.0;
+	if (Form > 0.05)
+	{
+		// Cells flattened vertically (0.5 km wide, a few hundred metres thick), slight rows across the wind
+		const float3 Q = float3(P.xy / 4.0, P.z / 1.5);
+		const float Cells = ShapeNoise.SampleLevel(NoiseSampler, Q, 1.0 + Lod * 0.5).g;
+		const float Round = 1.0 - pow(abs(hw * 2.0 - 1.0), 2.0);
+		Ac = saturate((Cells * Round - (1.0 - Cover * 0.85)) * 3.0);
+	}
+	return lerp(As * 0.06, Ac * 0.35, Form);
+}
+
+// High layer (ice, 6-12 km): cirrus (form 0.5) as fibres stretched along the upper wind, cirrostratus (form 0)
+// as a faint veil, cirrocumulus (form 1) as tiny grains. Thin: the sun shows through (optical depth < 1).
+float AerosHighDensity(float3 P, float AltKm, float4 Lb, float Lod)
+{
+	const float Cover = Lb.r;
+	const float Base = Lb.g * 16.0;
+	const float Form = Lb.b;
+	const float Thick = lerp(1.5, 0.4, saturate(Form * 2.0 - 1.0)) * lerp(1.0, 0.7, saturate(Form * 2.0));
+	if (Cover < 1e-3 || AltKm < Base - 0.2 || AltKm > Base + Thick + 0.2)
+	{
+		return 0.0;
+	}
+	const float h = saturate((AltKm - Base) / Thick);
+	const float Profile = smoothstep(0.0, 0.3, h) * (1.0 - smoothstep(0.6, 1.0, h));
+	// Coordinates along / across the upper wind: fibres 10-20 km long, a few hundred metres wide
+	const float2 W = HighWindDir;
+	const float Along = dot(P.xy, W), Across = dot(P.xy, float2(-W.y, W.x));
+	const float Patch = ShapeNoise.SampleLevel(NoiseSampler, float3(Along / 40.0, Across / 25.0, 0.3), 3.0).r;
+	const float Fibre = ShapeNoise.SampleLevel(NoiseSampler, float3(Along / 24.0, Across / 2.5, AltKm / 3.0 + Along * 0.01), 0.5 + Lod * 0.5).r;
+	const float Ci = saturate((Fibre * 0.7 + Patch * 0.5) - (1.15 - Cover)) * 2.0;
+	const float Cs = saturate(Cover * 1.2 - (1.0 - Patch) * 0.6);
+	const float Grains = ShapeNoise.SampleLevel(NoiseSampler, P / 1.2, Lod * 0.5).b;
+	const float Cc = saturate((Grains * (0.6 + 0.6 * Patch)) - (1.1 - Cover * 0.6)) * 3.0;
+	float D = Form < 0.5 ? lerp(Cs * 0.004, Ci * 0.012, Form * 2.0) : lerp(Ci * 0.012, Cc * 0.02, Form * 2.0 - 1.0);
+	return D * Profile;
+}
+
 FAerosCloudSample AerosCloudDensity(float3 PosKm, float DistKm, float Octaves)
 {
 	FAerosCloudSample Out;
@@ -509,6 +573,8 @@ FAerosCloudSample AerosCloudDensity(float3 PosKm, float DistKm, float Octaves)
 	const float2 MapUV = (XYCm - DomainCm.xy) / DomainCm.zw + 0.5;
 	const float4 Wx = WeatherMap.SampleLevel(DataSampler, MapUV, 0);
 	const float4 Sx = ShapeMap.SampleLevel(DataSampler, MapUV, 0);
+	const float4 La = LayerMapA.SampleLevel(DataSampler, MapUV, 0);
+	const float4 Lb = LayerMapB.SampleLevel(DataSampler, MapUV, 0);
 
 	// Voxel coverage of this point (fades out over the last 12.5 % of the grid).
 	const float3 UnwarpedUVW = AerosCloudVoxelUVW(XYCm, AltKm, RectCurCm);
@@ -529,7 +595,7 @@ FAerosCloudSample AerosCloudDensity(float3 PosKm, float DistKm, float Octaves)
 	const float StormWallDens = NumStorms > 0u ? AerosStormWallDensity(PosKm) : 0.0;
 
 	// Nothing here: no 2D cloud, no rain, no anvil, no shelf, outside the voxel grid, no tornado, no wall cloud.
-	if (cover < 1e-3 && Wx.a < 1e-3 && anvilCv < 1e-3 && gust < 1e-3 && VoxIn < 1e-3 && TornadoDens <= 0.0 && StormWallDens <= 0.0)
+	if (cover < 1e-3 && Wx.a < 1e-3 && anvilCv < 1e-3 && gust < 1e-3 && VoxIn < 1e-3 && TornadoDens <= 0.0 && StormWallDens <= 0.0 && La.r < 1e-3 && Lb.r < 1e-3)
 	{
 		return Out;
 	}
@@ -572,9 +638,15 @@ FAerosCloudSample AerosCloudDensity(float3 PosKm, float DistKm, float Octaves)
 
 	// --- 2D cumulus field: 1.1 km cells, one cloud per cell with probability = cover.
 	const float towerK  = smoothstep(0.3, 0.7, conv);
-	const float cuDepth = lerp(0.6 + 1.9 * cover, topKm - baseKm, towerK);
+	const float lowForm = La.a;                                   // 0 St, 0.5 Sc, 1 Cu
+	const float cuK     = max(smoothstep(0.6, 0.9, lowForm), towerK);
+	// Cumulus depth from the simulation (humilis / mediocris / congestus), not from the cover
+	const float cuDepth = max(topKm - baseKm, 0.25);
+	// Lobes: a smooth noise (~400 m) bulging or pinching the outline at every height, so a cumulus is a
+	// cluster of bulges and towers rather than one rounded cushion
+	const float Lobe = saturate(0.5 + (ShapeNoise.SampleLevel(NoiseSampler, P / 3.0 + float3(0.21, 0.67, 0.13), ShapeMip - 0.5).r - 0.5) * 1.8);
 	float shape = -1.0;   // 1 at a cloud centre, 0 on its outline, < 0 outside
-	if (cover > 1e-3 && AltKm >= baseKm && AltKm <= baseKm + cuDepth)
+	if (cover > 1e-3 && cuK > 0.0 && AltKm >= baseKm && AltKm <= baseKm + cuDepth)
 	{
 		const float2 q = P.xy / 1.1 + float2(lowFbm - 0.5, warpY - 0.5) * 0.6;
 		const float2 qi = floor(q);
@@ -590,7 +662,8 @@ FAerosCloudSample AerosCloudDensity(float3 PosKm, float DistKm, float Octaves)
 				if (grow > 0.0 && AltKm <= topCell)
 				{
 					const float hc = saturate((AltKm - baseKm) / max(topCell - baseKm, 0.1));
-					const float side = sqrt(saturate(1.0 - hc * hc * hc));
+					// Narrowing upward (cauliflower top, not a dome on a cylinder), outline bulged by the lobes
+					const float side = sqrt(saturate(1.0 - hc * hc)) * (0.6 + 0.8 * Lobe) * (0.75 + 0.25 * smoothstep(0.0, 0.2, hc));
 					const float2 center = c + 0.2 + 0.6 * r.xy;
 					float radius = ((0.3 + 0.35 * cover) * (0.7 + 0.6 * r.x) * side + updraft * 0.4) * grow;
 					radius *= lerp(1.0, 0.75 + 0.5 * lowFbm, towerK);
@@ -606,9 +679,31 @@ FAerosCloudSample AerosCloudDensity(float3 PosKm, float DistKm, float Octaves)
 	const float farK = smoothstep(30.0, 70.0, DistKm);
 	const float cvFar = saturate(cover * 1.4 - (1.0 - lowFbm) * 0.6) * baseCut * step(AltKm, baseKm + cuDepth);
 	cv = lerp(cv, cvFar, farK);
-	float cloud = saturate((bubbles - (1.0 - cv) * 1.2 - highMod * 0.1) * 2.0 + cv * 0.6 - 0.1);
+	// Less of a solid core (it made cotton balls): the bubbles carve deeper, the core only keeps the
+	// middle of a cloud from flickering
+	float cloud = saturate((bubbles - (1.0 - cv) * 1.25 - highMod * 0.15) * 2.2 + cv * 0.4 - 0.1);
 	cloud *= lerp(smoothstep(0.25, 0.45, cv), saturate(cv * 2.0), farK);
 	cloud = saturate(cloud + FineMod * 0.7 * saturate(1.5 - cloud * 1.5) * step(1e-3, cloud));
+	cloud *= cuK;
+
+	// --- Low sheets: stratus (form 0, a uniform grey layer with a ragged base), stratocumulus (0.5, a layer
+	// broken into rolls / cells ~1.5 km wide with gaps), nimbostratus (form 0, deep, from the weather map top)
+	if (cuK < 1.0 && cover > 1e-3 && AltKm >= baseKm - 0.15 && AltKm <= topKm + 0.1)
+	{
+		const float hs = saturate((AltKm - baseKm) / max(topKm - baseKm, 0.2));
+		const float Rag = (lowFbm - 0.5) * 0.25;   // ragged base and top (+-120 m)
+		const float Layer = smoothstep(-0.05, 0.12, AltKm - baseKm - Rag) * (1.0 - smoothstep(0.8, 1.0, hs + Rag));
+		const float ScCells = ShapeNoise.SampleLevel(NoiseSampler, float3(P.xy / 12.0, P.z / 3.0), ShapeMip - 1.0).g;
+		const float ScK = saturate(1.0 - abs(lowForm - 0.5) * 4.0);   // 1 at Sc, 0 at St and Cu
+		const float StSheet = saturate(cover * 1.3 - (1.0 - lowFbm) * 0.35);
+		const float ScSheet = saturate((ScCells * 0.75 + lowFbm * 0.35) - (1.05 - cover * 0.9)) * 2.5;
+		const float Sheet = Layer * lerp(StSheet * 0.35, ScSheet * 0.5, ScK);
+		cloud = max(cloud, Sheet * (1.0 - cuK));
+	}
+
+	// --- Middle and high layers
+	const float midD = AerosMidDensity(P, AltKm, La, Lb, Lod);
+	const float highD = AerosHighDensity(P, AltKm, Lb, Lod);
 
 	// --- 2D anvil: flat top at the tropopause, ragged base and edges.
 	const float anvilBase = 12.4 - (0.5 + 2.0 * anvilCv) * (0.75 + 0.5 * lowFbm);
@@ -660,6 +755,7 @@ FAerosCloudSample AerosCloudDensity(float3 PosKm, float DistKm, float Octaves)
 	const float full2D = max(cloud, max(anvil, shelf * 0.9));
 	const float cumulusOnly = cloud * (1.0 - smoothstep(0.2, 0.4, conv));
 	float density = lerp(full2D, max(cumulusOnly, vox), VoxIn);
+	density = max(density, max(midD, highD));
 	const float rainDark = saturate(Wx.a * 1.2) * (1.0 - smoothstep(4.0, 7.0, AltKm));
 	float dark = lerp(rainDark, max(rainDark * 0.4, voxDark), VoxIn);
 	dark = lerp(dark, 1.0, saturate(rainVeil * 400.0 * (1.0 - saturate(density * 20.0))));

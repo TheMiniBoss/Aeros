@@ -49,6 +49,8 @@ Aeros/Plugins/AerosWeather/
 
 10. **Orages et tornades qui vivent** (branche `claude/storm-chaser`) : stade, enclume qui survit, types de supercellule (LP / classique / HP / LT), nuage-mur tournant et stries (`FAerosCloudStorm`), tornades qui montent EF0 -> pic -> EF0 une catégorie à la fois. Voir README (« Vie d'un orage », « Supercellules variées », « Vie » des tornades). Pas encore vu de près à l'écran.
 
+11. **Types de nuages** (branche `claude/cloud-types`, partie de `claude/storm-chaser`) : genres par couche (`Core/AerosCloudTypes.h`), humidité de haute troposphère `UpperRH`, rendu des nappes / Ac / As / Ci / Cs / Cc, cumulus moins « boule ». Spec `docs/superpowers/specs/2026-11-17-cloud-types-design.md`. Reste (espèces, nuages annexes, orographiques...) dans TODO.md.
+
 ## Règles apprises (erreurs à ne pas refaire)
 
 - Démo jouable : **pas de touches de fonction** (F1-F12, réservées au débogage du moteur), et l'interface de la démo technique reste à la démo technique.
@@ -65,6 +67,8 @@ Aeros/Plugins/AerosWeather/
 - Grille de la simulation, advection semi-lagrangienne : chaque case prend la valeur au point de départ calculé avec **sa propre** vitesse d'orage (`Src.StormU`). Une case vide avance au vent moyen : changer la vitesse d'une partie d'orage ne la fait pas dévier (essai des orages qui se scindent).
 - Tornade qui perd son orage : ne pas sauter l'âge à une valeur fixe (80 % de la vie tombait en pleine phase forte, EF0 -> EF2). `Aeros::Funnel::DecayAgeForWind`.
 - `GetStorms()` ne rend que les orages actifs ; la grille des nuages lit `GetStorms(true)` (enclumes des orages morts).
+- Changer de scénario en cours de partie ne change que le forçage : la masse d'air de départ reste des heures (18 °C dans « Tempête de neige »). Pour juger un ciel, démarrer dedans : `-AerosStartScenario=N -AerosStartDay=J`.
+- Scripts Python passés par un heredoc Bash : `\\` devient `\` et `\u00E9` devient un vrai caractère. Écrire le script avec l'outil Write, ou construire les antislashs avec `chr(92)`.
 - **Sources 100 % ASCII** (MSVC) : pas d'accent dans les `.h/.cpp`. Dans les chaînes, écrire \u00E9 (é), \u00E0 (à)... dans `TEXT("...")`. Attention : les outils Write/Edit décodent `\uXXXX` en vrai caractère. Écrire le texte avec accents puis convertir tous les non-ASCII en `\uXXXX` par un petit script Python (`chr(92)+'u%04X'`).
 - `FString::ToUpper` ne met pas les accents en majuscule (« DéGAGé ») : ne pas l'utiliser sur du texte français.
 - Git Bash convertit les arguments qui commencent par `/` en chemins Windows (`/AerosWeather/Maps/...` devient `C:/Program Files/Git/...`) : lancer Unreal depuis PowerShell.

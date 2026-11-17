@@ -345,6 +345,79 @@ namespace ChaseTests
 	}
 }
 
+// ---- Cloud genera (Core, pure C++): standalone only ----------------------------------------------
+#include "Core/AerosCloudTypes.h"
+
+namespace CloudTypeTests
+{
+	int Run()
+	{
+		using namespace Aeros::CloudTypes;
+		FAutoTestBase T;
+		auto Summer = []() { FColumn C; C.T = 28.f; C.RH = 0.5f; C.T850 = 14.f; C.RH850 = 0.4f; C.T500 = -12.f; C.LCL = 1400.f; C.BLTop = 1800.f; C.SurfaceHeatFlux = 250.f; C.CAPE = 300.f; C.Wind = 4.f; C.UpperRH = 0.4f; return C; };
+		{
+			const FColumn C = Summer();
+			const FLayers L = Diagnose(C);
+			T.TestTrue("Sunny afternoon: cumulus (fair-weather cover 15-50 %), nothing above", LowGenus(L, 0.f) == EGenus::Cumulus && L.Low.Cover > 0.15f && L.Low.Cover <= 0.5f
+				&& MidGenus(L) == EGenus::None && HighGenus(L) == EGenus::None);
+			T.TestTrue("Cumulus base at the condensation level, mediocris with some buoyancy", std::abs(L.Low.Base - 1400.f) < 1.f && CumulusSpecies(L.Low.Top - L.Low.Base) == 1);
+			FColumn Weak = C; Weak.CAPE = 30.f;
+			const FLayers LW = Diagnose(Weak);
+			T.TestTrue("Little buoyancy: cumulus humilis", CumulusSpecies(LW.Low.Top - LW.Low.Base) == 0);
+			FColumn Night = C; Night.SurfaceHeatFlux = -20.f; Night.T = 16.f;
+			T.TestTrue("No sun, no fair-weather cumulus", Diagnose(Night).Low.Cover < 0.05f);
+		}
+		{
+			FColumn C; C.T = 8.f; C.RH = 0.97f; C.T850 = 9.f; C.RH850 = 0.6f; C.LCL = 100.f; C.BLTop = 300.f; C.SurfaceHeatFlux = -30.f; C.Wind = 4.f; C.UpperRH = 0.3f;
+			const FLayers L = Diagnose(C);
+			T.TestTrue("Saturated stable layer with wind: stratus, low (base < 400 m)", LowGenus(L, 0.f) == EGenus::Stratus && L.Low.Cover > 0.5f && L.Low.Base < 400.f && L.Low.Top < 1200.f);
+			C.Wind = 0.5f;
+			T.TestTrue("Same air, calm: no stratus (fog instead)", Diagnose(C).Low.Cover < 0.1f);
+		}
+		{
+			FColumn C; C.T = 10.f; C.RH = 0.85f; C.T850 = 9.f; C.RH850 = 0.35f; C.LCL = 600.f; C.BLTop = 700.f; C.SurfaceHeatFlux = 10.f; C.Wind = 6.f; C.UpperRH = 0.3f;
+			const FLayers L = Diagnose(C);
+			T.TestTrue("Moist layer under an inversion, dry above: stratocumulus below 2 km", LowGenus(L, 0.f) == EGenus::Stratocumulus && L.Low.Cover > 0.5f && L.Low.Top <= 2000.f);
+		}
+		{
+			FColumn C; C.T = 12.f; C.RH = 0.9f; C.T850 = 8.f; C.RH850 = 0.95f; C.T500 = -18.f; C.LCL = 400.f; C.Ascent = 0.06f; C.UpperRH = 1.05f; C.Wind = 8.f;
+			const FLayers L = Diagnose(C);
+			T.TestTrue("Warm front: altostratus (thick sheet, 2-7 km) under cirrostratus", MidGenus(L) == EGenus::Altostratus && L.Mid.Cover > 0.5f
+				&& L.Mid.Base >= 2000.f && L.Mid.Top - L.Mid.Base >= 2000.f && HighGenus(L) == EGenus::Cirrostratus);
+			C.PrecipRate = 3.f;
+			const FLayers R = Diagnose(C);
+			T.TestTrue("Steady rain: nimbostratus, low base, deep (> 4 km)", LowGenus(R, 0.f) == EGenus::Nimbostratus && R.Low.Base < 2000.f && R.Low.Top > 4000.f && R.Mid.Cover < L.Mid.Cover);
+		}
+		{
+			FColumn C; C.RH850 = 0.7f; C.UpperRH = 0.6f; C.LapseRate75 = 7.5f;
+			const FLayers L = Diagnose(C);
+			T.TestTrue("Moderately moist, steep lapse rate aloft: altocumulus (2-7 km, thin)", MidGenus(L) == EGenus::Altocumulus && L.Mid.Base >= 2000.f && L.Mid.Top <= 7000.f && L.Mid.Top - L.Mid.Base < 1000.f);
+		}
+		{
+			FColumn C; C.UpperRH = 0.95f; C.RH850 = 0.3f;
+			const FLayers L = Diagnose(C);
+			T.TestTrue("Moist upper troposphere: cirrus, above 6 km", HighGenus(L) == EGenus::Cirrus && L.High.Base >= 6000.f);
+			C.LapseRate75 = 8.f;
+			T.TestTrue("Unstable upper layer: cirrocumulus", HighGenus(Diagnose(C)) == EGenus::Cirrocumulus);
+			C.T500 = -30.f;
+			FColumn Warm = C; Warm.T500 = -10.f;
+			T.TestTrue("Ice level higher in warm air", Diagnose(Warm).High.Base > Diagnose(C).High.Base);
+		}
+		{
+			FColumn C; C.T = 18.f; C.RH = 0.45f; C.T850 = 12.f; C.RH850 = 0.3f; C.UpperRH = 0.3f; C.SurfaceHeatFlux = -10.f;
+			const FLayers L = Diagnose(C);
+			T.TestTrue("Dry anticyclone at night: clear sky", L.Low.Cover < 0.05f && L.Mid.Cover < 0.05f && L.High.Cover < 0.05f);
+		}
+		{
+			// Layers stay in their floors: low top < middle base < high base
+			FColumn C = Summer(); C.RH850 = 0.75f; C.UpperRH = 0.95f; C.LapseRate75 = 7.f;
+			const FLayers L = Diagnose(C);
+			T.TestTrue("Layers ordered (low top < mid base < high base)", L.Low.Top < L.Mid.Base && L.Mid.Top <= 7000.f && L.Mid.Base < L.High.Base && L.Mid.Cover > 0.05f);
+		}
+		return T.Fails;
+	}
+}
+
 int main()
 {
 	int Fails = 0;
@@ -358,6 +431,7 @@ int main()
 	{ std::printf("Cloud noise\n"); Fails += CloudNoiseTests::Run(); }
 	{ std::printf("Flash list\n"); Fails += FlashListTests::Run(); }
 	{ std::printf("Funnel\n"); Fails += FunnelTests::Run(); }
+	{ std::printf("Cloud types\n"); Fails += CloudTypeTests::Run(); }
 	{ std::printf("Storm chaser\n"); Fails += ChaseTests::Run(); }
 	std::printf("failures: %d\n", Fails);
 	return Fails == 0 ? 0 : 1;

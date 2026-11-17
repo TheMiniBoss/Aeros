@@ -33,6 +33,31 @@ Branche de travail actuelle : `claude/clouds-v2` (rendu maison des nuages).
 - [ ] Tour d'orage très bleutée à 25 km (perspective aérienne du moteur) : à régler avec `r.AerosClouds.Haze` si besoin.
 - [x] Coût GPU du rendu maison mesuré : 2,8-3,5 ms à `Quality 2` (`-AerosTourExec=profilegpu`).
 
+## Types de nuages (branche `claude/cloud-types`)
+
+Fait (premier jet, à juger à l'écran) :
+- [x] Cumulus moins « boule » : contour bosselé par un bruit à chaque hauteur (lobes, tours), sommet en chou-fleur au lieu d'un dôme, cœur plein réduit, bords plus marqués (effet « powder »). Encore un peu granuleux, comme de la ouate ; ombres un peu bleues.
+- [x] Genres par couche, chacun dans ses conditions et à son altitude (`Core/AerosCloudTypes.h`, testé) :
+  - bas : Cu humilis / mediocris / congestus, St, Sc, Ns ;
+  - moyen : Ac, As ;
+  - haut : Ci, Cs, Cc, sur une nouvelle humidité de haute troposphère transportée par le vent de 500 hPa ;
+  - Cb déjà là (orages).
+- [x] Rendu : nappes St / Sc / Ns, As (nappe grise épaisse), Ac (galets), Ci (fibres dans le vent), Cs (voile), Cc (grains).
+- [x] Le HUD de la démo technique nomme les nuages au-dessus (« Cumulus mediocris, Altocumulus, Cirrus »).
+- [ ] Juger à l'écran les Ci / Cs / Cc et l'As vus du sol (les essais n'ont montré que des cumulus, des Ac, et le gris d'un Ns ou d'un St vus de dedans), et de haut (aucun cadrage d'avion pour les couches).
+- [ ] Cumulus : moins de grain en surface, bords ensoleillés plus nets, ombres moins bleues.
+- [ ] Le soleil ne voit pas encore les nouvelles couches dans la simulation (un As épais devrait couper le chauffage du sol et les cumulus).
+
+Pas encore fait :
+- [ ] Espèces : lenticularis (onde orographique : Ac / Sc / Cc lenticulaires sous le vent du relief, air stable et vent fort), castellanus (tourelles sur base commune, Ac / Sc / Ci), floccus (flocons à base déchiquetée, virga), fibratus / uncinus (crochets : fort cisaillement), spissatus (Ci épais, souvent reste d'enclume), fractus, nebulosus, volutus (rouleau), calvus / capillatus (stades du Cb).
+- [ ] Nuages annexes : pileus (coiffe lisse sur un Cu con / Cb), velum, pannus (lambeaux sous Ns / Cb), virga, cavum (trou dans un Ac), asperitas, fluctus (Kelvin-Helmholtz), murus avec flumen et cauda, tuba.
+- [ ] Orographique : mur de foehn (bloqué sur la crête au vent), nuage en bannière (sous le vent d'un pic), mer de nuages (St / Sc piégé sous une inversion dans une vallée).
+- [ ] Anthropiques : traînées de condensation (persistantes si < -40 °C et sursaturé / glace), panaches de centrales.
+- [ ] Variétés : translucidus / opacus / perlucidus, undulatus, radiatus, duplicatus, intortus, vertebratus, lacunosus.
+- [ ] Optique : halo à 22° et parhélies dans les Cs, irisations (Ac, Cc, pileus).
+- [ ] Nuages nacrés (stratosphère, hiver polaire, < -78 °C) et noctulescents (mésosphère, été 50-70°, la nuit).
+- [ ] Nuage de condensation autour d'un avion transsonique.
+
 ## Radar et interface
 
 - [ ] Mode libre : radar plus zoomé par défaut.

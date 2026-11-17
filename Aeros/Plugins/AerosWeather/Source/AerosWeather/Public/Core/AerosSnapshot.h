@@ -13,7 +13,10 @@ struct FAerosSnapCell
 	float T = 15.f, Td = 5.f, RH = 0.5f, P = 1013.f, Tg = 15.f;
 	float Us = 0.f, Vs = 0.f, U850 = 0.f, V850 = 0.f;
 	float Visibility = 20000.f;
-	float CloudCover = 0.f, CloudBase = 1500.f, CloudTop = 2000.f, CloudWater = 0.f;
+	float CloudCover = 0.f, CloudBase = 1500.f, CloudTop = 2000.f, CloudWater = 0.f;   // low / vertical layer
+	float LowForm = 1.f;
+	float MidCover = 0.f, MidBase = 3000.f, MidTop = 3500.f, MidForm = 0.f;
+	float HighCover = 0.f, HighBase = 8000.f, HighTop = 9000.f, HighForm = 0.5f;
 	float PrecipRate = 0.f, Hail = 0.f, DBZ = -32.f, Lightning = 0.f;
 	float Conv = 0.f, W = 0.f, Meso = 0.f;
 	float CAPE = 0.f, CIN = 0.f, LCL = 0.f, LFC = 0.f, EL = 0.f, FZL = 3000.f, LI = 0.f;

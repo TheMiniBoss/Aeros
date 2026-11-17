@@ -42,6 +42,7 @@ struct FAerosCell
 	float Rain = 0.f;      // kg/m2 column precipitation-sized water/ice
 	float Conv = 0.f;      // 0-1 convective activity
 	float Meso = 0.f;      // 0-1 mesocyclone strength
+	float UpperRH = 0.5f;  // relative humidity w.r.t. ice near 300 hPa (moves with the 500 hPa wind): cirrus
 	float ColdPool = 0.f;  // K (<=0) outflow temperature anomaly
 	float Tg = 15.f;       // C ground skin
 	float Wet = 0.f;       // 0-1
@@ -74,7 +75,10 @@ struct FAerosCell
 	float PrecipRate = 0.f;    // mm/h at ground
 	float Hail = 0.f;          // mm at ground
 	float DBZ = -32.f;
-	float CloudCover = 0.f, CloudBase = 1500.f, CloudTop = 2000.f;
+	float CloudCover = 0.f, CloudBase = 1500.f, CloudTop = 2000.f;   // low / vertical layer (Core/AerosCloudTypes.h)
+	float LowForm = 1.f;                                              // 0 sheet (St, Ns) .. 0.5 Sc .. 1 cells (Cu)
+	float MidCover = 0.f, MidBase = 3000.f, MidTop = 3500.f, MidForm = 0.f;      // As (0) .. Ac (1)
+	float HighCover = 0.f, HighBase = 8000.f, HighTop = 9000.f, HighForm = 0.5f; // Cs (0) .. Ci (0.5) .. Cc (1)
 	float Div = 0.f, Div850 = 0.f, Vort = 0.f;
 	float Lightning = 0.f;     // flashes/min
 	float Visibility = 20000.f;

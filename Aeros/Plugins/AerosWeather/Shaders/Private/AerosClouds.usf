@@ -239,6 +239,9 @@ void TraceCS(uint2 Id : SV_DispatchThreadID)
 					b *= 0.8;
 					c *= 0.5;
 				}
+				// Powder: thin edges send less light toward the viewer than the core (the dark rims and creases
+				// that keep a cumulus from looking like cotton), most when looking away from the sun.
+				S *= lerp(lerp(0.5, 1.0, 1.0 - exp(-Sigma * 0.25)), 1.0, saturate(CosT * 0.5 + 0.5) * 0.7);
 				// Sky light, dimmer low in the cloud and under thick cloud.
 				float UpOd = OpticalDepthAlong(P, float3(0, 0, 1), t, 1.0, UpSeg, 1);
 				// Side faces still see the horizon sky: the column above only takes away up to 75 %.
